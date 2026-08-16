@@ -1,0 +1,135 @@
+// Command conductor is the operator and developer CLI (DESIGN.md §33).
+//
+// Every command accepts --json so hooks, wrappers, and scripts can consume it without
+// parsing terminal text (§33). Human output is the default because the primary user is a
+// person deciding whether to start work.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/adamburan/conductor/internal/client"
+)
+
+const usage = `conductor — coordinate humans and coding agents on one repository
+
+Setup
+  conductor init                     scaffold .conductor/ into this repository
+  conductor login                    save endpoint, token, and project
+  conductor doctor                   report which harnesses are installed
+  conductor dashboard                print a ready-to-open dashboard link
+
+Coordination
+  conductor status                   what is in flight, and what is contested
+  conductor presence                 who is working on what, right now
+  conductor check                    can I start this work? (run before you edit)
+
+Work
+  conductor task list                open tasks
+  conductor task show <ref>          one task
+  conductor task create              file new work
+  conductor task claim <ref|--next>  take a task and its territory
+  conductor task release <ref>       hand a task back
+  conductor task handoff <ref>       hand off to another harness
+  conductor task export <ref>        write the Markdown task card
+
+Territory
+  conductor scope add <ref> <resource>   reserve a resource
+  conductor scope list                   active reservations
+  conductor conflicts                    open conflicts and what to do about them
+
+Execution
+  conductor worker                   run a runner: claim, execute, verify, report
+  conductor wrap <harness> [args…]   register a session, heartbeat, then launch a tool
+
+Run any command with -h for its flags.
+`
+
+func main() {
+	if len(os.Args) < 2 {
+		fmt.Print(usage)
+		os.Exit(2)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	args := os.Args[2:]
+	var err error
+
+	switch os.Args[1] {
+	case "init":
+		err = cmdInit(args)
+	case "login":
+		err = cmdLogin(ctx, args)
+	case "doctor":
+		err = cmdDoctor(ctx, args)
+	case "dashboard":
+		err = cmdDashboard(args)
+	case "status":
+		err = cmdStatus(ctx, args)
+	case "presence":
+		err = cmdPresence(ctx, args)
+	case "check":
+		err = cmdCheck(ctx, args)
+	case "conflicts":
+		err = cmdConflicts(ctx, args)
+	case "task":
+		err = cmdTask(ctx, args)
+	case "scope":
+		err = cmdScope(ctx, args)
+	case "worker":
+		err = cmdWorker(ctx, args)
+	case "wrap":
+		err = cmdWrap(ctx, args)
+	case "help", "-h", "--help":
+		fmt.Print(usage)
+		return
+	default:
+		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", os.Args[1], usage)
+		os.Exit(2)
+	}
+
+	if err != nil {
+		// A coordination refusal is not a crash. It exits non-zero so scripts stop, but it
+		// prints as guidance rather than as a stack of internal detail.
+		var apiErr *client.APIError
+		if errors.As(err, &apiErr) && apiErr.Blocked() {
+			fmt.Fprintf(os.Stderr, "\n%s\n", apiErr.Message)
+			os.Exit(3)
+		}
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+}
+
+// emit prints a value as JSON, for --json mode.
+func emit(v any) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
+}
+
+func mustClient() (*client.Client, client.Credentials, error) {
+	api, creds := client.FromEnvironment()
+	if creds.Token == "" {
+		return nil, creds, errors.New("not logged in: run `conductor login --token …`")
+	}
+	return api, creds, nil
+}
+
+func projectRef(override string, creds client.Credentials) (string, error) {
+	if override != "" {
+		return override, nil
+	}
+	if creds.Project != "" {
+		return creds.Project, nil
+	}
+	return "", errors.New("no project selected: pass --project or set one with `conductor login --project …`")
+}

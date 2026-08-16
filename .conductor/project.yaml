@@ -1,0 +1,42 @@
+apiVersion: conductor.dev/v1alpha1
+kind: Project
+metadata:
+  id: conductor
+  displayName: Conductor
+
+repository:
+  canonicalRemote: ""
+  defaultBranch: main
+  worktreeRoot: .conductor/runtime/worktrees
+
+coordination:
+  defaultVisibility: team_summary
+  claimMode: cooperative          # advisory | cooperative | strict
+  leaseTtlSeconds: 90
+  heartbeatSeconds: 20
+  offlineGraceSeconds: 45
+  startupTimeoutSeconds: 120
+  stalledTurnTimeoutSeconds: 900
+  duplicatePolicy: block_exact_warn_similar
+  writeConflictPolicy: block
+  readWriteConflictPolicy: warn
+
+execution:
+  isolation: git-worktree
+  sandbox: none                   # none | container-preferred
+  networkDefault: deny
+  maxConcurrentAttempts: 4
+
+workflow:
+  file: .conductor/WORKFLOW.md
+
+artifacts:
+  backend: filesystem
+  root: .conductor/runtime/artifacts
+  retentionDays: 30
+
+privacy:
+  transcriptStorage: local_only
+  publishModelIdentity: true
+  publishHarnessIdentity: true
+  allowSemanticDuplicateAnalysis: false

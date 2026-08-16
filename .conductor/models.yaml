@@ -1,0 +1,97 @@
+# Model aliases and capability policy.
+#
+# Policies reference roles, never concrete model names, so the catalog can change without
+# editing WORKFLOW.md or any task. Aliases resolve against the model_profiles catalog at
+# attempt start, and the resolution is recorded on the attempt.
+
+models:
+  defaultAlias: worker.general
+
+  aliases:
+    planner.frontier:
+      capability_floor: [architecture, long_context, strong_tool_use]
+      default_effort: high
+      tier: T3
+    worker.fast:
+      capability_floor: [code_edit, tests]
+      default_effort: low
+      tier: T1
+    worker.general:
+      capability_floor: [code_edit, tests, multi_file]
+      default_effort: medium
+      tier: T2
+    verifier.cheap:
+      capability_floor: [read_diff, test_analysis]
+      default_effort: low
+      tier: T1
+    reviewer.strong:
+      capability_floor: [code_review, architecture]
+      default_effort: high
+      tier: T3
+
+  # Ordered cheapest -> most capable. Escalation walks up this ladder; de-escalation walks
+  # down it. A task's capability or security floor is never crossed by either direction.
+  ladder: [worker.fast, worker.general, planner.frontier]
+
+# Concrete profiles. Cost figures are USD per million tokens and should be refreshed from a
+# model catalog rather than trusted indefinitely. Subscription-based harnesses expose
+# capacity rather than per-token cost; those are marked `billing: capacity`.
+profiles:
+  - alias: planner.frontier
+    harness: claude
+    provider: anthropic
+    model: claude-opus-5
+    reasoning_effort: high
+    capabilities: [architecture, long_context, strong_tool_use, code_edit, code_review]
+    billing: tokens
+
+  - alias: worker.general
+    harness: claude
+    provider: anthropic
+    model: claude-sonnet-5
+    reasoning_effort: medium
+    capabilities: [code_edit, tests, multi_file, read_diff]
+    billing: tokens
+
+  - alias: worker.fast
+    harness: claude
+    provider: anthropic
+    model: claude-haiku-4-5-20251001
+    reasoning_effort: low
+    capabilities: [code_edit, tests, read_diff]
+    billing: tokens
+
+  - alias: verifier.cheap
+    harness: claude
+    provider: anthropic
+    model: claude-haiku-4-5-20251001
+    reasoning_effort: low
+    capabilities: [read_diff, test_analysis]
+    billing: tokens
+
+  - alias: reviewer.strong
+    harness: claude
+    provider: anthropic
+    model: claude-opus-5
+    reasoning_effort: high
+    capabilities: [code_review, architecture, long_context]
+    billing: tokens
+
+  # Codex and OpenCode profiles are disabled until the operator supplies model ids for their
+  # own installation. The design forbids hardcoding provider model names we have not
+  # verified, so these are declared but inert.
+  - alias: worker.general
+    harness: codex
+    provider: openai
+    model: ""
+    reasoning_effort: medium
+    capabilities: [code_edit, tests, multi_file]
+    enabled: false
+
+  - alias: worker.fast
+    harness: opencode
+    provider: ""
+    model: ""
+    reasoning_effort: low
+    capabilities: [code_edit, tests]
+    enabled: false
