@@ -1,0 +1,20 @@
+# build output
+/bin/
+/dist/
+*.test
+*.out
+
+# conductor runtime state: worktrees, materialized task cards, local session files
+.conductor/runtime/
+.conductor/generated/
+/.claude/worktrees/
+
+# local env
+.env
+.env.local
+*.local.yaml
+
+# editors / os
+.DS_Store
+.idea/
+.vscode/

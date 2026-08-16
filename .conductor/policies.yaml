@@ -1,0 +1,71 @@
+# Hard routing and coordination policy. Evaluated deterministically, before any model-based
+# classification. A model recommendation may never route around a rule in this file.
+
+router:
+  rules:
+    - id: security-floor
+      when: task.security_sensitive || task.cryptography_sensitive
+      require_tier: T4
+      require_independent_review: true
+      human_merge_approval: true
+
+    - id: migration-serialization
+      when: task.schema_or_migration
+      require_scope: "migration:*"
+      max_parallel_writers: 1
+      require_rollback_plan: true
+
+    - id: trivial-work
+      when: task.estimated_files <= 2 && task.acceptance_ambiguity < 0.2
+      prefer_tier: T1
+
+    - id: retry-escalation
+      when: attempt.failures >= 2
+      escalate_one_tier: true
+
+    - id: scope-drift-replan
+      when: attempt.scope_growth_ratio > 1.5
+      require_replan: true
+
+  # Feature detection: how deterministic task features are inferred from scopes and paths.
+  features:
+    security_sensitive_paths:
+      - "dir:internal/auth"
+      - "dir:internal/privacy"
+      - "path:internal/api/auth.go"
+    cryptography_sensitive_paths:
+      - "dir:internal/privacy"
+    schema_or_migration_paths:
+      - "dir:migrations"
+    infra_paths:
+      - "dir:.github/workflows"
+      - "path:docker-compose.yml"
+
+conflict:
+  duplicate_exact: block_duplicate            # identical fingerprint or external_ref
+  duplicate_similar_threshold: 0.60           # MinHash similarity for suggest_join
+  duplicate_similar_action: allow_with_warning
+  write_write: block_conflict
+  read_write: allow_with_warning
+  protected_any: block_conflict
+  enforcement_level: cooperative              # advisory | cooperative | strict_harness
+
+budget:
+  defaults:
+    class: medium
+    max_input_tokens: 250000
+    max_output_tokens: 60000
+    max_reasoning_level: high
+    max_wall_clock_seconds: 3600
+    max_attempts: 4
+    max_estimated_cost_usd: null
+  project:
+    monthly_usd: 400
+    downshift_at: 0.75      # fraction of budget at which non-sensitive work drops a tier
+    pause_at: 0.95          # fraction at which dispatch stops
+
+concurrency:
+  max_concurrent_attempts: 4
+  max_per_principal: 2
+  max_per_runner: 4
+  max_protected_writers: 1

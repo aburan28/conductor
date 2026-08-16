@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Conductor</title>
+<style>
+  :root {
+    --bg: #fbfbfa; --panel: #ffffff; --border: #e4e2dd; --text: #1c1b19;
+    --muted: #6b6862; --accent: #2f6f4e; --warn: #9a6a1a; --danger: #a33a2a;
+    --chip: #f0efec; --shadow: 0 1px 2px rgba(0,0,0,.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16171a; --panel: #1d1f23; --border: #2e3238; --text: #e8e6e3;
+      --muted: #9a9891; --accent: #6bbd8e; --warn: #d9a441; --danger: #e0705c;
+      --chip: #262a2f; --shadow: none;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+    padding: 18px 24px; border-bottom: 1px solid var(--border); background: var(--panel);
+    position: sticky; top: 0; z-index: 10;
+  }
+  h1 { font-size: 17px; margin: 0; font-weight: 650; letter-spacing: -.01em; }
+  .sub { color: var(--muted); font-size: 12.5px; }
+  .status-dot {
+    display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--muted); margin-right: 6px; vertical-align: middle;
+  }
+  .status-dot.live { background: var(--accent); }
+  main { padding: 20px 24px 60px; display: grid; gap: 20px; max-width: 1500px; }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); }
+  section > h2 {
+    margin: 0; padding: 12px 16px; font-size: 12px; text-transform: uppercase;
+    letter-spacing: .07em; color: var(--muted); border-bottom: 1px solid var(--border);
+    font-weight: 600;
+  }
+  .body { padding: 14px 16px; }
+  .empty { color: var(--muted); font-style: italic; padding: 6px 0; }
+
+  .row { display: flex; gap: 12px; align-items: flex-start; padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .row:last-child { border-bottom: 0; }
+  .who { min-width: 150px; font-weight: 600; }
+  .who small { display: block; font-weight: 400; color: var(--muted); }
+  .what { flex: 1; min-width: 0; }
+  .chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
+  .chip {
+    background: var(--chip); border: 1px solid var(--border); border-radius: 5px;
+    padding: 1px 7px; font-size: 11.5px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--muted); white-space: nowrap;
+  }
+  .state { font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  .state.working, .state.running { color: var(--accent); }
+  .state.blocked, .state.blocked_conflict { color: var(--danger); }
+  .state.stale, .state.offline_grace { color: var(--warn); }
+
+  .board { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; }
+  .col h3 { margin: 0 0 8px; font-size: 12px; color: var(--muted); font-weight: 600; }
+  .card {
+    border: 1px solid var(--border); border-radius: 7px; padding: 9px 10px;
+    margin-bottom: 8px; background: var(--bg);
+  }
+  .card .ref { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; color: var(--muted); }
+  .card .title { font-weight: 550; margin: 2px 0 4px; }
+  .card .redacted { color: var(--muted); font-style: italic; font-weight: 400; }
+
+  .conflict { border-left: 3px solid var(--warn); padding-left: 10px; margin-bottom: 12px; }
+  .conflict.high, .conflict.critical { border-left-color: var(--danger); }
+  .conflict .headline { font-weight: 600; }
+  .conflict .advice { color: var(--muted); font-size: 13px; margin-top: 2px; }
+  .sev {
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em;
+    padding: 1px 6px; border-radius: 4px; background: var(--chip); color: var(--muted);
+  }
+  .sev.high, .sev.critical { color: var(--danger); }
+
+  .log { font-family: ui-monospace, Menlo, monospace; font-size: 12px; max-height: 260px; overflow-y: auto; }
+  .log div { padding: 2px 0; color: var(--muted); }
+  .log .t { color: var(--text); }
+
+  .privacy {
+    font-size: 12.5px; color: var(--muted); padding: 10px 16px;
+    border-top: 1px solid var(--border); background: var(--bg); border-radius: 0 0 10px 10px;
+  }
+  code { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+  .setup { padding: 40px 24px; max-width: 620px; }
+  .setup pre {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; overflow-x: auto; font-size: 12.5px;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Conductor</h1>
+  <span class="sub"><span class="status-dot" id="dot"></span><span id="conn">connecting…</span></span>
+  <span class="sub" id="project"></span>
+  <span class="sub" id="counts"></span>
+</header>
+
+<main id="main">
+  <section>
+    <h2>Live presence — who is working on what</h2>
+    <div class="body" id="presence"><div class="empty">No live sessions.</div></div>
+    <div class="privacy">
+      This view shows sessions, tasks, and reserved scopes. It does not show prompts,
+      model output, or conversation — the API has no field that can carry them.
+    </div>
+  </section>
+
+  <section>
+    <h2>Conflict radar</h2>
+    <div class="body" id="conflicts"><div class="empty">No open conflicts.</div></div>
+  </section>
+
+  <section>
+    <h2>Task board</h2>
+    <div class="body"><div class="board" id="board"></div></div>
+  </section>
+
+  <section>
+    <h2>Reserved territory</h2>
+    <div class="body" id="reservations"><div class="empty">Nothing reserved.</div></div>
+  </section>
+
+  <section>
+    <h2>Event stream</h2>
+    <div class="body log" id="log"></div>
+  </section>
+</main>
+
+<script>
+const qs = new URLSearchParams(location.search);
+const token = qs.get('token') || localStorage.getItem('conductor_token') || '';
+const project = qs.get('project') || localStorage.getItem('conductor_project') || '';
+if (token) localStorage.setItem('conductor_token', token);
+if (project) localStorage.setItem('conductor_project', project);
+
+const el = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+if (!token || !project) {
+  el('main').innerHTML = `
+    <div class="setup">
+      <h2 style="border:0;padding:0;text-transform:none;letter-spacing:0;font-size:16px;color:var(--text)">Connect the dashboard</h2>
+      <p class="sub">Open this page with a token and project, or run:</p>
+      <pre>conductor dashboard</pre>
+      <p class="sub">which prints a ready-made link. You can also append them by hand:</p>
+      <pre>?token=cdt_...&amp;project=my-project</pre>
+    </div>`;
+} else {
+  start();
+}
+
+async function api(path) {
+  const r = await fetch(path, { headers: { 'Authorization': 'Bearer ' + token } });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+function relTime(iso) {
+  const secs = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  if (secs < 60) return Math.round(secs) + 's ago';
+  if (secs < 3600) return Math.round(secs / 60) + 'm ago';
+  return Math.round(secs / 3600) + 'h ago';
+}
+
+function renderPresence(entries) {
+  if (!entries || !entries.length) {
+    el('presence').innerHTML = '<div class="empty">No live sessions.</div>';
+    return;
+  }
+  el('presence').innerHTML = entries.map(e => `
+    <div class="row">
+      <div class="who">
+        ${esc(e.principal)}
+        <small>${esc(e.harness)}${e.sponsored_by ? ' · for ' + esc(e.sponsored_by) : ''}</small>
+      </div>
+      <div class="what">
+        <span class="state ${esc(e.state)}">${esc(e.state)}</span>
+        ${e.task_ref ? ' · <strong>' + esc(e.task_ref) + '</strong>' : ''}
+        ${e.task_title ? ' — ' + esc(e.task_title)
+          : (e.task_ref ? ' — <span class="card"><span class="redacted">private work</span></span>' : '')}
+        ${e.branch ? '<div class="chips"><span class="chip">' + esc(e.branch) + '</span></div>' : ''}
+        ${(e.scopes && e.scopes.length)
+          ? '<div class="chips">' + e.scopes.map(s => '<span class="chip">' + esc(s) + '</span>').join('') + '</div>'
+          : ''}
+      </div>
+      <div class="sub">${relTime(e.last_heartbeat)}</div>
+    </div>`).join('');
+}
+
+function renderConflicts(list) {
+  if (!list || !list.length) {
+    el('conflicts').innerHTML = '<div class="empty">No open conflicts.</div>';
+    return;
+  }
+  el('conflicts').innerHTML = list.map(c => `
+    <div class="conflict ${esc(c.severity)}">
+      <div class="headline">
+        <span class="sev ${esc(c.severity)}">${esc(c.severity)}</span>
+        ${esc(c.mine.task_ref)} ↔ ${esc(c.other.task_ref)}
+        ${c.other.owner ? '<span class="sub"> (' + esc(c.other.owner) + ')</span>' : ''}
+      </div>
+      <div class="advice">${esc(c.reason || c.kind)} → <strong>${esc(c.suggestion)}</strong></div>
+      ${(c.resources && c.resources.length)
+        ? '<div class="chips">' + c.resources.map(r => '<span class="chip">' + esc(r) + '</span>').join('') + '</div>'
+        : ''}
+    </div>`).join('');
+}
+
+const COLUMNS = [
+  ['ready', ['ready', 'proposed']],
+  ['in flight', ['claimed', 'running']],
+  ['blocked', ['blocked_dependency', 'blocked_conflict', 'blocked_input']],
+  ['verifying', ['verifying', 'review_required', 'merging']],
+  ['done', ['done']],
+];
+
+function renderBoard(tasks) {
+  el('board').innerHTML = COLUMNS.map(([label, statuses]) => {
+    const items = (tasks || []).filter(t => statuses.includes(t.status));
+    return `<div class="col"><h3>${esc(label)} · ${items.length}</h3>` +
+      (items.length ? items.map(t => `
+        <div class="card">
+          <div class="ref">${esc(t.ref)} · ${esc(t.owner || '')}</div>
+          <div class="title">${t.title ? esc(t.title) : '<span class="redacted">private work</span>'}</div>
+          ${(t.scopes && t.scopes.length)
+            ? '<div class="chips">' + t.scopes.slice(0, 4).map(s => '<span class="chip">' + esc(s) + '</span>').join('') + '</div>'
+            : ''}
+        </div>`).join('') : '<div class="empty">—</div>') +
+      `</div>`;
+  }).join('');
+}
+
+function renderReservations(list) {
+  if (!list || !list.length) {
+    el('reservations').innerHTML = '<div class="empty">Nothing reserved.</div>';
+    return;
+  }
+  el('reservations').innerHTML = '<div class="chips">' + list.map(r =>
+    `<span class="chip" title="${esc(r.mode)}">${esc(r.resource_type)}:${esc(r.resource_key)}</span>`
+  ).join('') + '</div>';
+}
+
+function logEvent(e) {
+  const log = el('log');
+  const line = document.createElement('div');
+  const when = new Date(e.occurred_at || Date.now()).toLocaleTimeString();
+  const ref = (e.payload && e.payload.task_ref) ? e.payload.task_ref + ' ' : '';
+  line.innerHTML = `${esc(when)} <span class="t">${esc(e.type)}</span> ${esc(ref)}`;
+  log.prepend(line);
+  while (log.childNodes.length > 200) log.removeChild(log.lastChild);
+}
+
+async function refresh() {
+  try {
+    const [status, reservations] = await Promise.all([
+      api(`/v1/projects/${encodeURIComponent(project)}/status`),
+      api(`/v1/projects/${encodeURIComponent(project)}/reservations`),
+    ]);
+    el('project').textContent = status.project || project;
+    renderPresence(status.presence);
+    renderConflicts(status.conflicts);
+    renderBoard([...(status.active || []), ...(status.ready || [])]);
+    renderReservations(reservations.reservations);
+    el('counts').textContent = Object.entries(status.counts || {})
+      .map(([k, v]) => `${k} ${v}`).join(' · ');
+  } catch (err) {
+    el('conn').textContent = 'error: ' + err.message;
+  }
+}
+
+function start() {
+  refresh();
+  setInterval(refresh, 5000);
+
+  const stream = new EventSource(
+    `/v1/projects/${encodeURIComponent(project)}/events/stream?token=${encodeURIComponent(token)}`);
+  stream.onopen = () => {
+    el('dot').classList.add('live');
+    el('conn').textContent = 'live';
+  };
+  stream.onerror = () => {
+    el('dot').classList.remove('live');
+    el('conn').textContent = 'reconnecting…';
+  };
+  stream.onmessage = ev => { try { logEvent(JSON.parse(ev.data)); } catch (_) {} };
+  // Named events arrive with their own type, so subscribe generically.
+  ['task.claimed','task.released','task.handoff','task.blocked','task.unblocked',
+   'attempt.created','attempt.progress','attempt.stalled','attempt.evidence',
+   'lease.expired','budget.downshift','budget.exhausted'].forEach(name =>
+    stream.addEventListener(name, ev => {
+      try { logEvent(JSON.parse(ev.data)); refresh(); } catch (_) {}
+    }));
+}
+</script>
+</body>
+</html>
