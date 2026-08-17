@@ -198,7 +198,52 @@ for banned in prompt transcript conversation reasoning; do
 done
 note "presence shows principal, harness, branch, and heartbeat — and nothing else"
 
-step "13. Auth throttling protects the credential endpoint"
+step "13. Work is offered to a session that meets a capability floor"
+# Two sessions, same person, different models: one cheap, one frontier. The catalog decides
+# what each is worth — the session's own claim about its tier is ignored.
+CHEAP_SESSION=$(curl -s -X POST -H "Authorization: Bearer $BOB_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"harness":"claude","capabilities":{"model":"claude-haiku-4-5-20251001","reasoning_effort":"low","tier":"T4"}}' \
+  "$ENDPOINT/v1/projects/$PROJECT/sessions")
+STRONG_SESSION=$(curl -s -X POST -H "Authorization: Bearer $ALICE_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"harness":"claude","capabilities":{"model":"claude-opus-5","reasoning_effort":"high","max_reasoning_effort":"xhigh"}}' \
+  "$ENDPOINT/v1/projects/$PROJECT/sessions")
+STRONG_ID=$(field id "$STRONG_SESSION")
+[[ -n "$STRONG_ID" ]] || fail "could not register the frontier session"
+
+# The cheap session declared T4. The catalog says haiku is T1, and the catalog wins.
+printf '%s' "$CHEAP_SESSION" | grep -q '"tier": *"T1"' \
+  || fail "a session promoted itself past the catalog: $CHEAP_SESSION"
+
+CAPS=$(alice capabilities --json)
+printf '%s' "$CAPS" | grep -q '"max_reasoning_effort": *"xhigh"' \
+  || fail "the inventory does not report the xhigh ceiling"
+
+alice task create --title "Design the escalation ladder" >/dev/null
+ASSIGN=$(alice task assign T-4 --require-tier T3 --require-effort xhigh --json)
+printf '%s' "$ASSIGN" | grep -q "$STRONG_ID" \
+  || fail "work was not offered to the frontier session: $ASSIGN"
+printf '%s' "$ASSIGN" | grep -q 'is below the required' \
+  || fail "the refusal of the cheaper session was not explained: $ASSIGN"
+
+# A floor nothing live can meet is refused with the ceiling that actually exists, not a
+# silent downgrade to whoever is free.
+set +e
+UNPLACED=$(alice task assign T-3 --require-tier T4 --require-effort max --json 2>&1)
+UNPLACED_CODE=$?
+set -e
+[[ "$UNPLACED_CODE" == "3" ]] || fail "an unservable floor should exit 3, got $UNPLACED_CODE"
+printf '%s' "$UNPLACED" | grep -q 'max_tier' \
+  || fail "the refusal did not report what is actually available: $UNPLACED"
+
+# The offer reaches the session it was made to, and nobody else's.
+INBOX=$(alice inbox --session "$STRONG_ID" --json)
+printf '%s' "$INBOX" | grep -q '"task_ref": *"T-4"' || fail "the offer is not in the session's inbox"
+DENIED=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $BOB_TOKEN" \
+  "$ENDPOINT/v1/sessions/$STRONG_ID/assignments")
+[[ "$DENIED" == "404" ]] || fail "another principal could read the inbox ($DENIED)"
+note "T-4 offered to the xhigh-capable session; a T4/max floor is refused with the real ceiling"
+
+step "14. Auth throttling protects the credential endpoint"
 for _ in $(seq 1 12); do
   curl -s -o /dev/null -H "Authorization: Bearer cdt_wrong" "$ENDPOINT/v1/whoami" || true
 done
@@ -208,7 +253,7 @@ VALID=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $ALICE_
 [[ "$VALID" == "200" ]] || fail "a valid token was throttled ($VALID); one bad actor would lock out a shared NAT"
 note "bad credentials throttled, good ones unaffected"
 
-step "14. Project status"
+step "15. Project status"
 alice status
 
 printf '\n\033[32mAll end-to-end checks passed.\033[0m\n'

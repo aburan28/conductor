@@ -36,6 +36,11 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /v1/projects/{project}/sessions", auth(s.registerSession))
 	m.HandleFunc("POST /v1/sessions/{session}/heartbeat", auth(s.heartbeatSession))
 	m.HandleFunc("POST /v1/sessions/{session}/close", auth(s.closeSession))
+	m.HandleFunc("POST /v1/sessions/{session}/capabilities", auth(s.setSessionCapabilities))
+	m.HandleFunc("GET /v1/sessions/{session}/assignments", auth(s.sessionAssignments))
+	m.HandleFunc("POST /v1/assignments/{assignment}/respond", auth(s.respondToAssignment))
+	m.HandleFunc("GET /v1/projects/{project}/capabilities", auth(s.projectCapabilities))
+	m.HandleFunc("POST /v1/tasks/{task}/assign", auth(s.assignTask))
 
 	m.HandleFunc("POST /v1/projects/{project}/intents/check", auth(s.checkIntent))
 	m.HandleFunc("POST /v1/projects/{project}/work/start", auth(s.startWork))
@@ -171,14 +176,15 @@ func (s *Server) listMembers(w http.ResponseWriter, r *http.Request, p domain.Pr
 // ---------------------------------------------------------------------------
 
 type registerSessionBody struct {
-	Harness        string            `json:"harness"`
-	HarnessVersion string            `json:"harness_version"`
-	MachineID      string            `json:"machine_id"`
-	BaseSHA        string            `json:"base_sha"`
-	Branch         string            `json:"branch"`
-	WorktreePath   string            `json:"worktree_path"`
-	Visibility     domain.Visibility `json:"visibility"`
-	RunnerID       domain.ID         `json:"runner_id"`
+	Harness        string                     `json:"harness"`
+	HarnessVersion string                     `json:"harness_version"`
+	MachineID      string                     `json:"machine_id"`
+	BaseSHA        string                     `json:"base_sha"`
+	Branch         string                     `json:"branch"`
+	WorktreePath   string                     `json:"worktree_path"`
+	Visibility     domain.Visibility          `json:"visibility"`
+	RunnerID       domain.ID                  `json:"runner_id"`
+	Capabilities   domain.SessionCapabilities `json:"capabilities"`
 }
 
 func (s *Server) registerSession(w http.ResponseWriter, r *http.Request, p domain.Principal) {
@@ -195,18 +201,217 @@ func (s *Server) registerSession(w http.ResponseWriter, r *http.Request, p domai
 	if body.Harness == "" {
 		body.Harness = "cli"
 	}
+	// What the session declared is resolved against the org catalog before it is stored, so
+	// the tier it will be selected on is the catalog's opinion of that model, not its own.
+	caps, err := s.svc.ResolveCapabilities(r.Context(), project.OrganizationID, body.Harness, body.Capabilities)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
 	session, err := s.store.RegisterSession(r.Context(), db.RegisterSessionParams{
 		ProjectID: project.ID, PrincipalID: p.ID, RunnerID: body.RunnerID,
 		Harness: body.Harness, HarnessVersion: body.HarnessVersion,
 		MachineID: body.MachineID, BaseSHA: body.BaseSHA, Branch: body.Branch,
 		WorktreePath: body.WorktreePath, Visibility: body.Visibility,
-		TTL: project.Config.LeaseTTL.OrDefault(90 * time.Second),
+		Capabilities: caps,
+		TTL:          project.Config.LeaseTTL.OrDefault(90 * time.Second),
 	})
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
 	s.ok(w, r, http.StatusCreated, session)
+}
+
+// setSessionCapabilities updates what a live session advertises, for when someone switches
+// model or raises effort without restarting the session.
+func (s *Server) setSessionCapabilities(w http.ResponseWriter, r *http.Request, p domain.Principal) {
+	session, err := s.store.GetSession(r.Context(), r.PathValue("session"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if session.PrincipalID != p.ID {
+		s.fail(w, r, domain.ErrNotPermitted)
+		return
+	}
+	var body domain.SessionCapabilities
+	if err := decode(r, &body); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	project, err := s.store.GetProject(r.Context(), session.ProjectID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	caps, err := s.svc.ResolveCapabilities(r.Context(), project.OrganizationID, session.Harness, body)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	updated, err := s.store.SetSessionCapabilities(r.Context(), session.ID, caps)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.ok(w, r, http.StatusOK, updated)
+}
+
+func (s *Server) sessionAssignments(w http.ResponseWriter, r *http.Request, p domain.Principal) {
+	session, err := s.store.GetSession(r.Context(), r.PathValue("session"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	caller, err := s.svc.Authorize(r.Context(), p, session.ProjectID, domain.RoleObserver)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	assignments, err := s.svc.Inbox(r.Context(), caller, session.ID, r.URL.Query().Get("all") == "true")
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.ok(w, r, http.StatusOK, map[string]any{"assignments": assignments})
+}
+
+func (s *Server) respondToAssignment(w http.ResponseWriter, r *http.Request, p domain.Principal) {
+	assignment, err := s.store.GetAssignment(r.Context(), r.PathValue("assignment"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	caller, err := s.svc.Authorize(r.Context(), p, assignment.ProjectID, domain.RoleContributor)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	var body struct {
+		Accept bool   `json:"accept"`
+		Note   string `json:"note"`
+	}
+	if err := decode(r, &body); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	updated, err := s.svc.RespondToOffer(r.Context(), caller, assignment.ID, body.Accept, body.Note)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.ok(w, r, http.StatusOK, updated)
+}
+
+// ---------------------------------------------------------------------------
+// Capabilities and assignment
+// ---------------------------------------------------------------------------
+
+// requirementFromQuery reads a capability floor off the query string, so the read path stays
+// a GET: `?tier=T4&effort=xhigh&capability=architecture&capability=long_context`.
+func requirementFromQuery(r *http.Request) domain.CapabilityRequirement {
+	q := r.URL.Query()
+	return domain.CapabilityRequirement{
+		Tier:         domain.Tier(q.Get("tier")),
+		Effort:       domain.Effort(q.Get("effort")),
+		Capabilities: q["capability"],
+		Harness:      q.Get("harness"),
+		Model:        q.Get("model"),
+		Role:         domain.AgentRole(q.Get("role")),
+	}
+}
+
+func (s *Server) projectCapabilities(w http.ResponseWriter, r *http.Request, p domain.Principal) {
+	project, caller, err := s.project(r, p, domain.RoleObserver)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	req := requirementFromQuery(r)
+	if err := validateRequirement(req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	inv, err := s.svc.Capabilities(r.Context(), caller, project.ID, req)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.ok(w, r, http.StatusOK, inv)
+}
+
+type assignTaskBody struct {
+	SessionID   domain.ID                    `json:"session_id"`
+	Requirement domain.CapabilityRequirement `json:"require"`
+	TTLSeconds  int                          `json:"ttl_seconds"`
+}
+
+func (s *Server) assignTask(w http.ResponseWriter, r *http.Request, p domain.Principal) {
+	task, caller, err := s.taskFor(r, p, domain.RoleContributor)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	var body assignTaskBody
+	if err := decode(r, &body); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if err := validateRequirement(body.Requirement); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	result, err := s.svc.Assign(r.Context(), caller, coord.AssignParams{
+		TaskID:      task.ID,
+		Requirement: body.Requirement,
+		SessionID:   body.SessionID,
+		TTL:         time.Duration(body.TTLSeconds) * time.Second,
+	})
+	if err != nil {
+		// A capacity failure carries the rejection reasons, which are the actionable part:
+		// returning a bare 503 would hide "three sessions are up, none can do xhigh".
+		if errors.Is(err, domain.ErrCapacity) {
+			s.ok(w, r, http.StatusConflict, map[string]any{
+				"error": err.Error(), "code": "no_capable_session",
+				"rejected": result.Choice.Rejected, "inventory": result.Inventory,
+			})
+			return
+		}
+		s.fail(w, r, err)
+		return
+	}
+	s.ok(w, r, http.StatusCreated, result)
+}
+
+// validateRequirement rejects unknown tiers and efforts up front. A typo like `effort=xhig`
+// would otherwise silently match nothing and read as "nobody can do this".
+func validateRequirement(req domain.CapabilityRequirement) error {
+	if req.Tier != "" && !validTier(req.Tier) {
+		return fmt.Errorf("%w: unknown tier %q", domain.ErrInvalidEnum, req.Tier)
+	}
+	if req.Effort != "" && !validEffort(req.Effort) {
+		return fmt.Errorf("%w: unknown reasoning effort %q", domain.ErrInvalidEnum, req.Effort)
+	}
+	return nil
+}
+
+func validTier(t domain.Tier) bool {
+	for _, known := range []domain.Tier{domain.TierT0, domain.TierT1, domain.TierT2, domain.TierT3, domain.TierT4} {
+		if t == known {
+			return true
+		}
+	}
+	return false
+}
+
+func validEffort(e domain.Effort) bool {
+	for _, known := range domain.AllEfforts {
+		if e == known {
+			return true
+		}
+	}
+	return false
 }
 
 type heartbeatSessionBody struct {
@@ -997,9 +1202,12 @@ func (s *Server) finishWork(w http.ResponseWriter, r *http.Request, p domain.Pri
 
 type handoffBody struct {
 	fenceBody
-	ToHarness string               `json:"to_harness"`
-	ToRole    string               `json:"to_role"`
-	Bundle    domain.HandoffBundle `json:"bundle"`
+	ToHarness   string                       `json:"to_harness"`
+	ToRole      string                       `json:"to_role"`
+	Bundle      domain.HandoffBundle         `json:"bundle"`
+	Requirement domain.CapabilityRequirement `json:"require"`
+	SessionID   domain.ID                    `json:"session_id"`
+	TTLSeconds  int                          `json:"ttl_seconds"`
 }
 
 func (s *Server) createHandoff(w http.ResponseWriter, r *http.Request, p domain.Principal) {
@@ -1024,6 +1232,27 @@ func (s *Server) createHandoff(w http.ResponseWriter, r *http.Request, p domain.
 		fence = domain.Fence{TaskID: task.ID, AttemptID: lease.AttemptID,
 			LeaseID: lease.ID, FencingEpoch: lease.FencingEpoch}
 	}
+	// A handoff that names a capability floor is a delegation: package the work *and* offer
+	// it to a session that can meet the floor, in one call.
+	if !body.Requirement.Empty() {
+		if err := validateRequirement(body.Requirement); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		caller.SessionID = firstNonEmpty(body.SessionID, caller.SessionID)
+		result, err := s.svc.Delegate(r.Context(), caller, coord.DelegateParams{
+			Fence: fence, ToHarness: body.ToHarness, ToRole: body.ToRole,
+			Bundle: body.Bundle, Requirement: body.Requirement,
+			TTL: time.Duration(body.TTLSeconds) * time.Second,
+		})
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		s.ok(w, r, http.StatusCreated, result)
+		return
+	}
+
 	handoff, err := s.svc.Handoff(r.Context(), caller, fence, body.ToHarness, body.ToRole, body.Bundle)
 	if err != nil {
 		s.fail(w, r, err)

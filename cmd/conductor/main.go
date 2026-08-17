@@ -32,6 +32,7 @@ Setup
 Coordination
   conductor status                   what is in flight, and what is contested
   conductor presence                 who is working on what, right now
+  conductor capabilities             which models and effort levels are live right now
   conductor check                    can I start this work? (run before you edit)
 
 Work
@@ -41,6 +42,8 @@ Work
   conductor task claim <ref|--next>  take a task and its territory
   conductor task release <ref>       hand a task back
   conductor task handoff <ref>       hand off to another harness
+  conductor task assign <ref>        offer work to a session that meets a capability floor
+  conductor inbox                    work offered to this session
   conductor task export <ref>        write the Markdown task card
 
 Territory
@@ -84,6 +87,10 @@ func main() {
 		err = cmdStatus(ctx, args)
 	case "presence":
 		err = cmdPresence(ctx, args)
+	case "capabilities":
+		err = cmdCapabilities(ctx, args)
+	case "inbox":
+		err = cmdInbox(ctx, args)
 	case "check":
 		err = cmdCheck(ctx, args)
 	case "conflicts":
