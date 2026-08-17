@@ -260,6 +260,71 @@ func ProjectAttempt(v Viewer, a domain.Attempt, sponsor Owner, policy AttemptPol
 	return view
 }
 
+// SessionCapabilityView is what one principal may learn about what another's live session can
+// do (DESIGN.md §7.3, §20.2).
+//
+// Tier, reasoning effort, and capability tags are always published. They have to be: they are
+// what makes "hand this to something that can think harder" answerable at all, and they say
+// nothing about what anyone is working on. The concrete model name is execution identity and
+// follows the same publishModelIdentity switch as an attempt's — a team that does not want to
+// broadcast which vendor each person is paying for still gets working capability routing.
+type SessionCapabilityView struct {
+	SessionID     domain.ID           `json:"session_id"`
+	Principal     string              `json:"principal"`
+	Harness       string              `json:"harness"`
+	State         domain.SessionState `json:"state"`
+	Available     bool                `json:"available"`
+	Model         string              `json:"model,omitempty"`
+	Alias         string              `json:"alias,omitempty"`
+	Tier          domain.Tier         `json:"tier,omitempty"`
+	Effort        domain.Effort       `json:"reasoning_effort,omitempty"`
+	MaxEffort     domain.Effort       `json:"max_reasoning_effort,omitempty"`
+	Capabilities  []string            `json:"capabilities,omitempty"`
+	ContextWindow int                 `json:"context_window,omitempty"`
+	Roles         []string            `json:"roles,omitempty"`
+	Resolved      bool                `json:"resolved"`
+	ActiveTaskRef string              `json:"active_task_ref,omitempty"`
+	QueuedOffers  int                 `json:"queued_offers,omitempty"`
+	LastHeartbeat time.Time           `json:"last_heartbeat"`
+	MachineID     string              `json:"machine_id,omitempty"`
+}
+
+// ProjectSessionCapability applies visibility rules to one session's capability record.
+func ProjectSessionCapability(
+	v Viewer,
+	s domain.Session,
+	principal domain.Principal,
+	policy AttemptPolicy,
+) SessionCapabilityView {
+	caps := s.Capabilities
+	view := SessionCapabilityView{
+		SessionID: s.ID,
+		Principal: principal.Handle,
+		// Harness is already part of presence, so withholding it here would be theatre.
+		Harness:       s.Harness,
+		State:         s.State,
+		Available:     s.State.Accepting(),
+		Tier:          caps.Tier,
+		Effort:        caps.Effort,
+		MaxEffort:     caps.Ceiling(),
+		Capabilities:  caps.Capabilities,
+		ContextWindow: caps.ContextWindow,
+		Roles:         caps.Roles,
+		Resolved:      caps.Resolved,
+		LastHeartbeat: s.HeartbeatAt,
+	}
+
+	self := v.IsSelf(Owner{PrincipalID: principal.ID, Handle: principal.Handle})
+	if self || policy.PublishHarnessIdentity {
+		view.MachineID = s.MachineID
+	}
+	if self || policy.PublishModelIdentity {
+		view.Model = caps.Model
+		view.Alias = caps.Alias
+	}
+	return view
+}
+
 // ConflictView is what the other side of a conflict is told.
 type ConflictView struct {
 	ID         domain.ID           `json:"id"`

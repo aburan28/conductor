@@ -90,6 +90,7 @@ type TickReport struct {
 	StallsDetected  int
 	ConflictEdges   int
 	SessionsReaped  int
+	OffersExpired   int
 }
 
 // Tick runs one full cycle across all projects.
@@ -139,6 +140,16 @@ func (s *Scheduler) TickProject(ctx context.Context, project domain.Project) (Ti
 		return report, err
 	}
 	report.SessionsReaped = int(reaped)
+
+	// 2b. Close offers nobody answered, and offers held by a session that just went stale.
+	//     Reaping runs first for a reason: an offer is only released once the session
+	//     holding it is known to be gone, and until then the open-offer index would keep any
+	//     other session from being given the same task.
+	expired, err := s.store.ExpireAssignments(ctx)
+	if err != nil {
+		return report, err
+	}
+	report.OffersExpired = int(expired)
 
 	// 3. Stall detection, which is separate from lease expiry on purpose: a hung harness
 	//    should be visible to a human long before the system reclaims its work (§27.3).

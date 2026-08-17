@@ -47,6 +47,43 @@ Alice wrote "Implement the team invite flow with email invitations and acceptanc
 never saw either sentence in a form it can read back: both were reduced to HMAC'd token sets
 under a per-tenant key and compared with MinHash. Detection without disclosure.
 
+### Work goes where the capability is
+
+A session advertises what it is driving. Conductor resolves that against the organization's
+model catalog — so a session cannot promote itself by asserting a tier — and work that needs a
+particular ceiling is offered to a session that has one.
+
+```
+$ conductor capabilities
+
+demo
+
+  3 session(s), 2 accepting work
+  ceiling: tier T4, reasoning effort xhigh
+
+  alice        claude    online_idle
+       claude-opus-5 · tier T4 · effort xhigh (running high)
+  rachel       codex     working
+       gpt-5-codex · tier T2 · effort medium
+       on T-12
+
+$ conductor task assign T-42 --require-tier T4 --require-effort xhigh
+
+T-42 offered to alice (claude-opus-5 on claude).
+  requirement: tier ≥ T4, effort ≥ xhigh
+  1 of 3 live session(s) qualified
+
+  Not chosen:
+    rachel       tier T2 is below the required T4
+```
+
+A floor is a floor: an idle cheap session never wins a selection it does not qualify for.
+Above the floor the *cheapest* qualifying session wins, so a frontier session is still there
+when something actually needs it. From inside a run, an agent that hits work beyond its own
+ceiling calls `coord_delegate` — the same continuation bundle as a handoff, plus a floor the
+receiver must meet. If nothing live qualifies, the bundle is still written and the caller is
+told what the ceiling actually is.
+
 ### Privacy is structural, not procedural
 
 A teammate looking at Alice's private task sees:
@@ -133,6 +170,9 @@ conductor wrap claude                                     # register a session +
 conductor presence --watch                                # who is live, on what
 conductor conflicts                                       # what is contested and what to do
 conductor task handoff T-42 --to codex --next "write tests"
+conductor capabilities                                    # which models are live, and how hard they can think
+conductor task assign T-42 --require-tier T4 --require-effort xhigh
+conductor inbox                                           # work offered to this session
 ```
 
 Every command takes `--json`.
@@ -150,10 +190,11 @@ Every command takes `--json`.
 }
 ```
 
-Nine tools: `conductor_check_conflicts`, `coord_start_work`, `coord_get_work`,
+Eleven tools: `conductor_check_conflicts`, `coord_start_work`, `coord_get_work`,
 `coord_expand_scope`, `coord_report_progress`, `coord_publish_result`, `coord_finish_work`,
-`coord_handoff`, `coord_project_status`. Heartbeats are deliberately *not* an MCP tool — a
-model should never spend tokens telling the server it is still alive.
+`coord_handoff`, `coord_delegate`, `coord_capabilities`, `coord_project_status`. Heartbeats are
+deliberately *not* an MCP tool — a model should never spend tokens telling the server it is
+still alive.
 
 ---
 
@@ -210,6 +251,9 @@ Implemented and exercised by tests:
 - REST API, MCP gateway, CLI, session wrapper with heartbeat sidecar.
 - Scheduler: reconcile, session reaping, stall detection, dependency gating, budget events.
 - Adaptive router: hard floors, tiers, escalation, de-escalation, budget guard.
+- Session capability advertisement and capability-aware assignment: sessions declare the model
+  and reasoning effort they are running, the catalog decides what that is worth, and work with
+  a capability floor is offered to a session that clears it.
 - Harness drivers for Claude Code, Codex, OpenCode, a generic templated `exec` driver, and a
   deterministic in-process fake.
 - Isolated git worktrees, scope-drift detection, runner-attested validation, evidence manifests,

@@ -38,6 +38,10 @@ type Server struct {
 	// attempt, so an agent's tool calls are automatically fenced without it having to
 	// track the epoch itself.
 	fence domain.Fence
+	// session is the wrapping `conductor wrap` session, when there is one. It is what makes
+	// "work offered to me" answerable: without it the gateway knows the principal but not
+	// which of that principal's live sessions it is running inside.
+	session domain.ID
 
 	mu  sync.Mutex
 	out *bufio.Writer
@@ -45,10 +49,11 @@ type Server struct {
 
 // Options configures a gateway.
 type Options struct {
-	Endpoint string
-	Token    string
-	Project  string
-	Fence    domain.Fence
+	Endpoint  string
+	Token     string
+	Project   string
+	Fence     domain.Fence
+	SessionID domain.ID
 }
 
 // New builds a gateway from explicit options, filling gaps from the environment.
@@ -78,6 +83,7 @@ func New(opts Options) *Server {
 		api:     client.New(endpoint, token),
 		project: project,
 		fence:   fence,
+		session: firstNonEmpty(string(opts.SessionID), os.Getenv("CONDUCTOR_SESSION_ID")),
 	}
 }
 

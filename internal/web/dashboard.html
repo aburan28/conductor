@@ -115,6 +115,16 @@
   </section>
 
   <section>
+    <h2>Capability — what is connected, and how hard it can think</h2>
+    <div class="sub" id="ceiling"></div>
+    <div class="body" id="capabilities"><div class="empty">No live sessions.</div></div>
+    <div class="privacy">
+      Tier and reasoning effort are always shown: they are what makes "hand this to something
+      more capable" answerable. The concrete model name follows publishModelIdentity.
+    </div>
+  </section>
+
+  <section>
     <h2>Conflict radar</h2>
     <div class="body" id="conflicts"><div class="empty">No open conflicts.</div></div>
   </section>
@@ -197,6 +207,38 @@ function renderPresence(entries) {
     </div>`).join('');
 }
 
+function renderCapabilities(inv) {
+  const sessions = (inv && inv.sessions) || [];
+  const roll = (inv && inv.inventory) || {};
+  el('ceiling').textContent = sessions.length
+    ? `${roll.available || 0} of ${roll.sessions || 0} accepting work · ceiling tier ${roll.max_tier || '—'} at effort ${roll.max_reasoning_effort || '—'}`
+    : '';
+  if (!sessions.length) {
+    el('capabilities').innerHTML = '<div class="empty">No live sessions.</div>';
+    return;
+  }
+  el('capabilities').innerHTML = sessions.map(s => `
+    <div class="row">
+      <div class="who">
+        ${esc(s.principal)}
+        <small>${esc(s.harness || '')}</small>
+      </div>
+      <div class="what">
+        <span class="state ${esc(s.state)}">${esc(s.state)}</span>
+        ${s.available ? '' : ' · not accepting work'}
+        <div class="chips">
+          ${s.model ? '<span class="chip">' + esc(s.model) + '</span>' : ''}
+          ${s.tier ? '<span class="chip">tier ' + esc(s.tier) + '</span>' : ''}
+          ${s.max_reasoning_effort ? '<span class="chip">effort ' + esc(s.max_reasoning_effort) + '</span>' : ''}
+          ${(s.model && !s.resolved) ? '<span class="chip">not in catalog</span>' : ''}
+          ${s.active_task_ref ? '<span class="chip">on ' + esc(s.active_task_ref) + '</span>' : ''}
+          ${s.queued_offers ? '<span class="chip">' + esc(String(s.queued_offers)) + ' offer(s) waiting</span>' : ''}
+        </div>
+      </div>
+      <div class="sub">${relTime(s.last_heartbeat)}</div>
+    </div>`).join('');
+}
+
 function renderConflicts(list) {
   if (!list || !list.length) {
     el('conflicts').innerHTML = '<div class="empty">No open conflicts.</div>';
@@ -262,12 +304,14 @@ function logEvent(e) {
 
 async function refresh() {
   try {
-    const [status, reservations] = await Promise.all([
+    const [status, reservations, capabilities] = await Promise.all([
       api(`/v1/projects/${encodeURIComponent(project)}/status`),
       api(`/v1/projects/${encodeURIComponent(project)}/reservations`),
+      api(`/v1/projects/${encodeURIComponent(project)}/capabilities`),
     ]);
     el('project').textContent = status.project || project;
     renderPresence(status.presence);
+    renderCapabilities(capabilities);
     renderConflicts(status.conflicts);
     renderBoard([...(status.active || []), ...(status.ready || [])]);
     renderReservations(reservations.reservations);
