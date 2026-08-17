@@ -24,7 +24,9 @@ fmt:
 
 # Pure-logic tests; no database required.
 unit:
-	$(GO) test ./internal/selector/... ./internal/privacy/... ./internal/ledger/... ./internal/router/... ./internal/conflict/... ./internal/harness/...
+	$(GO) test ./internal/domain/... ./internal/selector/... ./internal/privacy/... \
+	          ./internal/router/... ./internal/resource/... ./internal/harness/... \
+	          ./internal/taskcard/... ./internal/config/...
 
 # Full suite; integration tests skip themselves unless DATABASE_URL points at a live db.
 test:

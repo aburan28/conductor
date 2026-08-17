@@ -355,7 +355,7 @@ func cmdConflicts(ctx context.Context, args []string) error {
 
 func cmdTask(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: conductor task <list|show|create|claim|release|handoff|export>")
+		return errors.New("usage: conductor task <list|show|create|claim|release|handoff|assign|export>")
 	}
 	sub, rest := args[0], args[1:]
 
@@ -372,6 +372,8 @@ func cmdTask(ctx context.Context, args []string) error {
 		return taskRelease(ctx, rest)
 	case "handoff":
 		return taskHandoff(ctx, rest)
+	case "assign":
+		return cmdTaskAssign(ctx, rest)
 	case "export":
 		return taskExport(ctx, rest)
 	default:
@@ -587,6 +589,8 @@ func taskHandoff(ctx context.Context, args []string) error {
 	to := fs.String("to", "", "target harness, e.g. codex")
 	nextAction := fs.String("next", "", "what the next session should do first")
 	note := fs.String("note", "", "one completed-work note")
+	tier := fs.String("require-tier", "", "offer the work to a session at this tier or above")
+	effort := fs.String("require-effort", "", "offer the work to a session that can run at this effort")
 	positional, err := parseFlags(fs, args)
 	if err != nil {
 		return err
@@ -607,13 +611,40 @@ func taskHandoff(ctx context.Context, args []string) error {
 	if *note != "" {
 		bundle["completed_work"] = []string{*note}
 	}
-	var out map[string]any
+	body := map[string]any{"to_harness": *to, "bundle": bundle}
+	// A handoff that names a floor is a delegation: the server packages the bundle and then
+	// offers the task to a session that clears the floor.
+	if *tier != "" || *effort != "" {
+		body["require"] = map[string]any{"tier": *tier, "reasoning_effort": *effort}
+	}
+
+	var out coord.DelegateResult
 	if err := api.Post(ctx, "/v1/tasks/"+positional[0]+"/handoff"+client.Query("project", ref),
-		map[string]any{"to_harness": *to, "bundle": bundle}, &out); err != nil {
+		body, &out); err != nil {
 		return err
 	}
+	target := *to
+	if target == "" {
+		target = "whoever picks it up next"
+	}
 	fmt.Printf("Handed %s off to %s. The bundle carries decisions and open questions, not your chat.\n",
-		positional[0], *to)
+		positional[0], target)
+	switch {
+	case out.Assignment != nil:
+		fmt.Printf("  Offered to %s (%s), which meets %s.\n",
+			out.Choice.Principal, orDash(out.Choice.Model), out.Assignment.Requirement.Describe())
+	case out.Unplaced != "":
+		// The bundle is written either way; say plainly that the work is sitting ready.
+		fmt.Printf("  Not offered to anyone: %s\n", out.Unplaced)
+		// Per-session reasons, not just the global ceiling: with `--to codex` the ceiling
+		// can look sufficient while every live session is on the wrong harness.
+		if out.Choice != nil {
+			for _, r := range out.Choice.Rejected {
+				fmt.Printf("    %-12s %s\n", r.Principal, r.Reason)
+			}
+		}
+		fmt.Println("  The task is ready for whoever can take it.")
+	}
 	return nil
 }
 
@@ -757,8 +788,18 @@ func cmdScope(ctx context.Context, args []string) error {
 // The heartbeat is a direct HTTP call from this process, not an MCP tool. A model should
 // never spend tokens telling the server it is still alive (§7.2).
 func cmdWrap(ctx context.Context, args []string) error {
+	// Capability flags are parsed off the front only. Everything from the harness name
+	// onwards belongs to the harness — `conductor wrap claude --model opus` must pass
+	// `--model opus` to Claude, not eat it here.
+	declared, args := parseWrapFlags(args)
 	if len(args) == 0 {
-		return errors.New("usage: conductor wrap <harness> [args…]")
+		return errors.New("usage: conductor wrap [--model M] [--effort E] <harness> [args…]")
+	}
+	// Without this, a mistyped Conductor flag becomes the harness name and surfaces as a
+	// baffling "executable file not found: --moddel".
+	if strings.HasPrefix(args[0], "-") {
+		return fmt.Errorf("unknown flag %q before the harness name; "+
+			"conductor wrap accepts --model, --effort, --max-effort, --alias, and --role", args[0])
 	}
 	tool, toolArgs := args[0], args[1:]
 
@@ -774,15 +815,18 @@ func cmdWrap(ctx context.Context, args []string) error {
 	branch, _ := gitOutput(ctx, "rev-parse", "--abbrev-ref", "HEAD")
 	baseSHA, _ := gitOutput(ctx, "rev-parse", "HEAD")
 	host, _ := os.Hostname()
+	caps := detectCapabilities(declared, toolArgs)
 
 	var session domain.Session
 	if err := api.Post(ctx, "/v1/projects/"+ref+"/sessions", map[string]any{
 		"harness": tool, "machine_id": host, "branch": branch, "base_sha": baseSHA,
+		"capabilities": caps,
 	}, &session); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "Conductor session %s registered for %s. Teammates can see that you are here.\n",
 		session.ID[:8], tool)
+	printCapabilityNotice(session)
 
 	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
 	defer stopHeartbeat()

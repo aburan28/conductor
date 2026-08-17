@@ -176,7 +176,27 @@ func TestEffortAndTierClamping(t *testing.T) {
 		t.Errorf("AtMost = %s, want low", got)
 	}
 	if got := EffortHigh.Up(); got != EffortHigh {
-		t.Errorf("escalation should saturate below max, got %s", got)
+		t.Errorf("escalation should saturate below xhigh, got %s", got)
+	}
+	// xhigh and max are both opt-in: a retry loop must not be able to walk a task onto the
+	// two most expensive settings on its own.
+	if got := EffortXHigh.Up(); got != EffortHigh {
+		t.Errorf("escalation from xhigh should not climb to max, got %s", got)
+	}
+	if got := EffortMax.Down(); got != EffortXHigh {
+		t.Errorf("de-escalation from max should step to xhigh, got %s", got)
+	}
+	if got := EffortXHigh.Down(); got != EffortHigh {
+		t.Errorf("de-escalation from xhigh should step to high, got %s", got)
+	}
+	if !EffortXHigh.AtLeast(EffortHigh) || EffortHigh.AtLeast(EffortXHigh) {
+		t.Error("xhigh must rank above high")
+	}
+	if !EffortMax.AtLeast(EffortXHigh) {
+		t.Error("max must rank above xhigh")
+	}
+	if EffortHigh.AtLeast("") != true || Effort("").AtLeast(EffortLow) {
+		t.Error("an unset effort meets only an unset floor")
 	}
 	if got := TierT4.Up(); got != TierT4 {
 		t.Errorf("tier escalation should saturate at T4, got %s", got)
@@ -200,7 +220,12 @@ func TestEnumsMatchSchema(t *testing.T) {
 		t.Helper()
 		re := regexp.MustCompile(`(?s)CHECK \(` + regexp.QuoteMeta(column) + ` IN \((.*?)\)\)`)
 
-		for _, m := range re.FindAllStringSubmatch(schema, -1) {
+		// The *last* matching constraint wins. Migrations are concatenated in filename
+		// order, so a later ALTER that widens an enum is the effective schema; matching the
+		// first would test a constraint the database no longer has.
+		matches := re.FindAllStringSubmatch(schema, -1)
+		for i := len(matches) - 1; i >= 0; i-- {
+			m := matches[i]
 			declared := map[string]bool{}
 			for _, raw := range strings.Split(m[1], ",") {
 				if v := strings.Trim(strings.TrimSpace(raw), "'\n\t "); v != "" {
@@ -227,6 +252,7 @@ func TestEnumsMatchSchema(t *testing.T) {
 	check("task status", "status", string(TaskVerifying), asStrings(AllTaskStatuses))
 	check("attempt state", "state", string(AttemptPreparingWorkspace), asStrings(AllAttemptStates))
 	check("session state", "state", string(SessionOnlineIdle), asStrings(AllSessionStates))
+	check("assignment state", "state", string(AssignmentOffered), asStrings(AllAssignmentStates))
 	check("visibility", "visibility", string(VisibilityTeamArtifacts), asStrings(AllVisibilities))
 	check("reservation mode", "mode", string(ModeProtectedExclusive), asStrings(AllReservationModes))
 	check("resource type", "resource_type", string(ResourceMigration), asStrings(AllResourceTypes))
@@ -249,9 +275,7 @@ func TestEnumsMatchSchema(t *testing.T) {
 	check("agent role", "role", string(RoleImplementer), asStrings([]AgentRole{
 		RolePlanner, RoleImplementer, RoleVerifier, RoleCodeReviewer, RoleResearcher,
 	}))
-	check("effort", "reasoning_effort", string(EffortMax), asStrings([]Effort{
-		EffortNone, EffortLow, EffortMedium, EffortHigh, EffortMax,
-	}))
+	check("effort", "reasoning_effort", string(EffortMax), asStrings(AllEfforts))
 	check("severity", "severity", string(SeverityCritical), asStrings([]Severity{
 		SeverityInfo, SeverityLow, SeverityMedium, SeverityHigh, SeverityCritical,
 	}))
@@ -275,9 +299,23 @@ func readSchema(t *testing.T) string {
 		t.Fatalf("getwd: %v", err)
 	}
 	for i := 0; i < 10; i++ {
-		candidate := filepath.Join(dir, "internal", "db", "migrations", "0001_init.sql")
-		if body, err := os.ReadFile(candidate); err == nil {
-			return string(body)
+		migrations := filepath.Join(dir, "internal", "db", "migrations")
+		if entries, err := os.ReadDir(migrations); err == nil && len(entries) > 0 {
+			// Every migration, in the order Migrate applies them, so an enum widened by a
+			// later migration is tested against the schema that actually exists.
+			var schema strings.Builder
+			for _, entry := range entries {
+				if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+					continue
+				}
+				body, err := os.ReadFile(filepath.Join(migrations, entry.Name()))
+				if err != nil {
+					t.Fatalf("read %s: %v", entry.Name(), err)
+				}
+				schema.Write(body)
+				schema.WriteString("\n")
+			}
+			return schema.String()
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
