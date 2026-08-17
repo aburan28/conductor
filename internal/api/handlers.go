@@ -25,6 +25,13 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /v1/projects", auth(s.listProjects))
 	m.HandleFunc("GET /v1/projects/{project}", auth(s.getProject))
 	m.HandleFunc("GET /v1/projects/{project}/members", auth(s.listMembers))
+	m.HandleFunc("POST /v1/projects/{project}/members", auth(s.inviteMember))
+	m.HandleFunc("DELETE /v1/projects/{project}/members/{handle}", auth(s.removeMember))
+
+	m.HandleFunc("GET /v1/tokens", auth(s.listTokens))
+	m.HandleFunc("POST /v1/tokens", auth(s.createToken))
+	m.HandleFunc("DELETE /v1/tokens/{name}", auth(s.revokeToken))
+	m.HandleFunc("POST /v1/tokens/revoke-all", auth(s.revokeAllTokens))
 
 	m.HandleFunc("POST /v1/projects/{project}/sessions", auth(s.registerSession))
 	m.HandleFunc("POST /v1/sessions/{session}/heartbeat", auth(s.heartbeatSession))
@@ -63,6 +70,11 @@ func (s *Server) routes() {
 
 	m.HandleFunc("POST /v1/runners/register", auth(s.registerRunner))
 	m.HandleFunc("POST /v1/runners/{runner}/heartbeat", auth(s.heartbeatRunner))
+
+	m.HandleFunc("GET /v1/projects/{project}/runner/snapshot", auth(s.runnerSnapshot))
+	m.HandleFunc("GET /v1/attempts/{attempt}/brief", auth(s.attemptBrief))
+	m.HandleFunc("POST /v1/attempts/{attempt}/route", auth(s.setAttemptRoute))
+	m.HandleFunc("POST /v1/attempts/{attempt}/state", auth(s.setAttemptState))
 
 	if len(s.dashboard) > 0 {
 		m.HandleFunc("GET /{$}", s.serveDashboard)
@@ -1192,8 +1204,10 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request, p domain.P
 // ---------------------------------------------------------------------------
 
 type registerRunnerBody struct {
-	Name           string                    `json:"name"`
-	ProjectID      domain.ID                 `json:"project_id"`
+	Name string `json:"name"`
+	// ProjectID accepts either a project id or an org-scoped slug, like every other
+	// project reference in this API.
+	ProjectID      string                    `json:"project_id"`
 	Capabilities   domain.RunnerCapabilities `json:"capabilities"`
 	MaxConcurrency int                       `json:"max_concurrency"`
 }
@@ -1204,14 +1218,21 @@ func (s *Server) registerRunner(w http.ResponseWriter, r *http.Request, p domain
 		s.fail(w, r, err)
 		return
 	}
+	var projectID domain.ID
 	if body.ProjectID != "" {
-		if _, err := s.svc.Authorize(r.Context(), p, body.ProjectID, domain.RoleContributor); err != nil {
+		project, err := s.resolveProject(r.Context(), p, body.ProjectID)
+		if err != nil {
 			s.fail(w, r, err)
 			return
 		}
+		if _, err := s.svc.Authorize(r.Context(), p, project.ID, domain.RoleContributor); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		projectID = project.ID
 	}
 	runner, err := s.store.RegisterRunner(r.Context(), domain.Runner{
-		OrganizationID: p.OrganizationID, ProjectID: body.ProjectID, PrincipalID: p.ID,
+		OrganizationID: p.OrganizationID, ProjectID: projectID, PrincipalID: p.ID,
 		Name: body.Name, Capabilities: body.Capabilities, MaxConcurrency: body.MaxConcurrency,
 	})
 	if err != nil {

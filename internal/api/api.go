@@ -33,11 +33,20 @@ type Server struct {
 	mux    *http.ServeMux
 	// dashboard is served at / when non-empty.
 	dashboard []byte
+	limiter   *authLimiter
+	// behindProxy makes X-Forwarded-For trustworthy for client identification. Off by
+	// default, because the header is attacker-controlled unless a proxy rewrites it.
+	behindProxy bool
+	// tlsEnabled controls whether HSTS is advertised. Sending it over plaintext is at best
+	// useless and at worst locks a developer out of their own local server.
+	tlsEnabled bool
 }
 
 type Options struct {
-	Logger    *slog.Logger
-	Dashboard []byte
+	Logger      *slog.Logger
+	Dashboard   []byte
+	BehindProxy bool
+	TLSEnabled  bool
 }
 
 func New(store *db.Store, svc *coord.Service, opts Options) *Server {
@@ -45,11 +54,14 @@ func New(store *db.Store, svc *coord.Service, opts Options) *Server {
 		opts.Logger = slog.Default()
 	}
 	s := &Server{
-		store:     store,
-		svc:       svc,
-		logger:    opts.Logger,
-		mux:       http.NewServeMux(),
-		dashboard: opts.Dashboard,
+		store:       store,
+		svc:         svc,
+		logger:      opts.Logger,
+		mux:         http.NewServeMux(),
+		dashboard:   opts.Dashboard,
+		limiter:     newAuthLimiter(),
+		behindProxy: opts.BehindProxy,
+		tlsEnabled:  opts.TLSEnabled,
 	}
 	s.routes()
 	return s
@@ -59,9 +71,31 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 
-// Handler wraps the mux with logging and panic recovery.
+// Handler wraps the mux with logging, panic recovery, and security headers.
 func (s *Server) Handler() http.Handler {
-	return s.recoverPanic(s.logRequests(s.mux))
+	return s.recoverPanic(s.securityHeaders(s.logRequests(s.mux)))
+}
+
+// securityHeaders sets the headers that matter for a page which holds a bearer token in its
+// URL and renders other people's task titles.
+func (s *Server) securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		// The dashboard is entirely self-contained, so the strictest useful policy applies:
+		// no external anything, and no framing.
+		h.Set("Content-Security-Policy",
+			"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "+
+				"connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'")
+		// The dashboard link carries a token in the query string. Without this it would leak
+		// to any site the user navigates to next.
+		h.Set("Referrer-Policy", "no-referrer")
+		if s.tlsEnabled {
+			h.Set("Strict-Transport-Security", "max-age=31536000")
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -78,6 +112,24 @@ const principalKey ctxKey = iota
 // the plaintext is never logged (DESIGN.md §25.1).
 func (s *Server) authenticate(next func(http.ResponseWriter, *http.Request, domain.Principal)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		client := clientKey(r, s.behindProxy)
+		// The throttle gates *failures*, not requests. A correct credential is always
+		// honoured, however many bad ones preceded it — otherwise one person fat-fingering
+		// a token behind a shared NAT locks out everyone sharing that address.
+		allowed, retryAfter := s.limiter.allow(client)
+
+		reject := func() {
+			s.limiter.fail(client)
+			if !allowed {
+				w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
+				s.ok(w, r, http.StatusTooManyRequests, ErrorBody{
+					Error: "too many failed authentication attempts", Code: "rate_limited",
+				})
+				return
+			}
+			s.fail(w, r, domain.ErrUnauthenticated)
+		}
+
 		header := r.Header.Get("Authorization")
 		token := strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
 		if token == "" || token == header {
@@ -88,14 +140,15 @@ func (s *Server) authenticate(next func(http.ResponseWriter, *http.Request, doma
 			}
 		}
 		if token == "" {
-			s.fail(w, r, domain.ErrUnauthenticated)
+			reject()
 			return
 		}
 		principal, err := s.store.AuthenticateToken(r.Context(), token)
 		if err != nil {
-			s.fail(w, r, domain.ErrUnauthenticated)
+			reject()
 			return
 		}
+		s.limiter.succeed(client)
 		next(w, r.WithContext(context.WithValue(r.Context(), principalKey, principal)), principal)
 	}
 }

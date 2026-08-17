@@ -8,14 +8,17 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -44,11 +47,17 @@ func main() {
 
 func serve(args []string) error {
 	fs := flag.NewFlagSet("conductord", flag.ExitOnError)
-	addr := fs.String("addr", envOr("CONDUCTOR_ADDR", ":8080"), "listen address")
+	addr := fs.String("addr", envOr("CONDUCTOR_ADDR", "127.0.0.1:8080"), "listen address")
 	dsn := fs.String("dsn", envOr("DATABASE_URL", ""), "PostgreSQL connection string")
 	tick := fs.Duration("tick", 2*time.Second, "scheduler tick interval")
 	detect := fs.Duration("detect-every", 15*time.Second, "conflict graph recomputation interval")
 	noScheduler := fs.Bool("no-scheduler", false, "serve the API without running the scheduler")
+	tlsCert := fs.String("tls-cert", envOr("CONDUCTOR_TLS_CERT", ""), "TLS certificate file")
+	tlsKey := fs.String("tls-key", envOr("CONDUCTOR_TLS_KEY", ""), "TLS private key file")
+	behindProxy := fs.Bool("behind-proxy", false,
+		"trust X-Forwarded-For (only set this when a proxy you control rewrites it)")
+	insecure := fs.Bool("insecure", false,
+		"permit binding a non-loopback address without TLS")
 	verbose := fs.Bool("v", false, "verbose logging")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, `conductord — Conductor control plane
@@ -66,6 +75,25 @@ Flags:
 	}
 	if *dsn == "" {
 		return errors.New("no database configured: pass --dsn or set DATABASE_URL")
+	}
+
+	tlsEnabled := *tlsCert != "" && *tlsKey != ""
+	if (*tlsCert == "") != (*tlsKey == "") {
+		return errors.New("--tls-cert and --tls-key must be given together")
+	}
+	// Bearer tokens cross this connection. Binding a reachable address in plaintext puts
+	// them on the wire, so it requires saying so out loud — a default that fails safe is
+	// worth more than one that is convenient.
+	if !tlsEnabled && !*insecure && !isLoopback(*addr) && !*behindProxy {
+		return fmt.Errorf(`refusing to serve %s without TLS.
+
+Bearer tokens would cross the network in the clear. Choose one:
+
+  --tls-cert cert.pem --tls-key key.pem   terminate TLS here
+  --behind-proxy                          a proxy you control terminates TLS
+  --insecure                              you accept the risk (trusted network only)
+
+Binding 127.0.0.1 needs none of these.`, *addr)
 	}
 
 	level := slog.LevelInfo
@@ -90,7 +118,12 @@ Flags:
 	logger.Info("database ready")
 
 	svc := coord.New(store)
-	server := api.New(store, svc, api.Options{Logger: logger, Dashboard: web.Dashboard()})
+	server := api.New(store, svc, api.Options{
+		Logger:      logger,
+		Dashboard:   web.Dashboard(),
+		BehindProxy: *behindProxy,
+		TLSEnabled:  tlsEnabled,
+	})
 
 	if !*noScheduler {
 		sched := scheduler.New(store, svc, scheduler.Options{
@@ -119,8 +152,59 @@ Flags:
 		_ = httpServer.Shutdown(shutdownCtx)
 	}()
 
-	logger.Info("conductor listening", "addr", *addr, "dashboard", "http://localhost"+*addr+"/")
+	scheme := "http"
+	if tlsEnabled {
+		scheme = "https"
+		httpServer.TLSConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			// Prefer forward-secret suites. Go picks sensibly for TLS 1.3; this only
+			// constrains the 1.2 fallback.
+			CipherSuites: []uint16{
+				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+				tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+				tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+			},
+		}
+	}
+	logger.Info("conductor listening",
+		"addr", *addr, "tls", tlsEnabled, "behind_proxy", *behindProxy,
+		"dashboard", scheme+"://"+displayHost(*addr)+"/")
+
+	if tlsEnabled {
+		return httpServer.ListenAndServeTLS(*tlsCert, *tlsKey)
+	}
 	return httpServer.ListenAndServe()
+}
+
+// isLoopback reports whether a listen address is reachable only from this machine.
+func isLoopback(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	switch host {
+	case "localhost":
+		return true
+	case "", "0.0.0.0", "::", "[::]":
+		// An empty host means "all interfaces", which is the case this check exists for.
+		return false
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
+}
+
+func displayHost(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "localhost" + addr
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "localhost"
+	}
+	return net.JoinHostPort(host, port)
 }
 
 // bootstrap creates the first tenant and prints a token.

@@ -8,6 +8,8 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,15 +29,51 @@ type Client struct {
 }
 
 // New builds a client. An empty endpoint falls back to the local default.
+//
+// When CONDUCTOR_CA_CERT names a PEM bundle, it is added to the trust roots. A team running
+// its own certificate authority needs this, and it is a far better answer than an
+// "ignore certificate errors" switch — the connection is still verified, just against a root
+// you chose.
 func New(endpoint, token string) *Client {
 	if endpoint == "" {
 		endpoint = "http://localhost:8080"
 	}
+	httpClient := &http.Client{Timeout: 60 * time.Second}
+
+	if caPath := os.Getenv("CONDUCTOR_CA_CERT"); caPath != "" {
+		if pool, err := caPoolFrom(caPath); err == nil {
+			httpClient.Transport = &http.Transport{
+				TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+			}
+		} else {
+			// Warn rather than fail: the endpoint may not be TLS at all, in which case the
+			// unusable CA file is irrelevant.
+			fmt.Fprintf(os.Stderr, "conductor: ignoring CONDUCTOR_CA_CERT: %v\n", err)
+		}
+	}
+
 	return &Client{
 		Endpoint: strings.TrimRight(endpoint, "/"),
 		Token:    token,
-		HTTP:     &http.Client{Timeout: 60 * time.Second},
+		HTTP:     httpClient,
 	}
+}
+
+// caPoolFrom builds a trust pool from a PEM file, keeping the system roots so a private CA
+// supplements rather than replaces public trust.
+func caPoolFrom(path string) (*x509.CertPool, error) {
+	pem, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("no certificates found in %s", path)
+	}
+	return pool, nil
 }
 
 // APIError carries a structured failure from the control plane.

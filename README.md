@@ -79,10 +79,31 @@ export DATABASE_URL="postgres://conductor:conductor@localhost:55432/conductor?ss
 conductord bootstrap --org acme --project myrepo --principal $USER --repo .
 # prints a token and the exact `conductor login` line to run
 
-conductord &                                # API, SSE, dashboard, scheduler on :8080
+conductord &                                # API, SSE, dashboard, scheduler on 127.0.0.1:8080
 conductor login --endpoint http://localhost:8080 --token cdt_… --project myrepo
 conductor dashboard                         # prints a ready-to-open link
 ```
+
+### Adding your coworkers
+
+```bash
+conductor member add rachel --role contributor   # prints a token, once
+conductor member list
+conductor member remove rachel                   # also revokes their tokens
+conductor token create --save                    # rotate your own
+```
+
+`conductord` binds loopback by default and **refuses to serve a reachable address in
+plaintext**, because bearer tokens would cross the network in the clear. To expose it:
+
+```bash
+conductord --addr 0.0.0.0:8080 --tls-cert cert.pem --tls-key key.pem
+conductord --addr 0.0.0.0:8080 --behind-proxy      # your proxy terminates TLS
+```
+
+Clients using a private CA set `CONDUCTOR_CA_CERT=/path/to/ca.pem`. Failed authentication is
+throttled per client; a correct token is never throttled, so one person mistyping theirs
+cannot lock out an office behind a shared NAT.
 
 Prove the whole execution loop with no API key and no vendor CLI installed:
 
@@ -193,12 +214,12 @@ Implemented and exercised by tests:
   deterministic in-process fake.
 - Isolated git worktrees, scope-drift detection, runner-attested validation, evidence manifests,
   handoff bundles, portable Markdown task cards.
+- Member and token administration, TLS, a loopback-by-default bind, and auth throttling.
+- A runner that reaches the control plane over HTTP and holds no database credential
+  (§28.2), alongside the in-process backend for single-host use (§28.1).
 
 Not built, and where the design says it goes:
 
-- **Runner over HTTP.** `conductor worker` talks to Postgres directly, which suits the
-  single-host deployment of §28.1. The §28.2 shape — a laptop runner speaking only outbound
-  HTTPS to a shared control plane — needs an HTTP-backed implementation of the same loop.
 - **Planner and reviewer services** (§14, §15.3). The contracts, validation rules, and
   `reviewer.*` routing are in place; nothing yet invokes a model to decompose an objective or
   review a diff.
@@ -223,7 +244,11 @@ OpenCode SDK are TypeScript, so their drivers here are CLI-based rather than SDK
 make unit     # pure logic, no database
 make test     # everything; integration tests skip without DATABASE_URL
 make db-up && make test
+make e2e      # scripted two-person scenario end to end
 ```
+
+CI runs all of it against a real Postgres on every push, and fails if the integration tests
+skip — a misconfigured database service would otherwise produce a silently green run.
 
 The suite proves the invariants rather than asserting them in prose. Notably:
 
@@ -238,6 +263,10 @@ The suite proves the invariants rather than asserting them in prose. Notably:
 | `TestNoTranscriptColumnsInSchema` | the database has nowhere to put a prompt |
 | `TestMatrixMatchesDesign` | all 25 cells of the §11.3 conflict matrix |
 | `TestSecurityFloorIsAbsolute` | budget pressure cannot downgrade a security-sensitive task |
+| `TestPrivateTaskIsRedactedOverHTTP` | the projection survives serialization, not just unit tests |
+| `TestNonMemberSeesNotFoundNotForbidden` | a 403 would confirm the project exists |
+| `TestStaleFenceIsA409` | a stale worker gets "stop", not "retry" |
+| `TestParseFlagsAcceptsFlagsAfterPositionals` | CLI flags after a positional are not silently dropped |
 
 ---
 

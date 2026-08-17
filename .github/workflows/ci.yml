@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A push that supersedes an in-flight run cancels it. The Postgres-backed suite is the slow
+# part and there is no value in finishing a run for a commit nobody will look at.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: build and test
+    runs-on: ubuntu-latest
+
+    # The integration tests need a real Postgres: SKIP LOCKED, advisory locks, and partial
+    # unique indexes are load-bearing, so there is nothing meaningful to test against a
+    # substitute.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: conductor
+          POSTGRES_PASSWORD: conductor
+          POSTGRES_DB: conductor
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U conductor -d conductor"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+
+    env:
+      DATABASE_URL: postgres://conductor:conductor@localhost:5432/conductor?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt'd:"
+            echo "$unformatted"
+            gofmt -d $unformatted
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: build
+        run: make build
+
+      # The integration tests skip themselves without DATABASE_URL, which would turn a
+      # misconfigured service container into a silently green run. Fail loudly instead.
+      - name: verify the database is actually reachable
+        run: |
+          go test ./internal/db/ -run TestConcurrentClaimsYieldExactlyOneLease -v 2>&1 | tee /tmp/dbcheck.log
+          if grep -q "SKIP" /tmp/dbcheck.log; then
+            echo "Integration tests skipped — DATABASE_URL is not reaching Postgres."
+            exit 1
+          fi
+
+      - name: test
+        run: go test ./... -count=1
+
+      - name: test with the race detector
+        run: go test ./internal/db/ ./internal/harness/ -race -count=1
+
+      - name: end-to-end
+        run: ./scripts/e2e.sh
+
+      - name: server logs on failure
+        if: failure()
+        run: |
+          for f in /tmp/conductor-e2e.*/conductord.log; do
+            [ -f "$f" ] && { echo "=== $f ==="; cat "$f"; }
+          done || true

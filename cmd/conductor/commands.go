@@ -420,10 +420,11 @@ func taskShow(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("task show", flag.ExitOnError)
 	project := fs.String("project", "", "project id or slug")
 	asJSON := fs.Bool("json", false, "machine-readable output")
-	if err := fs.Parse(args); err != nil {
+	positional, err := parseFlags(fs, args)
+	if err != nil {
 		return err
 	}
-	if fs.NArg() < 1 {
+	if len(positional) < 1 {
 		return errors.New("usage: conductor task show <ref>")
 	}
 	api, creds, err := mustClient()
@@ -437,12 +438,12 @@ func taskShow(ctx context.Context, args []string) error {
 
 	if *asJSON {
 		var view privacy.TaskView
-		if err := api.Get(ctx, "/v1/tasks/"+fs.Arg(0)+client.Query("project", ref), &view); err != nil {
+		if err := api.Get(ctx, "/v1/tasks/"+positional[0]+client.Query("project", ref), &view); err != nil {
 			return err
 		}
 		return emit(view)
 	}
-	card, err := api.Raw(ctx, "/v1/tasks/"+fs.Arg(0)+"/card"+client.Query("project", ref))
+	card, err := api.Raw(ctx, "/v1/tasks/"+positional[0]+"/card"+client.Query("project", ref))
 	if err != nil {
 		return err
 	}
@@ -503,7 +504,8 @@ func taskClaim(ctx context.Context, args []string) error {
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	var scopes scopeFlag
 	fs.Var(&scopes, "scope", "resource to reserve with the claim (repeatable)")
-	if err := fs.Parse(args); err != nil {
+	positional, err := parseFlags(fs, args)
+	if err != nil {
 		return err
 	}
 	api, creds, err := mustClient()
@@ -521,10 +523,10 @@ func taskClaim(ctx context.Context, args []string) error {
 	}
 	path := "/v1/projects/" + ref + "/claim-next"
 	if !*next {
-		if fs.NArg() < 1 {
+		if len(positional) < 1 {
 			return errors.New("usage: conductor task claim <ref> | conductor task claim --next")
 		}
-		path = "/v1/tasks/" + fs.Arg(0) + "/claim" + client.Query("project", ref)
+		path = "/v1/tasks/" + positional[0] + "/claim" + client.Query("project", ref)
 	}
 
 	var out struct {
@@ -554,10 +556,11 @@ func taskRelease(ctx context.Context, args []string) error {
 	project := fs.String("project", "", "project id or slug")
 	state := fs.String("state", "", "next task status (default: decided by policy)")
 	note := fs.String("note", "", "why you are handing it back")
-	if err := fs.Parse(args); err != nil {
+	positional, err := parseFlags(fs, args)
+	if err != nil {
 		return err
 	}
-	if fs.NArg() < 1 {
+	if len(positional) < 1 {
 		return errors.New("usage: conductor task release <ref>")
 	}
 	api, creds, err := mustClient()
@@ -570,11 +573,11 @@ func taskRelease(ctx context.Context, args []string) error {
 	}
 
 	var out map[string]any
-	if err := api.Post(ctx, "/v1/tasks/"+fs.Arg(0)+"/release"+client.Query("project", ref),
+	if err := api.Post(ctx, "/v1/tasks/"+positional[0]+"/release"+client.Query("project", ref),
 		map[string]any{"next_status": *state, "reason": *note}, &out); err != nil {
 		return err
 	}
-	fmt.Printf("Released %s. Its reserved scopes are free immediately.\n", fs.Arg(0))
+	fmt.Printf("Released %s. Its reserved scopes are free immediately.\n", positional[0])
 	return nil
 }
 
@@ -584,10 +587,11 @@ func taskHandoff(ctx context.Context, args []string) error {
 	to := fs.String("to", "", "target harness, e.g. codex")
 	nextAction := fs.String("next", "", "what the next session should do first")
 	note := fs.String("note", "", "one completed-work note")
-	if err := fs.Parse(args); err != nil {
+	positional, err := parseFlags(fs, args)
+	if err != nil {
 		return err
 	}
-	if fs.NArg() < 1 {
+	if len(positional) < 1 {
 		return errors.New("usage: conductor task handoff <ref> --to <harness>")
 	}
 	api, creds, err := mustClient()
@@ -604,12 +608,12 @@ func taskHandoff(ctx context.Context, args []string) error {
 		bundle["completed_work"] = []string{*note}
 	}
 	var out map[string]any
-	if err := api.Post(ctx, "/v1/tasks/"+fs.Arg(0)+"/handoff"+client.Query("project", ref),
+	if err := api.Post(ctx, "/v1/tasks/"+positional[0]+"/handoff"+client.Query("project", ref),
 		map[string]any{"to_harness": *to, "bundle": bundle}, &out); err != nil {
 		return err
 	}
 	fmt.Printf("Handed %s off to %s. The bundle carries decisions and open questions, not your chat.\n",
-		fs.Arg(0), *to)
+		positional[0], *to)
 	return nil
 }
 
@@ -617,10 +621,11 @@ func taskExport(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("task export", flag.ExitOnError)
 	project := fs.String("project", "", "project id or slug")
 	output := fs.String("output", "", "write to a file instead of stdout")
-	if err := fs.Parse(args); err != nil {
+	positional, err := parseFlags(fs, args)
+	if err != nil {
 		return err
 	}
-	if fs.NArg() < 1 {
+	if len(positional) < 1 {
 		return errors.New("usage: conductor task export <ref> [--output task.md]")
 	}
 	api, creds, err := mustClient()
@@ -632,7 +637,7 @@ func taskExport(ctx context.Context, args []string) error {
 		return err
 	}
 
-	card, err := api.Raw(ctx, "/v1/tasks/"+fs.Arg(0)+"/card"+client.Query("project", ref))
+	card, err := api.Raw(ctx, "/v1/tasks/"+positional[0]+"/card"+client.Query("project", ref))
 	if err != nil {
 		return err
 	}
@@ -697,13 +702,16 @@ func cmdScope(ctx context.Context, args []string) error {
 		project := fs.String("project", "", "project id or slug")
 		var scopes scopeFlag
 		fs.Var(&scopes, "scope", "resource to reserve (repeatable)")
-		if err := fs.Parse(rest); err != nil {
+		positional, err := parseFlags(fs, rest)
+		if err != nil {
 			return err
 		}
-		if fs.NArg() < 1 {
+		if len(positional) < 1 {
 			return errors.New("usage: conductor scope add <task-ref> --scope path:file.go")
 		}
-		for _, arg := range fs.Args()[1:] {
+		// Bare resources after the task ref are treated as scopes, so both
+		// `scope add T-1 path:a.go` and `scope add T-1 --scope path:a.go` work.
+		for _, arg := range positional[1:] {
 			_ = scopes.Set(arg)
 		}
 		if len(scopes) == 0 {
@@ -715,7 +723,7 @@ func cmdScope(ctx context.Context, args []string) error {
 		}
 
 		var result coord.ExpandScopeResult
-		err = api.Post(ctx, "/v1/tasks/"+fs.Arg(0)+"/scopes"+client.Query("project", ref),
+		err = api.Post(ctx, "/v1/tasks/"+positional[0]+"/scopes"+client.Query("project", ref),
 			map[string]any{"scopes": []domain.ScopeRequest(scopes), "source": "declared"}, &result)
 		if err != nil {
 			var apiErr *client.APIError
