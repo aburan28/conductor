@@ -43,7 +43,11 @@ router:
 
 conflict:
   duplicate_exact: block_duplicate            # identical fingerprint or external_ref
-  duplicate_similar_threshold: 0.60           # MinHash similarity for suggest_join
+  # MinHash similarity at which two intents are treated as the same work. Measured rather
+  # than guessed: genuine reworded duplicates land near 0.67 with a standard deviation of
+  # 0.03 across tenant keys, and unrelated work measures 0.00, so 0.50 has headroom on both
+  # sides. TestSimilarityIsStableAcrossKeys fails if that stops being true.
+  duplicate_similar_threshold: 0.50
   duplicate_similar_action: allow_with_warning
   write_write: block_conflict
   read_write: allow_with_warning

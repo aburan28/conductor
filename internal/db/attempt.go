@@ -114,6 +114,20 @@ func (s *Store) SetAttemptRoute(ctx context.Context, id domain.ID, r AttemptRout
 	return a, noRows(err)
 }
 
+// LatestAttempt returns a task's most recent attempt, live or finished.
+//
+// ActiveAttempt deliberately returns nothing once an attempt ends, which is right for
+// dispatch but wrong for display: a completed task's commit and branch live on an attempt
+// that is no longer active, and reading only the active one makes them vanish at exactly the
+// moment they matter.
+func (s *Store) LatestAttempt(ctx context.Context, taskID domain.ID) (domain.Attempt, error) {
+	a, err := scanAttempt(s.pool.QueryRow(ctx, `
+		SELECT `+attemptColumns+` FROM attempts
+		 WHERE task_id = $1::uuid
+		 ORDER BY attempt_number DESC LIMIT 1`, taskID).Scan)
+	return a, noRows(err)
+}
+
 // AttemptProgress is the metadata a runner reports as work proceeds.
 //
 // Every field is a measurement. There is no field for what the model said, and the driver

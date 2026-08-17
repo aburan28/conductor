@@ -45,6 +45,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /v1/tasks/{task}", auth(s.getTask))
 	m.HandleFunc("PATCH /v1/tasks/{task}", auth(s.patchTask))
 	m.HandleFunc("GET /v1/tasks/{task}/card", auth(s.getTaskCard))
+	m.HandleFunc("GET /v1/tasks/{task}/attempts", auth(s.listAttempts))
 	m.HandleFunc("POST /v1/tasks/{task}/claim", auth(s.claimTask))
 	m.HandleFunc("POST /v1/tasks/{task}/release", auth(s.releaseTask))
 	m.HandleFunc("POST /v1/tasks/{task}/transition", auth(s.transitionTask))

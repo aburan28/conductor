@@ -288,3 +288,17 @@ func readSchema(t *testing.T) string {
 	t.Fatal("could not locate the initial migration")
 	return ""
 }
+
+// An attempt must never report success without having run. This is the edge that must stay
+// closed even as the others were opened for interactive sessions.
+func TestQueuedAttemptCannotSucceed(t *testing.T) {
+	if CanTransitionAttempt(AttemptQueued, AttemptSucceeded) {
+		t.Error("queued -> succeeded must remain illegal: an attempt cannot succeed without running")
+	}
+	// The edges deliberately opened for sessions that have no workspace to prepare.
+	for _, to := range []AttemptState{AttemptRunning, AttemptPausedConflict} {
+		if !CanTransitionAttempt(AttemptQueued, to) {
+			t.Errorf("queued -> %s should be legal for an interactive session", to)
+		}
+	}
+}

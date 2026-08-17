@@ -93,7 +93,15 @@ func (e *APIError) Error() string {
 
 // Blocked reports whether the error is a coordination refusal — a conflict or duplicate —
 // rather than a fault. Callers present these to the user as guidance, not as breakage.
+//
+// Any 409 counts. Some refusals answer with the decision itself rather than an error envelope
+// (a blocked start-work returns the outcome, the duplicates, and the advice), so those carry
+// no error code at all — and treating them as faults would hide exactly the explanation the
+// caller needs.
 func (e *APIError) Blocked() bool {
+	if e.Status == http.StatusConflict {
+		return true
+	}
 	switch e.Code {
 	case "scope_conflict", "duplicate", "already_claimed", "illegal_transition", "stale_fencing":
 		return true

@@ -41,12 +41,26 @@ var taskTransitions = map[TaskStatus][]TaskStatus{
 }
 
 var attemptTransitions = map[AttemptState][]AttemptState{
-	// failed_retryable is reachable straight from queued: a runner can fail between taking
-	// the claim and preparing a workspace (no capacity, no matching model profile, disk
-	// full), and that failure is retryable — the task should go back to the queue, not be
-	// stranded until its lease expires.
+	// Two edges out of queued that the linear runner flow does not suggest:
+	//
+	//   -> running: an interactive session (a human, or an agent working through MCP) has
+	//      no workspace to prepare and no harness to start — it already has the repository
+	//      open. Principle §4.12 requires humans and agents to use the same task model, so
+	//      forcing an interactive claim through runner bookkeeping states would make the
+	//      shared model a fiction.
+	//
+	//   -> failed_retryable: a runner can fail between taking the claim and preparing a
+	//      workspace (no capacity, no matching model profile, disk full). That failure is
+	//      retryable, so the task returns to the queue rather than being stranded until its
+	//      lease expires.
+	//   -> paused_conflict: the claim collided with someone else's territory before any work
+	//      began. Without this edge the pause is silently dropped and the attempt sits in
+	//      `queued`, which reads as "about to start" when it is actually blocked.
+	//
+	// What stays illegal from here is queued -> succeeded: an attempt cannot report success
+	// without ever having run.
 	AttemptQueued: {
-		AttemptPreparingWorkspace, AttemptCancelled,
+		AttemptPreparingWorkspace, AttemptRunning, AttemptPausedConflict, AttemptCancelled,
 		AttemptFailedRetryable, AttemptFailedTerminal, AttemptStale,
 	},
 

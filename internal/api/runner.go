@@ -105,3 +105,22 @@ func (s *Server) setAttemptState(w http.ResponseWriter, r *http.Request, p domai
 	}
 	s.ok(w, r, http.StatusOK, map[string]any{"state": body.State})
 }
+
+// listAttempts serves a task's execution history.
+//
+// This is what makes DESIGN.md §20.4 checkable rather than aspirational: an attempt records
+// the workflow hash, config hash, router policy version, model alias, and reasoning effort in
+// force when it ran, and until now nothing could read them back.
+func (s *Server) listAttempts(w http.ResponseWriter, r *http.Request, p domain.Principal) {
+	task, caller, err := s.taskFor(r, p, domain.RoleObserver)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	views, err := s.svc.AttemptViews(r.Context(), caller, task.ID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.ok(w, r, http.StatusOK, map[string]any{"attempts": views})
+}
