@@ -323,6 +323,8 @@ func (b Bundle) ProjectConfig() domain.ProjectConfig {
 	if v := b.Project.Execution.NetworkDefault; v != "" {
 		c.NetworkDefault = v
 	}
+	c.PublishModelIdentity = b.Project.Privacy.PublishModelIdentity
+	c.PublishHarnessIdentity = b.Project.Privacy.PublishHarnessIdentity
 
 	if p := b.Policies.Budget.Project; p.MonthlyUSD > 0 || p.DownshiftAt > 0 || p.PauseAt > 0 {
 		c.Budget = domain.BudgetPolicy{

@@ -114,7 +114,7 @@ func (s *Service) CheckIntent(ctx context.Context, c Caller, req IntentRequest) 
 
 	threshold := project.Config.DuplicateThreshold
 	if threshold <= 0 {
-		threshold = 0.55
+		threshold = 0.50
 	}
 	duplicates, err := s.Store.FindDuplicates(ctx, req.ProjectID,
 		fingerprint, signature, req.ExternalRef, threshold, req.ExcludeTask)
@@ -735,7 +735,9 @@ func (s *Service) taskView(ctx context.Context, c Caller, task domain.Task) (pri
 		Scopes:    scopes,
 		DependsOn: task.DependsOn,
 	}
-	if attempt, err := s.Store.ActiveAttempt(ctx, task.ID); err == nil {
+	// The latest attempt, not the active one: a finished task has no active attempt, and its
+	// commit and branch are the whole point of looking at it.
+	if attempt, err := s.Store.LatestAttempt(ctx, task.ID); err == nil {
 		proj.Branch = attempt.Branch
 		proj.CommitSHA = attempt.CommitSHA
 		proj.Harness = attempt.Harness

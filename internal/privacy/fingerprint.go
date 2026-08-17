@@ -30,11 +30,17 @@ import (
 // compare unequal to new ones without anybody noticing — they simply stop matching, visibly.
 const FingerprintVersion = "v1"
 
-// MinHashLanes is the signature width. 64 lanes gives a standard error of roughly
-// 1/sqrt(64) = 12.5% on the similarity estimate, which is comfortably precise enough to
-// separate "the same work" (>0.6) from "adjacent work" (<0.3) while fitting in one
-// Postgres bigint[] of modest size.
-const MinHashLanes = 64
+// MinHashLanes is the signature width.
+//
+// This started at 64 and was raised after measurement. MinHash is an estimator whose standard
+// error scales as sqrt(J(1-J)/lanes); at 64 lanes a genuine duplicate pair measuring ~0.67 had
+// a standard deviation of 0.058, so it fell below a 0.55 threshold about 2.5% of the time.
+// A duplicate detector that misses one real collision in forty is not doing its job, and the
+// failure is invisible — nobody notices the warning they did not get.
+//
+// 256 lanes halves the deviation twice over, at a cost of 2KB per signature. See
+// TestSimilarityIsStableAcrossKeys, which measures this rather than assuming it.
+const MinHashLanes = 256
 
 // The similarity basis is the set of normalized single tokens, not multi-token windows.
 //

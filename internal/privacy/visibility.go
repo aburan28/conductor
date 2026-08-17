@@ -176,6 +176,90 @@ func ProjectPresence(
 	return entry
 }
 
+// AttemptView is what a principal may learn about one execution of a task.
+//
+// The split here matters. Execution *identity* — which harness, which model alias, which
+// reasoning effort, which workflow hash — is coordination state: it explains why a result
+// looks the way it does, and DESIGN.md §20.4 requires it be recorded and explicable. Token
+// counts and cost are the sponsor's business, so they are owner-only.
+//
+// As everywhere else, there is no field that can carry what the model said.
+type AttemptView struct {
+	ID            domain.ID           `json:"id"`
+	AttemptNumber int                 `json:"attempt_number"`
+	State         domain.AttemptState `json:"state"`
+	Role          domain.AgentRole    `json:"role"`
+	Harness       string              `json:"harness,omitempty"`
+	ModelAlias    string              `json:"model_alias,omitempty"`
+	ResolvedModel string              `json:"resolved_model,omitempty"`
+	Effort        domain.Effort       `json:"reasoning_effort,omitempty"`
+	Branch        string              `json:"branch,omitempty"`
+	WorktreePath  string              `json:"worktree_path,omitempty"`
+	BaseSHA       string              `json:"base_commit_sha,omitempty"`
+	CommitSHA     string              `json:"commit_sha,omitempty"`
+	ChangedPaths  []string            `json:"changed_paths,omitempty"`
+
+	// Provenance: which rules were in force when this ran (DESIGN.md §20.4).
+	WorkflowSHA      string `json:"workflow_sha,omitempty"`
+	ProjectConfigSHA string `json:"project_config_sha,omitempty"`
+	RouterPolicyVer  string `json:"router_policy_version,omitempty"`
+
+	FailureClass string     `json:"failure_class,omitempty"`
+	StartedAt    *time.Time `json:"started_at,omitempty"`
+	EndedAt      *time.Time `json:"ended_at,omitempty"`
+	LastEventAt  time.Time  `json:"last_event_at"`
+
+	// Sponsor-only.
+	TokensIn  int64   `json:"tokens_in,omitempty"`
+	TokensOut int64   `json:"tokens_out,omitempty"`
+	CostUSD   float64 `json:"cost_usd,omitempty"`
+	Turns     int     `json:"turns,omitempty"`
+}
+
+// AttemptPolicy controls whether execution identity is published, per DESIGN.md §20.2
+// (publishModelIdentity / publishHarnessIdentity).
+type AttemptPolicy struct {
+	PublishModelIdentity   bool
+	PublishHarnessIdentity bool
+}
+
+// ProjectAttempt applies visibility rules to one attempt.
+func ProjectAttempt(v Viewer, a domain.Attempt, sponsor Owner, policy AttemptPolicy) AttemptView {
+	view := AttemptView{
+		ID:               a.ID,
+		AttemptNumber:    a.AttemptNumber,
+		State:            a.State,
+		Role:             a.Role,
+		Branch:           a.Branch,
+		WorktreePath:     a.WorktreePath,
+		BaseSHA:          a.BaseCommitSHA,
+		CommitSHA:        a.CommitSHA,
+		ChangedPaths:     a.ChangedPaths,
+		WorkflowSHA:      a.WorkflowSHA,
+		ProjectConfigSHA: a.ProjectConfigSHA,
+		RouterPolicyVer:  a.RouterPolicyVer,
+		FailureClass:     a.FailureClass,
+		StartedAt:        a.StartedAt,
+		EndedAt:          a.EndedAt,
+		LastEventAt:      a.LastEventAt,
+	}
+
+	self := v.IsSelf(sponsor)
+	if self || policy.PublishHarnessIdentity {
+		view.Harness = a.Harness
+	}
+	if self || policy.PublishModelIdentity {
+		view.ModelAlias = a.ModelAlias
+		view.ResolvedModel = a.ResolvedModel
+		view.Effort = a.ReasoningEffort
+	}
+	if self {
+		view.TokensIn, view.TokensOut = a.TokensIn, a.TokensOut
+		view.CostUSD, view.Turns = a.CostUSD, a.Turns
+	}
+	return view
+}
+
 // ConflictView is what the other side of a conflict is told.
 type ConflictView struct {
 	ID         domain.ID           `json:"id"`

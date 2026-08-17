@@ -397,3 +397,64 @@ func findRepoRoot(t *testing.T) string {
 	t.Fatal("could not locate repository root")
 	return ""
 }
+
+// The similarity estimate must be stable across tenant keys, not merely correct on average.
+//
+// Each organization gets its own HMAC key, which reshuffles the MinHash permutations, so the
+// same pair of intents produces a slightly different estimate per tenant. At 64 lanes the
+// spread was wide enough that a genuine duplicate slipped under the threshold roughly 2.5% of
+// the time — a miss nobody would ever notice, because the symptom is a warning that does not
+// appear. This measures the spread instead of trusting it.
+func TestSimilarityIsStableAcrossKeys(t *testing.T) {
+	alice := Envelope{
+		Summary: "Implement the team invite flow with email invitations and acceptance",
+		Scopes:  []string{"dir:internal/invites"},
+	}
+	bob := Envelope{
+		Summary: "Build team invitation flow: send invite emails, accept invitations",
+		Scopes:  []string{"dir:internal/invites"},
+	}
+	unrelated := Envelope{
+		Summary: "Upgrade the Postgres connection pool and add query timeouts",
+		Scopes:  []string{"dir:internal/db"},
+	}
+
+	// The threshold the shipped policy files use.
+	const threshold = 0.50
+	const trials = 200
+
+	missed, falsePositives := 0, 0
+	var min, max float64 = 1, 0
+	for i := 0; i < trials; i++ {
+		key, err := NewDedupeKey()
+		if err != nil {
+			t.Fatalf("NewDedupeKey: %v", err)
+		}
+		dup := Similarity(alice.Signature(key), bob.Signature(key))
+		if dup < min {
+			min = dup
+		}
+		if dup > max {
+			max = dup
+		}
+		if dup < threshold {
+			missed++
+		}
+		if Similarity(alice.Signature(key), unrelated.Signature(key)) >= threshold {
+			falsePositives++
+		}
+	}
+
+	if missed > 0 {
+		t.Errorf("a genuine duplicate fell below the %.2f threshold in %d/%d tenant keys "+
+			"(range %.3f–%.3f); raise MinHashLanes or lower the threshold",
+			threshold, missed, trials, min, max)
+	}
+	if falsePositives > 0 {
+		t.Errorf("unrelated work exceeded the threshold in %d/%d tenant keys", falsePositives, trials)
+	}
+	// A duplicate that only just clears the bar is a warning sign even when it passes.
+	if min < threshold+0.05 {
+		t.Errorf("duplicate similarity bottomed out at %.3f, uncomfortably close to %.2f", min, threshold)
+	}
+}

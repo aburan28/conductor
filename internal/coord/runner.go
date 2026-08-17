@@ -6,6 +6,7 @@ import (
 
 	"github.com/adamburan/conductor/internal/db"
 	"github.com/adamburan/conductor/internal/domain"
+	"github.com/adamburan/conductor/internal/privacy"
 	"github.com/adamburan/conductor/internal/taskcard"
 )
 
@@ -190,4 +191,46 @@ func (s *Service) MarkTaskRunning(ctx context.Context, taskID domain.ID) error {
 		return nil
 	}
 	return err
+}
+
+// AttemptViews projects a task's attempt history for a caller.
+//
+// Execution identity is published according to project policy; usage and cost stay with the
+// sponsor. This is what makes "why did this route to a frontier model" answerable without
+// also publishing everyone's spend.
+func (s *Service) AttemptViews(ctx context.Context, c Caller, taskID domain.ID) ([]privacy.AttemptView, error) {
+	task, err := s.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	project, err := s.Store.GetProject(ctx, task.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	attempts, err := s.Store.ListAttempts(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+
+	sponsors := make([]domain.ID, 0, len(attempts))
+	for _, a := range attempts {
+		sponsors = append(sponsors, a.SponsorPrincipal)
+	}
+	principals, err := s.Store.PrincipalsByID(ctx, sponsors)
+	if err != nil {
+		return nil, err
+	}
+
+	policy := privacy.AttemptPolicy{
+		PublishModelIdentity:   project.Config.PublishModelIdentity,
+		PublishHarnessIdentity: project.Config.PublishHarnessIdentity,
+	}
+
+	out := make([]privacy.AttemptView, 0, len(attempts))
+	for _, a := range attempts {
+		sponsor := principals[a.SponsorPrincipal]
+		out = append(out, privacy.ProjectAttempt(c.Viewer(), a,
+			privacy.Owner{PrincipalID: sponsor.ID, Handle: sponsor.Handle}, policy))
+	}
+	return out, nil
 }

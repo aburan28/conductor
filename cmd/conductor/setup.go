@@ -342,7 +342,7 @@ const scaffoldPolicies = `router:
 
 conflict:
   duplicate_exact: block_duplicate
-  duplicate_similar_threshold: 0.55
+  duplicate_similar_threshold: 0.50
   write_write: block_conflict
   read_write: allow_with_warning
   protected_any: block_conflict

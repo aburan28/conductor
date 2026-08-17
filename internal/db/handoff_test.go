@@ -179,3 +179,50 @@ func TestHandoffReleasesEvenWithUnknownTarget(t *testing.T) {
 		t.Errorf("territory still held after handoff to an unknown target: %d", len(held))
 	}
 }
+
+// A finished task must still show its commit and branch. Reading only the active attempt made
+// them disappear the moment the work completed, which is precisely when they are wanted.
+func TestCompletedTaskStillExposesItsCommit(t *testing.T) {
+	f := newFixture(t)
+	task := f.newTask(t, "Finished work")
+
+	claim, err := f.store.Claim(f.ctx, f.claimParams(task, f.alice))
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	for _, state := range []domain.AttemptState{
+		domain.AttemptPreparingWorkspace, domain.AttemptStartingHarness, domain.AttemptRunning,
+	} {
+		progress := AttemptProgress{State: state}
+		if state == domain.AttemptRunning {
+			progress.Branch, progress.CommitSHA = "agent/"+task.Ref+"/attempt-1", "deadbeef"
+		}
+		if _, err := f.store.UpdateAttempt(f.ctx, claim.Attempt.ID, progress); err != nil {
+			t.Fatalf("advance to %s: %v", state, err)
+		}
+	}
+	// The task tracks the attempt: a runner moves it to running once the harness starts,
+	// and verifying is only reachable from there.
+	if _, err := f.store.UpdateTaskStatus(f.ctx, task.ID, domain.TaskRunning); err != nil {
+		t.Fatalf("task -> running: %v", err)
+	}
+	if _, err := f.store.Release(f.ctx, ReleaseParams{
+		Fence: claim.Fence, AttemptState: domain.AttemptSucceeded,
+		NextTaskStatus: domain.TaskVerifying,
+	}); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	// No active attempt remains...
+	if _, err := f.store.ActiveAttempt(f.ctx, task.ID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("expected no active attempt, got %v", err)
+	}
+	// ...but the latest one still carries the evidence.
+	latest, err := f.store.LatestAttempt(f.ctx, task.ID)
+	if err != nil {
+		t.Fatalf("LatestAttempt: %v", err)
+	}
+	if latest.CommitSHA != "deadbeef" || latest.Branch == "" {
+		t.Errorf("finished attempt lost its commit or branch: %+v", latest)
+	}
+}

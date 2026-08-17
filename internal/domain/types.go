@@ -68,6 +68,12 @@ type ProjectConfig struct {
 	Isolation      string `json:"isolation"`
 	NetworkDefault string `json:"network_default"`
 
+	// Publication switches from .conductor/project.yaml §20.2. Model and harness identity
+	// are coordination state a project may choose to share; they default to on because
+	// "which model produced this" is usually what a reviewer needs first.
+	PublishModelIdentity   bool `json:"publish_model_identity"`
+	PublishHarnessIdentity bool `json:"publish_harness_identity"`
+
 	Budget BudgetPolicy `json:"budget"`
 }
 
@@ -75,23 +81,25 @@ type ProjectConfig struct {
 // policy, not a constant, and can be overridden per project.
 func DefaultProjectConfig() ProjectConfig {
 	return ProjectConfig{
-		DefaultVisibility:     VisibilityTeamSummary,
-		ClaimMode:             EnforceCooperative,
-		LeaseTTL:              Duration(90 * time.Second),
-		HeartbeatInterval:     Duration(20 * time.Second),
-		OfflineGrace:          Duration(45 * time.Second),
-		StartupTimeout:        Duration(120 * time.Second),
-		StalledTurnTimeout:    Duration(900 * time.Second),
-		DuplicateThreshold:    0.60,
-		DuplicatePolicy:       "block_exact_warn_similar",
-		WriteConflict:         OutcomeBlockConflict,
-		ReadWriteConflict:     OutcomeAllowWithWarning,
-		MaxConcurrentAttempts: 4,
-		MaxPerPrincipal:       2,
-		MaxAttempts:           4,
-		Isolation:             "git-worktree",
-		NetworkDefault:        "deny",
-		Budget:                DefaultBudgetPolicy(),
+		DefaultVisibility:      VisibilityTeamSummary,
+		ClaimMode:              EnforceCooperative,
+		LeaseTTL:               Duration(90 * time.Second),
+		HeartbeatInterval:      Duration(20 * time.Second),
+		OfflineGrace:           Duration(45 * time.Second),
+		StartupTimeout:         Duration(120 * time.Second),
+		StalledTurnTimeout:     Duration(900 * time.Second),
+		DuplicateThreshold:     0.60,
+		DuplicatePolicy:        "block_exact_warn_similar",
+		WriteConflict:          OutcomeBlockConflict,
+		ReadWriteConflict:      OutcomeAllowWithWarning,
+		MaxConcurrentAttempts:  4,
+		MaxPerPrincipal:        2,
+		MaxAttempts:            4,
+		Isolation:              "git-worktree",
+		NetworkDefault:         "deny",
+		PublishModelIdentity:   true,
+		PublishHarnessIdentity: true,
+		Budget:                 DefaultBudgetPolicy(),
 	}
 }
 

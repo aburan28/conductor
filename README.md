@@ -250,6 +250,16 @@ make e2e      # scripted two-person scenario end to end
 CI runs all of it against a real Postgres on every push, and fails if the integration tests
 skip — a misconfigured database service would otherwise produce a silently green run.
 
+`scripts/e2e.sh` asserts the MVP acceptance criteria of DESIGN.md §31 rather than printing
+output for a human to eyeball: that a completed task carries a commit and runner-observed
+validation, that the attempt ran in a per-task worktree, that the workflow and config hashes
+and the model routing were recorded, and that presence exposes a branch and a heartbeat and
+nothing resembling a conversation.
+
+Two acceptance criteria are still unverified, both for the same reason: nothing here has ever
+launched a real Claude Code, Codex, or OpenCode process. §31.5 (each harness registers and
+publishes progress) and the live half of §31.6 are exercised only through the built-in fake.
+
 The suite proves the invariants rather than asserting them in prose. Notably:
 
 | Test | Proves |
@@ -267,6 +277,9 @@ The suite proves the invariants rather than asserting them in prose. Notably:
 | `TestNonMemberSeesNotFoundNotForbidden` | a 403 would confirm the project exists |
 | `TestStaleFenceIsA409` | a stale worker gets "stop", not "retry" |
 | `TestParseFlagsAcceptsFlagsAfterPositionals` | CLI flags after a positional are not silently dropped |
+| `TestSimilarityIsStableAcrossKeys` | duplicate detection does not miss real collisions across tenant keys |
+| `TestMCPWorkLifecycleAgainstLiveServer` | the MCP gateway works against the real API, not a stub |
+| `TestQueuedAttemptCannotSucceed` | an attempt cannot report success without having run |
 
 ---
 
