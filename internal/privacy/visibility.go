@@ -107,9 +107,10 @@ func ProjectTask(v Viewer, t domain.Task, p TaskProjection) TaskView {
 		UpdatedAt:     t.UpdatedAt,
 		CreatedAt:     t.CreatedAt,
 	}
-	if view.Scopes == nil {
-		view.Scopes = []string{}
-	}
+	// A task commonly holds the same resource twice — once as a `planned` reservation from
+	// when it was filed, once as `declared` when it was claimed. That is legitimate (a task
+	// never conflicts with itself) but reads as a duplicate to anyone looking at it.
+	view.Scopes = dedupe(p.Scopes)
 
 	// The owner always sees their own work in full, regardless of visibility level.
 	if !self && t.Visibility == domain.VisibilityPrivate {
@@ -163,9 +164,7 @@ func ProjectPresence(
 		StartedAt:     s.StartedAt,
 		LastHeartbeat: s.HeartbeatAt,
 	}
-	if entry.Scopes == nil {
-		entry.Scopes = []string{}
-	}
+	entry.Scopes = dedupe(scopes)
 
 	if task != nil {
 		entry.TaskRef = task.Ref
@@ -287,6 +286,20 @@ func SanitizeEventPayload(payload map[string]any) (map[string]any, []string) {
 // careless agent could paste a transcript, so it is truncated rather than trusted
 // (DESIGN.md §18.4).
 const MaxSummaryLength = 500
+
+// dedupe removes repeated entries while preserving order, and always returns a non-nil slice
+// so the field serializes as [] rather than null.
+func dedupe(in []string) []string {
+	out := make([]string, 0, len(in))
+	seen := make(map[string]bool, len(in))
+	for _, s := range in {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
 
 // ClampSummary truncates an agent-supplied summary to a length that cannot carry a
 // meaningful amount of conversation.

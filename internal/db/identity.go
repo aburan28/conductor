@@ -239,11 +239,105 @@ func (s *Store) AuthenticateToken(ctx context.Context, token string) (domain.Pri
 }
 
 func (s *Store) RevokeToken(ctx context.Context, principalID domain.ID, name string) error {
-	_, err := s.pool.Exec(ctx, `
+	tag, err := s.pool.Exec(ctx, `
 		UPDATE api_tokens SET revoked_at = now()
 		 WHERE principal_id = $1::uuid AND name = $2 AND revoked_at IS NULL`,
 		principalID, name)
-	return err
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.ErrNotFound
+	}
+	return nil
+}
+
+// RevokeAllTokens cuts off a principal entirely. Used when a member is removed from a
+// project: dropping the membership alone would leave a valid credential in someone's hands.
+func (s *Store) RevokeAllTokens(ctx context.Context, principalID domain.ID) (int64, error) {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE api_tokens SET revoked_at = now()
+		 WHERE principal_id = $1::uuid AND revoked_at IS NULL`, principalID)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+// TokenInfo describes a token without disclosing it. There is no field here that could carry
+// the secret, because the secret is not stored — only its hash.
+type TokenInfo struct {
+	Name       string     `json:"name"`
+	CreatedAt  time.Time  `json:"created_at"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
+}
+
+// ListTokens returns a principal's tokens, newest first.
+func (s *Store) ListTokens(ctx context.Context, principalID domain.ID) ([]TokenInfo, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT name, created_at, last_used_at, expires_at, revoked_at
+		  FROM api_tokens WHERE principal_id = $1::uuid
+		 ORDER BY created_at DESC`, principalID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TokenInfo
+	for rows.Next() {
+		var t TokenInfo
+		if err := rows.Scan(&t.Name, &t.CreatedAt, &t.LastUsedAt,
+			&t.ExpiresAt, &t.RevokedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// RemoveMember drops a project membership and revokes the principal's tokens in one
+// transaction, so access cannot survive the removal.
+func (s *Store) RemoveMember(ctx context.Context, projectID, principalID domain.ID) error {
+	return s.Tx(ctx, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			DELETE FROM project_memberships
+			 WHERE project_id = $1::uuid AND principal_id = $2::uuid`, projectID, principalID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return domain.ErrNotFound
+		}
+
+		// Tokens are principal-scoped, not project-scoped, so only revoke them when this was
+		// the principal's last membership. Otherwise removing someone from one project would
+		// lock them out of every other one.
+		var remaining int
+		if err := tx.QueryRow(ctx,
+			`SELECT count(*) FROM project_memberships WHERE principal_id = $1::uuid`,
+			principalID).Scan(&remaining); err != nil {
+			return err
+		}
+		if remaining > 0 {
+			return nil
+		}
+		_, err = tx.Exec(ctx, `
+			UPDATE api_tokens SET revoked_at = now()
+			 WHERE principal_id = $1::uuid AND revoked_at IS NULL`, principalID)
+		return err
+	})
+}
+
+// CountProjectAdmins reports how many principals can administer a project, so the last one
+// cannot remove themselves and strand it.
+func (s *Store) CountProjectAdmins(ctx context.Context, projectID domain.ID) (int, error) {
+	var n int
+	err := s.pool.QueryRow(ctx, `
+		SELECT count(*) FROM project_memberships
+		 WHERE project_id = $1::uuid AND role IN ('project_admin','org_admin')`,
+		projectID).Scan(&n)
+	return n, err
 }
 
 // ---------------------------------------------------------------------------

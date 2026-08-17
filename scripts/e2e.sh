@@ -14,7 +14,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT/bin"
 PORT="${CONDUCTOR_E2E_PORT:-8091}"
-ENDPOINT="http://localhost:$PORT"
+ENDPOINT="http://127.0.0.1:$PORT"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/conductor-e2e.XXXXXX")"
 export DATABASE_URL="${DATABASE_URL:-postgres://conductor:conductor@localhost:55432/conductor?sslmode=disable}"
 
@@ -61,7 +61,7 @@ ALICE_TOKEN=$("$BIN/conductord" bootstrap --org "$ORG" --project "$PROJECT" \
 BOB_TOKEN=$("$BIN/conductord" bootstrap --org "$ORG" --project "$PROJECT" \
   --principal bob --role contributor --repo "$WORK/repo" | grep -o 'cdt_[A-Za-z0-9_-]*')
 
-"$BIN/conductord" --addr ":$PORT" >"$WORK/conductord.log" 2>&1 &
+"$BIN/conductord" --addr "127.0.0.1:$PORT" >"$WORK/conductord.log" 2>&1 &
 SERVER_PID=$!
 for _ in $(seq 1 40); do
   curl -sf "$ENDPOINT/v1/health" >/dev/null 2>&1 && break
@@ -120,11 +120,38 @@ CLEAR=$(bob check --summary "Upgrade the Postgres connection pool and add query 
 echo "$CLEAR"
 echo "$CLEAR" | grep -q "Clear" || fail "unrelated work was incorrectly flagged"
 
-step "9. A worker executes a task in an isolated worktree"
-CONDUCTOR_ENDPOINT=$ENDPOINT CONDUCTOR_TOKEN=$ALICE_TOKEN CONDUCTOR_PROJECT=$PROJECT \
-  "$BIN/conductor" worker --dry-run succeed --once -v 2>&1 | grep -vE 'level=DEBUG' | tail -6
+step "9. Onboarding a coworker without database access"
+INVITE=$(alice member add rachel --role contributor --json)
+RACHEL_TOKEN=$(printf '%s' "$INVITE" | sed -n 's/.*"token": *"\([^"]*\)".*/\1/p')
+[[ -n "$RACHEL_TOKEN" ]] || fail "invite did not mint a token"
+rachel() { CONDUCTOR_ENDPOINT=$ENDPOINT CONDUCTOR_TOKEN=$RACHEL_TOKEN CONDUCTOR_PROJECT=$PROJECT "$BIN/conductor" "$@"; }
+rachel task list >/dev/null || fail "the minted token does not work"
+note "rachel can read the project with a token alice issued over the API"
 
-step "10. Project status"
+set +e
+rachel member add mallory --role project_admin >/dev/null 2>&1
+ESCALATE=$?
+set -e
+[[ $ESCALATE -ne 0 ]] || fail "a contributor was able to invite an admin"
+note "a contributor cannot invite; privilege does not escalate"
+
+step "10. A worker executes a task, reaching the control plane over HTTP only"
+# No DATABASE_URL in this environment: the runner holds no database credential.
+env -u DATABASE_URL CONDUCTOR_ENDPOINT=$ENDPOINT CONDUCTOR_TOKEN=$ALICE_TOKEN \
+  CONDUCTOR_PROJECT=$PROJECT "$BIN/conductor" worker --dry-run succeed --once -v 2>&1 \
+  | grep -vE 'level=DEBUG' | tail -6
+
+step "11. Auth throttling protects the credential endpoint"
+for _ in $(seq 1 12); do
+  curl -s -o /dev/null -H "Authorization: Bearer cdt_wrong" "$ENDPOINT/v1/whoami" || true
+done
+THROTTLED=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer cdt_wrong" "$ENDPOINT/v1/whoami")
+[[ "$THROTTLED" == "429" ]] || fail "expected 429 after repeated auth failures, got $THROTTLED"
+VALID=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $ALICE_TOKEN" "$ENDPOINT/v1/whoami")
+[[ "$VALID" == "200" ]] || fail "a valid token was throttled ($VALID); one bad actor would lock out a shared NAT"
+note "bad credentials throttled, good ones unaffected"
+
+step "12. Project status"
 alice status
 
 printf '\n\033[32mAll end-to-end checks passed.\033[0m\n'

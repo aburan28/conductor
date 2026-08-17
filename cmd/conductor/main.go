@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
@@ -23,6 +24,9 @@ Setup
   conductor init                     scaffold .conductor/ into this repository
   conductor login                    save endpoint, token, and project
   conductor doctor                   report which harnesses are installed
+  conductor member add <handle>      give a coworker access (prints a token once)
+  conductor member list|remove       see or revoke who has access
+  conductor token create|list|revoke manage your own credentials
   conductor dashboard                print a ready-to-open dashboard link
 
 Coordination
@@ -68,6 +72,10 @@ func main() {
 		err = cmdInit(args)
 	case "login":
 		err = cmdLogin(ctx, args)
+	case "member":
+		err = cmdMember(ctx, args)
+	case "token":
+		err = cmdToken(ctx, args)
 	case "doctor":
 		err = cmdDoctor(ctx, args)
 	case "dashboard":
@@ -106,6 +114,27 @@ func main() {
 		}
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
+	}
+}
+
+// parseFlags parses flags that may appear before, after, or between positional arguments,
+// returning the positionals in order.
+//
+// The stdlib flag package stops at the first non-flag argument, so `conductor member add
+// rachel --role maintainer` would parse zero flags and silently create a contributor. A
+// silently wrong result is far worse than an error, and nobody writes flags strictly first.
+func parseFlags(fs *flag.FlagSet, args []string) ([]string, error) {
+	var positional []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		rest := fs.Args()
+		if len(rest) == 0 {
+			return positional, nil
+		}
+		positional = append(positional, rest[0])
+		args = rest[1:]
 	}
 }
 

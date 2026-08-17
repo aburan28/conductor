@@ -20,13 +20,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adamburan/conductor/internal/config"
 	"github.com/adamburan/conductor/internal/coord"
 	"github.com/adamburan/conductor/internal/db"
 	"github.com/adamburan/conductor/internal/domain"
 	"github.com/adamburan/conductor/internal/harness"
 	"github.com/adamburan/conductor/internal/router"
-	"github.com/adamburan/conductor/internal/taskcard"
 	"github.com/adamburan/conductor/internal/worktree"
 )
 
@@ -80,19 +78,20 @@ func (o Options) withDefaults() Options {
 }
 
 // Runner executes attempts on one machine.
+//
+// It reaches the control plane only through a Backend, so the same loop serves both the
+// single-host deployment and a laptop that speaks HTTP and holds no database credential.
 type Runner struct {
-	store    *db.Store
-	svc      *coord.Service
+	backend  Backend
 	registry *harness.Registry
 	trees    *worktree.Manager
 	opts     Options
 }
 
-func New(store *db.Store, svc *coord.Service, reg *harness.Registry, opts Options) *Runner {
+func New(backend Backend, reg *harness.Registry, opts Options) *Runner {
 	opts = opts.withDefaults()
 	return &Runner{
-		store:    store,
-		svc:      svc,
+		backend:  backend,
 		registry: reg,
 		trees:    worktree.New(opts.RepoPath, ""),
 		opts:     opts,
@@ -138,17 +137,15 @@ func (r *Runner) Run(ctx context.Context) error {
 
 // step claims and executes at most one task. It returns false when the queue is empty.
 func (r *Runner) step(ctx context.Context) (bool, error) {
-	project, err := r.store.GetProject(ctx, r.opts.ProjectID)
+	snap, err := r.backend.Snapshot(ctx)
 	if err != nil {
 		return false, err
 	}
+	project := snap.Project
 
 	// Respect project concurrency before taking more work.
-	active, err := r.store.CountActiveAttempts(ctx, project.ID, "")
-	if err != nil {
-		return false, err
-	}
-	if project.Config.MaxConcurrentAttempts > 0 && active >= project.Config.MaxConcurrentAttempts {
+	if project.Config.MaxConcurrentAttempts > 0 &&
+		snap.ActiveAttempts >= project.Config.MaxConcurrentAttempts {
 		return false, nil
 	}
 
@@ -157,22 +154,15 @@ func (r *Runner) step(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("%w: no harness available on this runner", domain.ErrCapacity)
 	}
 
-	claim, err := r.store.ClaimNext(ctx, db.ClaimNextParams{
-		ClaimParams: db.ClaimParams{
-			ProjectID:        project.ID,
-			HolderPrincipal:  r.opts.Principal.ID,
-			SponsorPrincipal: r.opts.Principal.ID,
-			RunnerID:         r.opts.RunnerID,
-			Role:             domain.RoleImplementer,
-			Harness:          available[0],
-			WorkflowSHA:      project.WorkflowSHA,
-			ProjectConfigSHA: project.ConfigSHA,
-			RouterPolicyVer:  router.PolicyVersion,
-			LeaseTTL:         project.Config.LeaseTTL.OrDefault(90 * time.Second),
-			ScopePolicy:      config.ScopePolicyFrom(project.Config),
-			AllowWarnings:    true,
-		},
-		MaxCandidates: 10,
+	claim, err := r.backend.ClaimNext(ctx, ClaimRequest{
+		Harness:          available[0],
+		RunnerID:         r.opts.RunnerID,
+		Role:             domain.RoleImplementer,
+		WorkflowSHA:      project.WorkflowSHA,
+		ProjectConfigSHA: project.ConfigSHA,
+		RouterPolicyVer:  router.PolicyVersion,
+		LeaseTTL:         project.Config.LeaseTTL,
+		MaxCandidates:    10,
 	})
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
@@ -185,12 +175,12 @@ func (r *Runner) step(ctx context.Context) (bool, error) {
 		"task", claim.Task.Ref, "attempt", claim.Attempt.AttemptNumber,
 		"epoch", claim.Fence.FencingEpoch)
 
-	if err := r.execute(ctx, project, claim, available); err != nil {
+	if err := r.execute(ctx, snap, claim, available); err != nil {
 		r.opts.Logger.Error("attempt failed",
 			"task", claim.Task.Ref, "error", err)
 		// Hand the task back so it is retried or failed by policy rather than stranded
 		// until the lease expires.
-		if _, rerr := r.store.Release(ctx, db.ReleaseParams{
+		if rerr := r.backend.Release(ctx, ReleaseRequest{
 			Fence:          claim.Fence,
 			Reason:         "runner error",
 			AttemptState:   domain.AttemptFailedRetryable,
@@ -204,22 +194,21 @@ func (r *Runner) step(ctx context.Context) (bool, error) {
 }
 
 // execute runs one attempt end to end.
-func (r *Runner) execute(ctx context.Context, project domain.Project, claim db.ClaimResult, available []string) error {
+func (r *Runner) execute(ctx context.Context, snap coord.RunnerSnapshot, claim db.ClaimResult, available []string) error {
+	project := snap.Project
 	task := claim.Task
-	caller := coord.Caller{Principal: r.opts.Principal, Role: domain.RoleContributor}
 
 	// --- Route --------------------------------------------------------------
-	decision, err := r.route(ctx, project, task, claim.Attempt, available)
+	decision, err := r.route(ctx, snap, task, claim.Attempt, claim.Reservations, available)
 	if err != nil {
 		return err
 	}
 	if decision.Paused {
 		r.opts.Logger.Warn("budget exhausted; handing task back", "task", task.Ref)
-		_, err := r.store.Release(ctx, db.ReleaseParams{
+		return r.backend.Release(ctx, ReleaseRequest{
 			Fence: claim.Fence, Reason: "budget paused",
 			AttemptState: domain.AttemptCancelled, NextTaskStatus: domain.TaskReady,
 		})
-		return err
 	}
 
 	driver, err := r.registry.Get(decision.Harness)
@@ -228,8 +217,8 @@ func (r *Runner) execute(ctx context.Context, project domain.Project, claim db.C
 	}
 
 	// --- Workspace ----------------------------------------------------------
-	if _, err := r.store.UpdateAttempt(ctx, claim.Attempt.ID,
-		db.AttemptProgress{State: domain.AttemptPreparingWorkspace}); err != nil {
+	if err := r.backend.SetAttemptState(ctx, claim.Attempt.ID,
+		domain.AttemptPreparingWorkspace, "", "", false); err != nil {
 		return err
 	}
 
@@ -238,22 +227,13 @@ func (r *Runner) execute(ctx context.Context, project domain.Project, claim db.C
 		return fmt.Errorf("prepare worktree: %w", err)
 	}
 
-	if _, err := r.store.SetAttemptRoute(ctx, claim.Attempt.ID, db.AttemptRoute{
+	if err := r.backend.SetRoute(ctx, claim.Attempt.ID, coord.RouteRecord{
 		ProfileID: decision.ProfileID, Alias: decision.Alias, Model: decision.Model,
 		Harness: decision.Harness, Effort: decision.Effort,
 		RouterPolicyVer: router.PolicyVersion, ModelCatalogVer: decision.CatalogVersion,
 		WorktreePath: ws.Path, Branch: ws.Branch, BaseCommitSHA: ws.BaseSHA,
 		RunnerID: r.opts.RunnerID,
-	}); err != nil {
-		return err
-	}
-	if err := r.store.RecordDecision(ctx, domain.PolicyDecision{
-		ProjectID: project.ID, TaskID: task.ID, AttemptID: claim.Attempt.ID,
-		Kind: "route", Decision: decision.Alias + " -> " + decision.Model,
-		Rationale: map[string]any{
-			"tier": string(decision.Tier), "effort": string(decision.Effort),
-			"harness": decision.Harness, "why": decision.Rationale,
-		},
+		Tier:     string(decision.Tier), Rationale: decision.Rationale,
 	}); err != nil {
 		return err
 	}
@@ -266,7 +246,11 @@ func (r *Runner) execute(ctx context.Context, project domain.Project, claim db.C
 	}()
 
 	// --- Instruction --------------------------------------------------------
-	instruction, cardPath, err := r.writeTaskCard(ctx, project, task, claim, ws, decision)
+	brief, err := r.backend.Brief(ctx, claim.Attempt.ID)
+	if err != nil {
+		return err
+	}
+	cardPath, err := writeCard(ws.Path, task.Ref, brief.Card)
 	if err != nil {
 		return err
 	}
@@ -276,13 +260,13 @@ func (r *Runner) execute(ctx context.Context, project domain.Project, claim db.C
 	}
 
 	// --- Launch -------------------------------------------------------------
-	if _, err := r.store.UpdateAttempt(ctx, claim.Attempt.ID,
-		db.AttemptProgress{State: domain.AttemptStartingHarness}); err != nil {
+	if err := r.backend.SetAttemptState(ctx, claim.Attempt.ID,
+		domain.AttemptStartingHarness, "", "", false); err != nil {
 		return err
 	}
 
 	spec := harness.RunSpec{
-		TaskRef: task.Ref, TaskCardPath: cardPath, Instruction: instruction,
+		TaskRef: task.Ref, TaskCardPath: cardPath, Instruction: brief.Instruction,
 		Cwd: ws.Path, Branch: ws.Branch, BaseSHA: ws.BaseSHA,
 		Model: decision.Model, Effort: decision.Effort, Role: domain.RoleImplementer,
 		MaxTurns: r.opts.MaxTurns, Timeout: r.opts.AttemptTimeout,
@@ -298,12 +282,8 @@ func (r *Runner) execute(ctx context.Context, project domain.Project, claim db.C
 	if err != nil {
 		return fmt.Errorf("start harness %s: %w", decision.Harness, err)
 	}
-	if _, err := r.store.UpdateAttempt(ctx, claim.Attempt.ID,
-		db.AttemptProgress{State: domain.AttemptRunning, Branch: ws.Branch, WorktreePath: ws.Path}); err != nil {
-		return err
-	}
-	if _, err := r.store.UpdateTaskStatus(ctx, task.ID, domain.TaskRunning); err != nil &&
-		!errors.Is(err, domain.ErrIllegalTransition) {
+	if err := r.backend.SetAttemptState(ctx, claim.Attempt.ID,
+		domain.AttemptRunning, ws.Branch, ws.Path, true); err != nil {
 		return err
 	}
 
@@ -312,7 +292,7 @@ func (r *Runner) execute(ctx context.Context, project domain.Project, claim db.C
 	// Without that it would sit on its ticker forever and the runner would never finish the
 	// attempt it is waiting on.
 	superviseCtx, stopSupervision := context.WithCancel(ctx)
-	supervision := r.supervise(superviseCtx, project, task, claim, ws, handle, caller)
+	supervision := r.supervise(superviseCtx, project, task, claim, ws, handle)
 
 	result, waitErr := handle.Wait(ctx)
 	stopSupervision()
@@ -355,7 +335,7 @@ func (r *Runner) execute(ctx context.Context, project domain.Project, claim db.C
 		RunnerID: r.opts.RunnerID, CreatedAt: time.Now().UTC(),
 	}
 
-	finish, err := r.svc.FinishWork(ctx, caller, coord.FinishRequest{
+	finish, err := r.backend.Finish(ctx, coord.FinishRequest{
 		Fence: claim.Fence, ProjectID: project.ID, Outcome: outcome,
 		FailureClass: failureClass, Evidence: &manifest, RunnerID: r.opts.RunnerID,
 	})
@@ -383,7 +363,6 @@ func (r *Runner) supervise(
 	claim db.ClaimResult,
 	ws worktree.Workspace,
 	handle harness.Handle,
-	caller coord.Caller,
 ) <-chan struct{} {
 	done := make(chan struct{})
 
@@ -426,7 +405,7 @@ func (r *Runner) supervise(
 					r.opts.Logger.Warn("worktree status failed", "error", err)
 				}
 
-				if err := r.svc.ReportProgress(ctx, caller, claim.Fence, project.ID,
+				if err := r.backend.ReportProgress(ctx, claim.Fence,
 					coord.ProgressReport{
 						Phase: "implementing", ChangedPaths: changed,
 						TokensIn: tokensIn, TokensOut: tokensOut, CostUSD: cost, Turns: turns,
@@ -458,7 +437,7 @@ func (r *Runner) supervise(
 					continue
 				}
 
-				res, err := r.svc.ExpandScope(ctx, caller, claim.Fence, project.ID,
+				res, err := r.backend.ExpandScope(ctx, claim.Fence,
 					drifted, domain.SourceObserved)
 				if err != nil {
 					r.opts.Logger.Warn("scope expansion failed", "error", err)
@@ -479,19 +458,12 @@ func (r *Runner) supervise(
 }
 
 // route resolves the model for this attempt.
-func (r *Runner) route(ctx context.Context, project domain.Project, task domain.Task, attempt domain.Attempt, available []string) (router.Decision, error) {
-	profiles, err := r.store.ListModelProfiles(ctx, project.OrganizationID)
-	if err != nil {
-		return router.Decision{}, err
-	}
-	reservations, err := r.store.ReservationsForTask(ctx, task.ID)
-	if err != nil {
-		return router.Decision{}, err
-	}
-	spent, err := r.store.SpendSince(ctx, project.ID, "30 days")
-	if err != nil {
-		return router.Decision{}, err
-	}
+//
+// Every input comes from the snapshot and the claim, so this makes no additional round trips
+// — which matters when the control plane is across a network rather than in the same process.
+func (r *Runner) route(ctx context.Context, snap coord.RunnerSnapshot, task domain.Task, attempt domain.Attempt, reservations []domain.ScopeReservation, available []string) (router.Decision, error) {
+	project := snap.Project
+	profiles := snap.Profiles
 
 	features := router.DeriveFeatures(scopeStrings(reservations), attempt.ChangedPaths,
 		router.DefaultFeaturePolicy(), task.Features)
@@ -516,7 +488,7 @@ func (r *Runner) route(ctx context.Context, project domain.Project, task domain.
 		AvailableHarnesses: available,
 		Budget: router.BudgetState{
 			MonthlyUSD:  project.Config.Budget.MonthlyUSD,
-			SpentUSD:    spent,
+			SpentUSD:    snap.SpentUSD,
 			DownshiftAt: project.Config.Budget.DownshiftAt,
 			PauseAt:     project.Config.Budget.PauseAt,
 		},
@@ -591,50 +563,18 @@ func buildCatalog(profiles []domain.ModelProfile) router.Catalog {
 	return cat
 }
 
-// writeTaskCard materializes the card into the worktree and returns the agent instruction.
-func (r *Runner) writeTaskCard(ctx context.Context, project domain.Project, task domain.Task, claim db.ClaimResult, ws worktree.Workspace, decision router.Decision) (string, string, error) {
-	owner, err := r.store.GetPrincipal(ctx, task.CreatedBy)
-	if err != nil {
-		return "", "", err
+// writeCard materializes the rendered task card into the worktree so the agent can read it
+// as a file, not only as an instruction.
+func writeCard(worktreePath, taskRef, rendered string) (string, error) {
+	dir := filepath.Join(worktreePath, ".conductor", "generated", "tasks")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
 	}
-	attempt := claim.Attempt
-	attempt.Branch, attempt.WorktreePath = ws.Branch, ws.Path
-	attempt.ModelAlias, attempt.ResolvedModel = decision.Alias, decision.Model
-	attempt.Harness, attempt.ReasoningEffort = decision.Harness, decision.Effort
-
-	card := taskcard.FromTask(task, project.Slug, owner.Handle, &attempt, &claim.Lease,
-		claim.Reservations, task.DependsOn, project.Config.RequiredChecks)
-
-	var workflowBody string
-	if wf, err := r.store.GetWorkflow(ctx, project.ID, project.WorkflowSHA); err == nil {
-		workflowBody = wf.Content
+	path := filepath.Join(dir, taskRef+".md")
+	if err := os.WriteFile(path, []byte(rendered), 0o644); err != nil {
+		return "", err
 	}
-
-	var handoff *domain.HandoffBundle
-	if h, err := r.store.LatestHandoff(ctx, task.ID); err == nil {
-		handoff = &h.Bundle
-	} else if !errors.Is(err, domain.ErrNotFound) {
-		return "", "", err
-	}
-
-	instruction, err := taskcard.Instruction(card, workflowBody, handoff)
-	if err != nil {
-		return "", "", err
-	}
-
-	rendered, err := card.Render()
-	if err != nil {
-		return "", "", err
-	}
-	cardDir := filepath.Join(ws.Path, ".conductor", "generated", "tasks")
-	if err := os.MkdirAll(cardDir, 0o755); err != nil {
-		return "", "", err
-	}
-	cardPath := filepath.Join(cardDir, task.Ref+".md")
-	if err := os.WriteFile(cardPath, []byte(rendered), 0o644); err != nil {
-		return "", "", err
-	}
-	return instruction, cardPath, nil
+	return path, nil
 }
 
 // writeMCPConfig drops an MCP server config into the worktree so the agent can call the
