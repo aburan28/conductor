@@ -1,6 +1,10 @@
 package domain
 
-import "time"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
 
 // IDs are UUIDs carried as strings. SQL casts them explicitly (`$1::uuid`, `id::text`) so no
 // database-specific UUID type has to leak into the domain package.
@@ -156,23 +160,167 @@ type RunnerCapabilities struct {
 }
 
 type Session struct {
-	ID             ID           `json:"id"`
-	ProjectID      ID           `json:"project_id"`
-	PrincipalID    ID           `json:"principal_id"`
-	RunnerID       ID           `json:"runner_id,omitempty"`
-	Harness        string       `json:"harness"`
-	HarnessVersion string       `json:"harness_version,omitempty"`
-	MachineID      string       `json:"machine_id,omitempty"`
-	BaseSHA        string       `json:"base_sha,omitempty"`
-	Branch         string       `json:"branch,omitempty"`
-	WorktreePath   string       `json:"worktree_path,omitempty"`
-	Visibility     Visibility   `json:"visibility"`
-	ActiveTaskID   ID           `json:"active_task_id,omitempty"`
-	State          SessionState `json:"state"`
-	StartedAt      time.Time    `json:"started_at"`
-	HeartbeatAt    time.Time    `json:"heartbeat_at"`
-	ExpiresAt      time.Time    `json:"expires_at"`
-	ClosedAt       *time.Time   `json:"closed_at,omitempty"`
+	ID             ID                  `json:"id"`
+	ProjectID      ID                  `json:"project_id"`
+	PrincipalID    ID                  `json:"principal_id"`
+	RunnerID       ID                  `json:"runner_id,omitempty"`
+	Harness        string              `json:"harness"`
+	HarnessVersion string              `json:"harness_version,omitempty"`
+	MachineID      string              `json:"machine_id,omitempty"`
+	BaseSHA        string              `json:"base_sha,omitempty"`
+	Branch         string              `json:"branch,omitempty"`
+	WorktreePath   string              `json:"worktree_path,omitempty"`
+	Visibility     Visibility          `json:"visibility"`
+	ActiveTaskID   ID                  `json:"active_task_id,omitempty"`
+	State          SessionState        `json:"state"`
+	Capabilities   SessionCapabilities `json:"capabilities"`
+	StartedAt      time.Time           `json:"started_at"`
+	HeartbeatAt    time.Time           `json:"heartbeat_at"`
+	ExpiresAt      time.Time           `json:"expires_at"`
+	ClosedAt       *time.Time          `json:"closed_at,omitempty"`
+}
+
+// SessionCapabilities is what a live session can actually do: which model it is driving, how
+// hard it is allowed to think, and what the catalog says that combination is worth
+// (DESIGN.md §7.3, §13).
+//
+// A runner advertises what a *machine* could run (RunnerCapabilities). This advertises what
+// one *running session* is, right now — which is the thing you need to know before handing it
+// work that requires a frontier model at xhigh effort.
+//
+// Declared fields are what the session said about itself. Resolved fields (Tier, Capability
+// tags, ContextWindow, ProfileID) are filled in by the control plane from the organization's
+// model catalog, so a session cannot promote itself into a tier by asserting one. Resolved is
+// false when the model matched no catalog profile — such a session is still usable, but only
+// for requirements that do not name a tier or capability floor.
+type SessionCapabilities struct {
+	Model         string   `json:"model,omitempty"`
+	Alias         string   `json:"alias,omitempty"`
+	Effort        Effort   `json:"reasoning_effort,omitempty"`
+	MaxEffort     Effort   `json:"max_reasoning_effort,omitempty"`
+	Roles         []string `json:"roles,omitempty"`
+	MaxQueue      int      `json:"max_queue,omitempty"`
+	Tier          Tier     `json:"tier,omitempty"`
+	Capabilities  []string `json:"capabilities,omitempty"`
+	ContextWindow int      `json:"context_window,omitempty"`
+	ProfileID     ID       `json:"profile_id,omitempty"`
+	Resolved      bool     `json:"resolved"`
+}
+
+// Ceiling is the highest effort this session can be asked for. A session that declared only
+// its current effort is assumed unable to go higher: assuming otherwise would route xhigh
+// work to a session running at low and silently get low.
+func (c SessionCapabilities) Ceiling() Effort {
+	if c.MaxEffort != "" {
+		return c.MaxEffort
+	}
+	return c.Effort
+}
+
+// HasCapabilities reports whether the session satisfies every capability tag in floor.
+func (c SessionCapabilities) HasCapabilities(floor []string) bool {
+	have := make(map[string]bool, len(c.Capabilities))
+	for _, tag := range c.Capabilities {
+		have[tag] = true
+	}
+	for _, want := range floor {
+		if !have[want] {
+			return false
+		}
+	}
+	return true
+}
+
+// ServesRole reports whether the session accepts work in the given role. A session that
+// declared no roles accepts any: the common case is one person at one terminal, and making
+// them enumerate roles before they can be handed anything would be pointless ceremony.
+func (c SessionCapabilities) ServesRole(role AgentRole) bool {
+	if role == "" || len(c.Roles) == 0 {
+		return true
+	}
+	for _, r := range c.Roles {
+		if r == string(role) {
+			return true
+		}
+	}
+	return false
+}
+
+// CapabilityRequirement is the floor a session must meet to be handed a piece of work
+// (DESIGN.md §7.7, §13.5).
+//
+// Every field is optional and every populated field is a floor, never a preference. That is
+// deliberate: "this coordinator work needs xhigh on a T4 model" must not be satisfiable by a
+// cheaper session that happens to be idle. Preferences that may be traded away belong in the
+// ranking, not here.
+type CapabilityRequirement struct {
+	Tier          Tier      `json:"tier,omitempty"`
+	Effort        Effort    `json:"reasoning_effort,omitempty"`
+	Capabilities  []string  `json:"capabilities,omitempty"`
+	Harness       string    `json:"harness,omitempty"`
+	Model         string    `json:"model,omitempty"`
+	Role          AgentRole `json:"role,omitempty"`
+	ContextWindow int       `json:"context_window,omitempty"`
+	// ExcludeSession keeps a session from being handed work it just escalated away.
+	ExcludeSession ID `json:"exclude_session,omitempty"`
+}
+
+// Empty reports whether the requirement constrains anything at all.
+func (r CapabilityRequirement) Empty() bool {
+	return r.Tier == "" && r.Effort == "" && len(r.Capabilities) == 0 &&
+		r.Harness == "" && r.Model == "" && r.Role == "" && r.ContextWindow == 0
+}
+
+// Describe renders the requirement for a human or an audit record.
+func (r CapabilityRequirement) Describe() string {
+	var parts []string
+	if r.Tier != "" {
+		parts = append(parts, "tier ≥ "+string(r.Tier))
+	}
+	if r.Effort != "" {
+		parts = append(parts, "effort ≥ "+string(r.Effort))
+	}
+	if r.Model != "" {
+		parts = append(parts, "model "+r.Model)
+	}
+	if r.Harness != "" {
+		parts = append(parts, "harness "+r.Harness)
+	}
+	if r.Role != "" {
+		parts = append(parts, "role "+string(r.Role))
+	}
+	if r.ContextWindow > 0 {
+		parts = append(parts, fmt.Sprintf("context ≥ %d", r.ContextWindow))
+	}
+	for _, c := range r.Capabilities {
+		parts = append(parts, "can "+c)
+	}
+	if len(parts) == 0 {
+		return "no requirement"
+	}
+	return strings.Join(parts, ", ")
+}
+
+// Assignment is an offer of a task to one session (DESIGN.md §7.7).
+//
+// It carries no instruction text of its own. What the receiving session should do is the task
+// card and the handoff bundle — both already assembled from ledger state — so an assignment
+// can never become a side channel for one principal's prose to reach another's context.
+type Assignment struct {
+	ID          ID                    `json:"id"`
+	TaskID      ID                    `json:"task_id"`
+	TaskRef     string                `json:"task_ref,omitempty"`
+	ProjectID   ID                    `json:"project_id"`
+	SessionID   ID                    `json:"session_id"`
+	HandoffID   ID                    `json:"handoff_id,omitempty"`
+	Requirement CapabilityRequirement `json:"requirement"`
+	State       AssignmentState       `json:"state"`
+	Rationale   string                `json:"rationale,omitempty"`
+	Response    string                `json:"response,omitempty"`
+	CreatedBy   ID                    `json:"created_by,omitempty"`
+	CreatedAt   time.Time             `json:"created_at"`
+	ExpiresAt   time.Time             `json:"expires_at"`
+	RespondedAt *time.Time            `json:"responded_at,omitempty"`
 }
 
 type AcceptanceCriterion struct {

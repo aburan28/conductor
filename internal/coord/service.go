@@ -381,6 +381,18 @@ func (s *Service) StartWork(ctx context.Context, c Caller, req StartWorkRequest)
 		return StartWorkResult{}, err
 	}
 
+	// Claiming the work settles any offer of it. The session that was offered the task and
+	// took it fulfils its own offer; anyone else claiming first cancels it, so an offer never
+	// outlives the opening it was made for.
+	if req.SessionID != "" {
+		if err := s.Store.FulfilledByAttempt(ctx, claim.Task.ID, req.SessionID); err != nil {
+			return StartWorkResult{}, err
+		}
+	}
+	if _, err := s.Store.CancelAssignmentsForTask(ctx, claim.Task.ID, "task was claimed"); err != nil {
+		return StartWorkResult{}, err
+	}
+
 	view, err := s.taskView(ctx, c, claim.Task)
 	if err != nil {
 		return StartWorkResult{}, err

@@ -116,6 +116,43 @@ var AllSessionStates = []SessionState{
 	SessionBlocked, SessionReviewing, SessionOfflineGrace, SessionStale, SessionClosed,
 }
 
+// Accepting reports whether a session in this state can be offered new work. A session that
+// is blocked or waiting for its human is present but not available, and offering it work
+// would park a task behind a person who is not there.
+func (s SessionState) Accepting() bool {
+	switch s {
+	case SessionOnlineIdle, SessionPlanning, SessionWorking, SessionReviewing:
+		return true
+	default:
+		return false
+	}
+}
+
+// AssignmentState is the lifecycle of an offer of work to a specific session (DESIGN.md §7.7).
+//
+// An assignment is an offer, not a command. Conductor cannot make a session do anything; it
+// can only put work where a capable session will find it, and record what happened next.
+type AssignmentState string
+
+const (
+	AssignmentOffered   AssignmentState = "offered"
+	AssignmentAccepted  AssignmentState = "accepted"
+	AssignmentDeclined  AssignmentState = "declined"
+	AssignmentExpired   AssignmentState = "expired"
+	AssignmentCancelled AssignmentState = "cancelled"
+	AssignmentFulfilled AssignmentState = "fulfilled"
+)
+
+var AllAssignmentStates = []AssignmentState{
+	AssignmentOffered, AssignmentAccepted, AssignmentDeclined,
+	AssignmentExpired, AssignmentCancelled, AssignmentFulfilled,
+}
+
+// Open reports whether the assignment is still awaiting or holding a session's answer.
+func (a AssignmentState) Open() bool {
+	return a == AssignmentOffered || a == AssignmentAccepted
+}
+
 // Visibility enumerates DESIGN.md §12.3. Ordering matters: each level is a superset of the
 // one before it.
 type Visibility string
@@ -280,6 +317,11 @@ const (
 )
 
 // Effort enumerates reasoning effort levels.
+//
+// `xhigh` sits between `high` and `max` because harnesses expose it as a distinct, more
+// expensive setting rather than a synonym for either neighbour. Both `xhigh` and `max` are
+// opt-in: automatic escalation stops at `high` (see Up), so a retry loop can never walk a
+// task onto the two most expensive settings on its own.
 type Effort string
 
 const (
@@ -287,11 +329,27 @@ const (
 	EffortLow    Effort = "low"
 	EffortMedium Effort = "medium"
 	EffortHigh   Effort = "high"
+	EffortXHigh  Effort = "xhigh"
 	EffortMax    Effort = "max"
 )
 
+var AllEfforts = []Effort{
+	EffortNone, EffortLow, EffortMedium, EffortHigh, EffortXHigh, EffortMax,
+}
+
 var effortOrder = map[Effort]int{
-	EffortNone: 0, EffortLow: 1, EffortMedium: 2, EffortHigh: 3, EffortMax: 4,
+	EffortNone: 0, EffortLow: 1, EffortMedium: 2, EffortHigh: 3, EffortXHigh: 4, EffortMax: 5,
+}
+
+// AtLeast reports whether e meets the floor. An unset effort meets only an unset floor.
+func (e Effort) AtLeast(floor Effort) bool {
+	if floor == "" {
+		return true
+	}
+	if e == "" {
+		return false
+	}
+	return effortOrder[e] >= effortOrder[floor]
 }
 
 // AtMost clamps e to ceiling.
@@ -302,7 +360,7 @@ func (e Effort) AtMost(ceiling Effort) Effort {
 	return e
 }
 
-// Up returns the next effort level, saturating at max.
+// Up returns the next effort level, saturating at high.
 func (e Effort) Up() Effort {
 	switch e {
 	case EffortNone:
@@ -312,14 +370,20 @@ func (e Effort) Up() Effort {
 	case EffortMedium:
 		return EffortHigh
 	default:
-		return EffortHigh // `max` is opt-in only; escalation stops at high
+		// `xhigh` and `max` are opt-in only; escalation stops at high. A caller that wants
+		// one of them asks for it by name, which is what makes the spend deliberate.
+		return EffortHigh
 	}
 }
 
 // Down returns the previous effort level, saturating at none.
 func (e Effort) Down() Effort {
 	switch e {
-	case EffortMax, EffortHigh:
+	case EffortMax:
+		return EffortXHigh
+	case EffortXHigh:
+		return EffortHigh
+	case EffortHigh:
 		return EffortMedium
 	case EffortMedium:
 		return EffortLow

@@ -14,16 +14,22 @@ import (
 const sessionColumns = `
 	id::text, project_id::text, principal_id::text, COALESCE(runner_id::text, ''),
 	harness, harness_version, machine_id, base_sha, branch, worktree_path,
-	visibility, COALESCE(active_task_id::text, ''), state,
+	visibility, COALESCE(active_task_id::text, ''), state, capabilities,
 	started_at, heartbeat_at, expires_at, closed_at`
 
 func scanSession(scan func(...any) error) (domain.Session, error) {
 	var s domain.Session
-	err := scan(&s.ID, &s.ProjectID, &s.PrincipalID, &s.RunnerID,
+	var caps []byte
+	if err := scan(&s.ID, &s.ProjectID, &s.PrincipalID, &s.RunnerID,
 		&s.Harness, &s.HarnessVersion, &s.MachineID, &s.BaseSHA, &s.Branch, &s.WorktreePath,
-		&s.Visibility, &s.ActiveTaskID, &s.State,
-		&s.StartedAt, &s.HeartbeatAt, &s.ExpiresAt, &s.ClosedAt)
-	return s, err
+		&s.Visibility, &s.ActiveTaskID, &s.State, &caps,
+		&s.StartedAt, &s.HeartbeatAt, &s.ExpiresAt, &s.ClosedAt); err != nil {
+		return domain.Session{}, err
+	}
+	if err := decodeJSON(caps, &s.Capabilities); err != nil {
+		return domain.Session{}, err
+	}
+	return s, nil
 }
 
 type RegisterSessionParams struct {
@@ -37,6 +43,7 @@ type RegisterSessionParams struct {
 	Branch         string
 	WorktreePath   string
 	Visibility     domain.Visibility
+	Capabilities   domain.SessionCapabilities
 	TTL            time.Duration
 }
 
@@ -51,15 +58,38 @@ func (s *Store) RegisterSession(ctx context.Context, p RegisterSessionParams) (d
 	if p.TTL <= 0 {
 		p.TTL = 90 * time.Second
 	}
+	caps, err := marshalJSON(p.Capabilities)
+	if err != nil {
+		return domain.Session{}, err
+	}
 	sess, err := scanSession(s.pool.QueryRow(ctx, `
 		INSERT INTO sessions (project_id, principal_id, runner_id, harness, harness_version,
-		                      machine_id, base_sha, branch, worktree_path, visibility, expires_at)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10, now() + $11::interval)
+		                      machine_id, base_sha, branch, worktree_path, visibility,
+		                      capabilities, expires_at)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11,
+		        now() + $12::interval)
 		RETURNING `+sessionColumns,
 		p.ProjectID, p.PrincipalID, nullable(p.RunnerID), p.Harness, p.HarnessVersion,
-		p.MachineID, p.BaseSHA, p.Branch, p.WorktreePath, p.Visibility, p.TTL.String(),
+		p.MachineID, p.BaseSHA, p.Branch, p.WorktreePath, p.Visibility, caps, p.TTL.String(),
 	).Scan)
 	return sess, err
+}
+
+// SetSessionCapabilities replaces a session's advertised capabilities.
+//
+// Capabilities change mid-session — someone switches model or raises effort — and routing
+// that trusts a stale advertisement will hand xhigh work to a session that dropped to medium
+// an hour ago.
+func (s *Store) SetSessionCapabilities(ctx context.Context, id domain.ID, caps domain.SessionCapabilities) (domain.Session, error) {
+	raw, err := marshalJSON(caps)
+	if err != nil {
+		return domain.Session{}, err
+	}
+	sess, err := scanSession(s.pool.QueryRow(ctx, `
+		UPDATE sessions SET capabilities = $2
+		 WHERE id = $1::uuid AND closed_at IS NULL
+		RETURNING `+sessionColumns, id, raw).Scan)
+	return sess, noRows(err)
 }
 
 func (s *Store) GetSession(ctx context.Context, id domain.ID) (domain.Session, error) {

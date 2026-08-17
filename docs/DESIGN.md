@@ -412,6 +412,54 @@ A runner is installed on each machine allowed to execute tasks. It:
 
 Runners connect outbound to the control plane so a developer laptop or EC2 host does not need an inbound public port.
 
+### 7.10a Session capability advertisement and assignment
+
+A runner advertises what a *machine* could run. A session advertises what one *running* agent
+is, right now: the model it is driving, the reasoning effort it is running at, and the ceiling
+it can be raised to. Without that, presence can say who is here but not who can do a given
+piece of work, and a task that needs a frontier model at high effort gets started by whoever
+asked first.
+
+**Declared, then resolved.** A session declares harness, model, effort, an optional effort
+ceiling, and optionally the roles it will accept. The control plane resolves the declared model
+against the organization's model catalog and fills in tier, capability tags, and context window
+from the matching profile. A session cannot assert its own tier: if it could, a capability
+floor would be a suggestion. A model that matches no profile stays *unresolved* — usable for
+work that names no tier or capability floor, ineligible for anything that does.
+
+**Requirement.** A capability requirement is a set of floors: tier, reasoning effort,
+capability tags, harness, model, role, context window. Every populated field is a floor, never
+a preference. Preferences that may be traded away belong in the ranking.
+
+**Selection.** Candidates are filtered by the floors, then ranked: least loaded first, then the
+*cheapest* session that still clears every floor. Preferring the cheapest qualifying session is
+deliberate — the floor already guarantees capability, and spending a frontier session on work a
+mid-tier one can do makes it unavailable when something needs it. Selection is deterministic and
+returns a rationale plus a reason for every rejected session, because "no capacity" alone is not
+actionable and "three sessions are up, none can think that hard" is.
+
+**Assignment is an offer, not a command.** Conductor cannot make a session do anything; it puts
+work where a capable session will find it and records what happened next. An offer:
+
+- is unique per task while open, so two coordinators racing to place the same work produce one
+  offer and one conflict rather than two sessions both told the work is theirs;
+- expires on its own deadline, and is released when the holding session goes stale, so a closed
+  laptop cannot hold a task hostage;
+- is settled by the claim: the session that takes the work fulfils its own offer, and anyone
+  else claiming first cancels it.
+
+**Escalation.** `coord_delegate` is the agent-facing form: package the continuation bundle
+exactly as a handoff does, release the lease, and offer the task to a session meeting the
+floor. Failure to place is not an error — the bundle is still written and the task is still
+released, because losing a completed handoff because no capable session happened to be online
+is strictly worse than a ready task with an explanation attached.
+
+**Privacy.** Tier, effort, and capability tags are always published: they are what makes
+capability routing possible and say nothing about what anyone is working on. The concrete model
+name is execution identity and follows the same `publishModelIdentity` switch as an attempt's
+(§20.2), so a team that does not broadcast which vendor each person pays for still gets working
+capability routing.
+
 ### 7.11 Repository indexer
 
 The MVP only needs Git metadata and path-level indexing. Later versions can add:
@@ -832,10 +880,15 @@ A routing decision has three independent parts:
 role: planner | implementer | verifier | reviewer | researcher
 harness: claude | codex | opencode | generic
 model_profile: provider/model alias
-reasoning_effort: none | low | medium | high | max
+reasoning_effort: none | low | medium | high | xhigh | max
 ```
 
 This avoids assuming that “Codex,” “Claude,” or “OpenCode” is itself a model tier.
+
+`xhigh` is a distinct setting on the harnesses that expose it, not a synonym for `high` or
+`max`. Both `xhigh` and `max` are opt-in: automatic escalation after repeated failure stops at
+`high`, so a retry loop cannot walk a task onto the two most expensive settings on its own. A
+caller that wants one asks for it by name, which is what makes the spend deliberate.
 
 ### 13.2 Model aliases
 

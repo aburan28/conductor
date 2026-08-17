@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 
 	"github.com/adamburan/conductor/internal/client"
 	"github.com/adamburan/conductor/internal/coord"
@@ -161,6 +162,50 @@ func toolDefinitions() []map[string]any {
 			},
 		},
 		{
+			"name": "coord_capabilities",
+			"description": "What the sessions live on this project can actually do right now: which models are " +
+				"connected, the highest tier and reasoning effort available, and who is free. Pass a requirement " +
+				"to ask whether anything here can serve it before you plan work that depends on the answer.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tier":   map[string]any{"type": "string", "enum": []string{"T0", "T1", "T2", "T3", "T4"}},
+					"effort": map[string]any{"type": "string", "enum": []string{"none", "low", "medium", "high", "xhigh", "max"}},
+					"capabilities": map[string]any{
+						"type": "array", "items": map[string]any{"type": "string"},
+						"description": "Capability tags the session must have, such as architecture or long_context.",
+					},
+					"harness": map[string]any{"type": "string"},
+					"role":    map[string]any{"type": "string", "enum": []string{"planner", "implementer", "verifier", "reviewer", "researcher"}},
+				},
+			},
+		},
+		{
+			"name": "coord_delegate",
+			"description": "Hand the current task to a live session that meets a capability floor — use this when the " +
+				"work needs a more capable model or more reasoning effort than you are running at. Packages the same " +
+				"continuation bundle as coord_handoff, releases your lease, and offers the task to the cheapest " +
+				"session that clears the floor. If nothing live qualifies the bundle is still written, and you are " +
+				"told what the ceiling actually is.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tier": map[string]any{"type": "string", "enum": []string{"T0", "T1", "T2", "T3", "T4"},
+						"description": "Minimum model tier the receiving session must be running."},
+					"effort": map[string]any{"type": "string", "enum": []string{"none", "low", "medium", "high", "xhigh", "max"},
+						"description": "Minimum reasoning effort the receiving session must be able to run at."},
+					"capabilities": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"harness":      map[string]any{"type": "string"},
+					"role": map[string]any{"type": "string",
+						"enum": []string{"planner", "implementer", "verifier", "reviewer", "researcher"}},
+					"next_action":    map[string]any{"type": "string", "description": "What the receiving session should do first."},
+					"completed":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"open_questions": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"assumptions":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				},
+			},
+		},
+		{
 			"name": "coord_project_status",
 			"description": "Who is working on what right now, plus open conflicts. Shows tasks, owners, scopes, and " +
 				"branches. Never shows anyone's prompts or model output.",
@@ -194,6 +239,10 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		return s.finishWork(ctx, raw)
 	case "coord_handoff":
 		return s.handoff(ctx, raw)
+	case "coord_capabilities":
+		return s.capabilities(ctx, raw)
+	case "coord_delegate":
+		return s.delegate(ctx, raw)
 	case "coord_project_status":
 		return s.projectStatus(ctx)
 	default:
@@ -296,6 +345,11 @@ func (s *Server) getWork(ctx context.Context, raw json.RawMessage) (any, error) 
 
 	task := firstNonEmpty(args.Task, s.fence.TaskID)
 	if task == "" {
+		// No active task is not necessarily an error: work may have been offered to this
+		// session by a coordinator that decided it needed this session's model.
+		if offers := s.offers(ctx); offers != "" {
+			return toolResult(offers, false), nil
+		}
 		return nil, errors.New("no active task; call coord_start_work first or pass a task id")
 	}
 
@@ -311,7 +365,37 @@ func (s *Server) getWork(ctx context.Context, raw json.RawMessage) (any, error) 
 			out += "\n\n## Handoff bundle\n\n```json\n" + string(body) + "\n```\n"
 		}
 	}
+	if offers := s.offers(ctx); offers != "" {
+		out += "\n\n" + offers
+	}
 	return toolResult(out, false), nil
+}
+
+// offers renders the work waiting for this session, if any.
+//
+// It is folded into coord_get_work rather than given a tool of its own: an agent already
+// calls get_work to find out what it should be doing, and a tenth tool that answers a
+// question the ninth already implies costs context in every window for nothing (§4.9).
+func (s *Server) offers(ctx context.Context) string {
+	if s.session == "" {
+		return ""
+	}
+	var body struct {
+		Assignments []domain.Assignment `json:"assignments"`
+	}
+	if err := s.api.Get(ctx, "/v1/sessions/"+string(s.session)+"/assignments", &body); err != nil {
+		return ""
+	}
+	if len(body.Assignments) == 0 {
+		return ""
+	}
+	out := "## Work offered to this session\n\n" +
+		"You were chosen for this because your model and reasoning effort meet a floor the " +
+		"work requires. Call coord_start_work with attach_to set to the task to take it.\n\n"
+	for _, a := range body.Assignments {
+		out += fmt.Sprintf("- %s (%s) — requires %s\n", a.TaskRef, a.State, a.Requirement.Describe())
+	}
+	return out
 }
 
 func (s *Server) expandScope(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -474,6 +558,98 @@ func (s *Server) handoff(ctx context.Context, raw json.RawMessage) (any, error) 
 	if err != nil {
 		return nil, err
 	}
+	s.fence = domain.Fence{}
+	return jsonResult(out), nil
+}
+
+// requirementArgs is the capability floor an agent can name on the two capability tools.
+type requirementArgs struct {
+	Tier         string   `json:"tier"`
+	Effort       string   `json:"effort"`
+	Capabilities []string `json:"capabilities"`
+	Harness      string   `json:"harness"`
+	Role         string   `json:"role"`
+}
+
+func (a requirementArgs) query() string {
+	values := url.Values{}
+	for key, value := range map[string]string{
+		"tier": a.Tier, "effort": a.Effort, "harness": a.Harness, "role": a.Role,
+	} {
+		if value != "" {
+			values.Set(key, value)
+		}
+	}
+	for _, c := range a.Capabilities {
+		if c != "" {
+			values.Add("capability", c)
+		}
+	}
+	if len(values) == 0 {
+		return ""
+	}
+	return "?" + values.Encode()
+}
+
+func (a requirementArgs) requirement() map[string]any {
+	return map[string]any{
+		"tier": a.Tier, "reasoning_effort": a.Effort, "capabilities": a.Capabilities,
+		"harness": a.Harness, "role": a.Role,
+	}
+}
+
+func (s *Server) capabilities(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args requirementArgs
+	_ = json.Unmarshal(raw, &args)
+
+	var inv coord.CapabilityInventory
+	path := "/v1/projects/" + s.project + "/capabilities" + args.query()
+	if err := s.api.Get(ctx, path, &inv); err != nil {
+		return nil, err
+	}
+	return jsonResult(inv), nil
+}
+
+// delegate hands the current task to a session that clears a capability floor.
+//
+// It is deliberately separate from coord_handoff. A handoff says "someone else should
+// continue this"; a delegation says "this needs more than I have", and the second is the one
+// a coordinator running at medium effort needs when it hits work that requires xhigh.
+func (s *Server) delegate(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args struct {
+		requirementArgs
+		NextAction    string   `json:"next_action"`
+		Completed     []string `json:"completed"`
+		OpenQuestions []string `json:"open_questions"`
+		Assumptions   []string `json:"assumptions"`
+	}
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return nil, err
+	}
+	if err := s.requireFence(); err != nil {
+		return nil, err
+	}
+
+	var out coord.DelegateResult
+	err := s.api.Post(ctx, "/v1/tasks/"+s.fence.TaskID+"/handoff", map[string]any{
+		"attempt_id": s.fence.AttemptID, "lease_id": s.fence.LeaseID,
+		"fencing_epoch": s.fence.FencingEpoch,
+		"to_harness":    args.Harness,
+		"to_role":       args.Role,
+		"session_id":    s.session,
+		"require":       args.requirement(),
+		"bundle": map[string]any{
+			"recommended_next_action": args.NextAction,
+			"completed_work":          args.Completed,
+			"open_questions":          args.OpenQuestions,
+			"assumptions":             args.Assumptions,
+		},
+	}, &out)
+	if err != nil {
+		return nil, err
+	}
+	// The lease is gone either way: the handoff released it. Clearing the fence keeps the
+	// agent from making further fenced calls that would now fail confusingly.
 	s.fence = domain.Fence{}
 	return jsonResult(out), nil
 }
