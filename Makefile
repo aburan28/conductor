@@ -2,10 +2,15 @@ SHELL := /bin/bash
 GO ?= go
 BIN := bin
 DATABASE_URL ?= postgres://conductor:conductor@localhost:55432/conductor?sslmode=disable
+ENDPOINT ?= http://localhost:8080
+INSTALL_PREFIX ?= $(HOME)/.local
+INSTALL_BIN := $(INSTALL_PREFIX)/bin
+CONDUCTOR_BINS := conductord conductor conductor-mcp
+TOKEN_FILE := .conductor/.bootstrap-token
 
 export DATABASE_URL
 
-.PHONY: all build test unit vet fmt db-up db-down db-wait run mcp clean e2e
+.PHONY: all build test unit vet fmt db-up db-down db-wait bootstrap setup run serve login mcp wrap claude codex opencode clean e2e install uninstall
 
 all: vet build test
 
@@ -46,11 +51,76 @@ db-wait:
 db-down:
 	docker compose down -v
 
-run: build
-	$(BIN)/conductord --addr :8080
+# Bootstrap the database and first tenant/project/principal/token. The DSN
+# comes from DATABASE_URL (exported above); pass extra bootstrap flags via
+# BOOTSTRAP_FLAGS, e.g. make bootstrap BOOTSTRAP_FLAGS="--org acme --project myrepo".
+# The freshly minted token is captured into $(TOKEN_FILE) so `make login` can use it
+# without you copy-pasting from the terminal.
+bootstrap: build db-up
+	@$(BIN)/conductord bootstrap $(BOOTSTRAP_FLAGS) | tee >(grep -o 'cdt_[A-Za-z0-9_-]*' > $(TOKEN_FILE))
+	@echo "token saved to $(TOKEN_FILE)"
+
+# One-shot setup: start Postgres, build binaries, bootstrap the database.
+setup: bootstrap
+
+# Start the control plane on 127.0.0.1:8080 (loopback; no TLS needed).
+# Runs in foreground; the database is left running. Override the address with
+# ADDR=0.0.0.0:8080 (requires --insecure or TLS, which conductord enforces).
+serve run: build db-up
+	$(BIN)/conductord $(if $(ADDR),--addr $(ADDR))
+
+# Save the bootstrap token (or one you pass with TOKEN=…) as the conductor CLI's
+# default credentials. Requires `conductord` to already be reachable at ENDPOINT.
+#   make login                 # uses the token from the last `make bootstrap`
+#   make login TOKEN=cdt_…     # uses an explicit token (e.g. from `conductor member add`)
+#   make login PROJECT=myrepo  # pin a default project (auto-detected if there is only one)
+login: build
+	@if [[ -n "$(TOKEN)" ]]; then \
+	  tok="$(TOKEN)"; \
+	elif [[ -s $(TOKEN_FILE) ]]; then \
+	  tok=$$(cat $(TOKEN_FILE)); \
+	else \
+	  echo "no token: pass TOKEN=cdt_… or run make bootstrap first" >&2; exit 1; \
+	fi; \
+	$(BIN)/conductor login --endpoint $(ENDPOINT) --token $$tok \
+	  $(if $(PROJECT),--project $(PROJECT))
+
+# Register a Conductor session, start the heartbeat sidecar, and launch the named
+# harness with whatever args you pass. Example:
+#   make wrap claude ARGS="--model opus"
+#   make wrap codex
+#   make wrap opencode
+wrap: build
+	$(BIN)/conductor wrap $(HARNESS) $(ARGS)
+
+claude:
+	@$(MAKE) wrap HARNESS=claude ARGS="$(ARGS)"
+codex:
+	@$(MAKE) wrap HARNESS=codex ARGS="$(ARGS)"
+opencode:
+	@$(MAKE) wrap HARNESS=opencode ARGS="$(ARGS)"
 
 e2e: build
 	./scripts/e2e.sh
 
 clean:
 	rm -rf $(BIN)
+
+# Build the binaries, copy them into INSTALL_BIN (default ~/.local/bin), and
+# idempotently add that directory to PATH in ~/.zshrc. Override the prefix
+# with: make install INSTALL_PREFIX=/usr/local (needs sudo for /usr/local).
+install: build
+	@mkdir -p $(INSTALL_BIN)
+	@for bin in $(CONDUCTOR_BINS); do \
+	  install -m 0755 $(BIN)/$$bin $(INSTALL_BIN)/$$bin; \
+	done
+	@./scripts/install-path.sh $(INSTALL_BIN)
+	@echo "installed: $(CONDUCTOR_BINS:%=$(INSTALL_BIN)/%)"
+
+# Remove the binaries and the PATH entry added by `make install`.
+uninstall:
+	@for bin in $(CONDUCTOR_BINS); do \
+	  rm -f $(INSTALL_BIN)/$$bin; \
+	done
+	@./scripts/install-path.sh --remove $(INSTALL_BIN)
+	@echo "removed: $(CONDUCTOR_BINS:%=$(INSTALL_BIN)/%)"
