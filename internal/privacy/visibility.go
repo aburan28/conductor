@@ -406,7 +406,7 @@ var EventPayloadAllowlist = map[string]bool{
 	"conflict_id": true, "reason": true, "failure_class": true, "phase": true,
 	"percent_hint": true, "summary": true, "blocker": true, "changed_paths": true,
 	"exit_code": true, "command_id": true, "duration_ms": true,
-	"tokens_in": true, "tokens_out": true, "cost_usd": true, "turns": true,
+	"tokens_in": true, "tokens_out": true, "tokens": true, "cost_usd": true, "turns": true,
 	"fencing_epoch": true, "attempt_number": true, "expires_at": true,
 	"visibility": true, "count": true, "error": true, "title": true,
 	"workflow_sha": true, "similarity": true, "tier": true,

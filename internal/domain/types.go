@@ -111,10 +111,44 @@ type BudgetPolicy struct {
 	MonthlyUSD  float64 `json:"monthly_usd"`
 	DownshiftAt float64 `json:"downshift_at"`
 	PauseAt     float64 `json:"pause_at"`
+	// MemberTokens is each member's token allowance (input + output) over a rolling
+	// 30-day window. 0 disables per-member budgeting. The allowance is a starting
+	// position, not a wall: members move tokens between each other with budget grants,
+	// so a teammate mid-refactor can borrow from one who is on vacation.
+	MemberTokens int64 `json:"member_tokens,omitempty"`
 }
 
 func DefaultBudgetPolicy() BudgetPolicy {
 	return BudgetPolicy{MonthlyUSD: 0, DownshiftAt: 0.75, PauseAt: 0.95}
+}
+
+// BudgetGrant is one transfer of token allowance from one member to another (DESIGN.md
+// §13.8). The ledger is append-only: a grant is not revocable, and "undo" is the recipient
+// sharing back, so every balance is explained by the ledger rather than by mutation history.
+type BudgetGrant struct {
+	ID            ID        `json:"id"`
+	ProjectID     ID        `json:"project_id"`
+	FromPrincipal ID        `json:"from_principal"`
+	ToPrincipal   ID        `json:"to_principal"`
+	FromHandle    string    `json:"from_handle,omitempty"`
+	ToHandle      string    `json:"to_handle,omitempty"`
+	Tokens        int64     `json:"tokens"`
+	Note          string    `json:"note,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+// MemberBudget is one member's token position in the current window: what policy issued,
+// what their attempts consumed, and what moved in or out through grants. Remaining can go
+// negative — an attempt that overruns is recorded, not clipped — and a negative balance is
+// exactly the state a teammate's grant repairs.
+type MemberBudget struct {
+	PrincipalID ID     `json:"principal_id"`
+	Handle      string `json:"handle"`
+	Allowance   int64  `json:"allowance_tokens"`
+	Spent       int64  `json:"spent_tokens"`
+	SharedIn    int64  `json:"shared_in_tokens"`
+	SharedOut   int64  `json:"shared_out_tokens"`
+	Remaining   int64  `json:"remaining_tokens"`
 }
 
 // Budget is the per-task/attempt envelope of DESIGN.md §13.8.

@@ -71,6 +71,10 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /v1/projects/{project}/conflicts", auth(s.listConflicts))
 	m.HandleFunc("POST /v1/conflicts/{conflict}/resolve", auth(s.resolveConflict))
 
+	m.HandleFunc("GET /v1/projects/{project}/budget", auth(s.getBudget))
+	m.HandleFunc("POST /v1/projects/{project}/budget/share", auth(s.shareBudget))
+	m.HandleFunc("GET /v1/projects/{project}/budget/grants", auth(s.listBudgetGrants))
+
 	m.HandleFunc("GET /v1/projects/{project}/events", auth(s.listEvents))
 	m.HandleFunc("GET /v1/projects/{project}/events/stream", auth(s.streamEvents))
 
@@ -837,7 +841,8 @@ func (s *Server) claimTask(w http.ResponseWriter, r *http.Request, p domain.Prin
 		WorkflowSHA: project.WorkflowSHA, ProjectConfigSHA: project.ConfigSHA,
 		LeaseTTL: project.Config.LeaseTTL.OrDefault(90 * time.Second),
 		Scopes:   body.Scopes, ScopePolicy: config.ScopePolicyFrom(project.Config),
-		AllowWarnings: body.AllowWarnings,
+		AllowWarnings:     body.AllowWarnings,
+		MemberTokenBudget: project.Config.Budget.MemberTokens,
 	})
 	if err != nil {
 		if errors.Is(err, domain.ErrConflict) {
@@ -882,6 +887,7 @@ func (s *Server) claimNext(w http.ResponseWriter, r *http.Request, p domain.Prin
 			WorkflowSHA: project.WorkflowSHA, ProjectConfigSHA: project.ConfigSHA,
 			LeaseTTL:    project.Config.LeaseTTL.OrDefault(90 * time.Second),
 			ScopePolicy: config.ScopePolicyFrom(project.Config), AllowWarnings: true,
+			MemberTokenBudget: project.Config.Budget.MemberTokens,
 		},
 		MaxCandidates: 10,
 	})
