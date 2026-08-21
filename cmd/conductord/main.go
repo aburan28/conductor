@@ -39,6 +39,13 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "migrate" {
+		if err := migrate(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "migrate:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := serve(os.Args[1:]); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fmt.Fprintln(os.Stderr, "conductord:", err)
 		os.Exit(1)
@@ -205,6 +212,35 @@ func displayHost(addr string) string {
 		host = "localhost"
 	}
 	return net.JoinHostPort(host, port)
+}
+
+// migrate brings the schema up to date and creates no tenant and no credential.
+//
+// bootstrap already migrates, but setting up a database is not the same act as issuing the
+// first token: automation that only needs the schema should not have to mint one.
+func migrate(args []string) error {
+	fs := flag.NewFlagSet("migrate", flag.ExitOnError)
+	dsn := fs.String("dsn", envOr("DATABASE_URL", ""), "PostgreSQL connection string")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *dsn == "" {
+		return errors.New("no database configured: pass --dsn or set DATABASE_URL")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	store, err := db.Open(ctx, *dsn)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	if err := store.Migrate(ctx); err != nil {
+		return err
+	}
+	fmt.Println("schema up to date")
+	return nil
 }
 
 // bootstrap creates the first tenant and prints a token.

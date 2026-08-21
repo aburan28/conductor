@@ -106,20 +106,38 @@ the parse boundary before it can reach the store. Three tests assert this mechan
 Requires Go 1.25+, Docker (for Postgres), and git.
 
 ```bash
-make db-up                                  # Postgres on :55432
-make build                                  # bin/conductord, bin/conductor, bin/conductor-mcp
+make setup
+```
 
-cd /path/to/your/repo
-conductor init                              # scaffold .conductor/ policy files
+That is the whole setup. It checks your prerequisites, starts Postgres on :55432, builds the
+three binaries, installs them to `~/.local/bin`, applies the migrations, bootstraps an
+organization and project, and adds one managed block to your `~/.zshrc` exporting `PATH`,
+`DATABASE_URL` and `CONDUCTOR_ENDPOINT`. It is idempotent — re-run it to repair a partial
+setup — and it prints the exact `conductor login` line to run next:
 
-export DATABASE_URL="postgres://conductor:conductor@localhost:55432/conductor?sslmode=disable"
-conductord bootstrap --org acme --project myrepo --principal $USER --repo .
-# prints a token and the exact `conductor login` line to run
-
+```bash
+source ~/.zshrc
 conductord &                                # API, SSE, dashboard, scheduler on 127.0.0.1:8080
-conductor login --endpoint http://localhost:8080 --token cdt_… --project myrepo
+conductor login --endpoint http://127.0.0.1:8080 --token cdt_… --project conductor
 conductor dashboard                         # prints a ready-to-open link
 ```
+
+Knobs, if you want them: `PREFIX` picks the install directory, `SHELL_RC` picks the rc file
+(it defaults to `~/.bashrc` when `$SHELL` is bash), `CONDUCTOR_ORG` / `CONDUCTOR_PROJECT` /
+`CONDUCTOR_PRINCIPAL` name the tenant, `SKIP_SHELL_RC=1` leaves your rc file alone (the same
+as `make install`), and `SKIP_BOOTSTRAP=1` migrates the database without minting a token.
+
+To set up a second repository against the same control plane:
+
+```bash
+cd /path/to/your/repo
+conductor init                              # scaffold .conductor/ policy files
+conductord bootstrap --org acme --project myrepo --principal $USER --repo .
+# prints a token and the exact `conductor login` line to run
+```
+
+`make help` lists the rest: `make migrate`, `make db-reset`, `make unit`, `make test`,
+`make e2e`.
 
 ### Adding your coworkers
 
