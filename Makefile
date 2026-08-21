@@ -26,7 +26,7 @@ fmt:
 unit:
 	$(GO) test ./internal/domain/... ./internal/selector/... ./internal/privacy/... \
 	          ./internal/router/... ./internal/resource/... ./internal/harness/... \
-	          ./internal/taskcard/... ./internal/config/...
+	          ./internal/taskcard/... ./internal/config/... ./internal/localstate/...
 
 # Full suite; integration tests skip themselves unless DATABASE_URL points at a live db.
 test:
