@@ -7,13 +7,17 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"sort"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/adamburan/conductor/internal/client"
 	"github.com/adamburan/conductor/internal/coord"
 	"github.com/adamburan/conductor/internal/domain"
+	"github.com/adamburan/conductor/internal/localstate"
 	"github.com/adamburan/conductor/internal/privacy"
 )
 
@@ -791,7 +795,11 @@ func cmdWrap(ctx context.Context, args []string) error {
 	// Capability flags are parsed off the front only. Everything from the harness name
 	// onwards belongs to the harness — `conductor wrap claude --model opus` must pass
 	// `--model opus` to Claude, not eat it here.
+	original := args
 	declared, args := parseWrapFlags(args)
+	// The consumed prefix is replayed verbatim if `conductor resume` ever relaunches this
+	// session, so a revived wrap advertises the same capabilities it registered with.
+	conductorFlags := original[:len(original)-len(args)]
 	if len(args) == 0 {
 		return errors.New("usage: conductor wrap [--model M] [--effort E] <harness> [args…]")
 	}
@@ -828,6 +836,11 @@ func cmdWrap(ctx context.Context, args []string) error {
 		session.ID[:8], tool)
 	printCapabilityNotice(session)
 
+	// paused is flipped by SIGUSR1/SIGUSR2 from `conductor pause` and `conductor resume`.
+	// While paused this sidecar keeps heartbeating as waiting_for_input: the session is
+	// present but must not be offered work, and presence should say why nothing is moving.
+	var paused atomic.Bool
+
 	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
 	defer stopHeartbeat()
 	go func() {
@@ -838,12 +851,23 @@ func cmdWrap(ctx context.Context, args []string) error {
 			case <-heartbeatCtx.Done():
 				return
 			case <-ticker.C:
+				state := domain.SessionWorking
+				if paused.Load() {
+					state = domain.SessionWaitingForInput
+				}
 				b, _ := gitOutput(heartbeatCtx, "rev-parse", "--abbrev-ref", "HEAD")
 				_ = api.Post(heartbeatCtx, "/v1/sessions/"+session.ID+"/heartbeat",
-					map[string]any{"state": string(domain.SessionWorking), "branch": b}, nil)
+					map[string]any{"state": string(state), "branch": b}, nil)
 			}
 		}
 	}()
+
+	// Use a detached context so the session is closed even when the user hit Ctrl-C.
+	closeSession := func() {
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		_ = api.Post(closeCtx, "/v1/sessions/"+session.ID+"/close", nil, nil)
+	}
 
 	cmd := exec.CommandContext(ctx, tool, toolArgs...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
@@ -851,13 +875,66 @@ func cmdWrap(ctx context.Context, args []string) error {
 		"CONDUCTOR_SESSION_ID="+session.ID,
 		"CONDUCTOR_PROJECT="+ref,
 	)
-	runErr := cmd.Run()
+	if err := cmd.Start(); err != nil {
+		stopHeartbeat()
+		closeSession()
+		return err
+	}
 
+	// Record the session locally so `conductor pause` and `conductor resume` can find it.
+	// Losing the record only loses pause/resume for this session, so a failure here is a
+	// warning, never a reason to kill a session that has already started.
+	cwd, _ := os.Getwd()
+	pgid, err := syscall.Getpgid(cmd.Process.Pid)
+	if err != nil {
+		pgid = 0
+	}
+	rec := localstate.Record{
+		ID: session.ID, Harness: tool, Command: tool,
+		Args: toolArgs, ResumeArgs: localstate.ResumeInvocation(tool), WrapFlags: conductorFlags,
+		Cwd: cwd, PID: cmd.Process.Pid, PGID: pgid, WrapPID: os.Getpid(),
+		TTY: localstate.CurrentTTY(), SessionID: session.ID, Project: ref,
+		Wrapped: true, Status: localstate.StatusRunning, StartedAt: time.Now(),
+	}
+	if err := localstate.Save(rec); err != nil {
+		fmt.Fprintf(os.Stderr, "conductor: pause/resume unavailable for this session: %v\n", err)
+	}
+
+	// SIGUSR1 pauses: SIGSTOP to the child only, so this sidecar keeps running and the shell
+	// never reclaims the terminal — which is what lets SIGCONT later hand the keyboard
+	// straight back. SIGUSR2 wakes. Both report the state change immediately rather than
+	// waiting for the next tick.
+	sigCh := make(chan os.Signal, 4)
+	signal.Notify(sigCh, syscall.SIGUSR1, syscall.SIGUSR2)
+	defer signal.Stop(sigCh)
+	go func() {
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				return
+			case sig := <-sigCh:
+				state := domain.SessionWorking
+				if sig == syscall.SIGUSR1 {
+					_ = syscall.Kill(cmd.Process.Pid, syscall.SIGSTOP)
+					paused.Store(true)
+					state = domain.SessionWaitingForInput
+				} else {
+					_ = syscall.Kill(cmd.Process.Pid, syscall.SIGCONT)
+					paused.Store(false)
+				}
+				_ = api.Post(heartbeatCtx, "/v1/sessions/"+session.ID+"/heartbeat",
+					map[string]any{"state": string(state)}, nil)
+			}
+		}
+	}()
+
+	runErr := cmd.Wait()
+
+	// Explicit rather than deferred: the exit-code path below calls os.Exit, which skips
+	// defers, and a stale record would make the next pause chase a dead pid.
+	_ = localstate.Remove(rec.ID)
 	stopHeartbeat()
-	// Use a detached context so the session is closed even when the user hit Ctrl-C.
-	closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	defer cancel()
-	_ = api.Post(closeCtx, "/v1/sessions/"+session.ID+"/close", nil, nil)
+	closeSession()
 
 	if runErr != nil {
 		var exitErr *exec.ExitError

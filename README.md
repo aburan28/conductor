@@ -173,6 +173,8 @@ conductor task handoff T-42 --to codex --next "write tests"
 conductor capabilities                                    # which models are live, and how hard they can think
 conductor task assign T-42 --require-tier T4 --require-effort xhigh
 conductor inbox                                           # work offered to this session
+conductor pause                                           # freeze every agent terminal on this machine
+conductor resume                                          # wake them; closed terminals are reopened
 ```
 
 Every command takes `--json`.
@@ -195,6 +197,44 @@ Eleven tools: `conductor_check_conflicts`, `coord_start_work`, `coord_get_work`,
 `coord_handoff`, `coord_delegate`, `coord_capabilities`, `coord_project_status`. Heartbeats are
 deliberately *not* an MCP tool — a model should never spend tokens telling the server it is
 still alive.
+
+### Pausing the wall of terminals
+
+A person running three agents has three terminals. Standing up from that desk — a meeting, a
+laptop lid, an office move — is one command, and sitting back down is one command, even if
+some of those terminals no longer exist by then.
+
+```bash
+conductor pause     # freeze every interactive agent session on this machine
+conductor resume    # wake them all; --list shows what is saved
+```
+
+`conductor pause` finds every interactive Claude Code, Codex, and OpenCode session — launched
+through `conductor wrap` or bare — saves a record of how to revive each one under
+`~/.conductor/sessions/`, and freezes it with `SIGSTOP`. The terminals stay open, stopped
+mid-thought. Before signaling anything, each pid is re-identified against the process table,
+because a `SIGSTOP` delivered to a recycled pid would freeze a stranger.
+
+`conductor resume` wakes each session where it can and reopens it where it must:
+
+- **Its terminal survived.** `SIGCONT`, in place. Wrapped sessions come back seamlessly —
+  the wrap sidecar stopped only the harness, so the shell never reclaimed the terminal.
+  Bare sessions were their shell's foreground job; the shell took the terminal back when they
+  stopped, so if the keyboard is dead, `fg` in that terminal hands it over — resume says so.
+- **Its terminal was closed.** A new terminal is opened — a window in your current tmux, the
+  platform's terminal app, an installed emulator, or a detached tmux session named
+  `conductor` as a last resort (`CONDUCTOR_TERMINAL="kitty --directory {cwd} sh -c {cmd}"`
+  overrides the choice) — running the harness's own conversation-resume invocation:
+  `claude --continue`, `codex resume --last`, `opencode --continue`. Each harness keeps its
+  transcript in its own local state, so the conversation survives the terminal; Conductor
+  never sees it. One caveat: `codex resume --last` is Codex's most recent conversation
+  globally, not per-directory, so two revived Codex sessions can land on the same one —
+  `codex resume` opens the picker for the other.
+
+Wrapped sessions stay honest with the team while paused: the sidecar keeps heartbeating as
+`waiting_for_input`, so presence shows a parked session that is not offered work, rather than
+a mystery that stopped moving. A relaunched wrap registers a fresh session with the same
+capability flags it was started with.
 
 ---
 
@@ -256,6 +296,9 @@ Implemented and exercised by tests:
   a capability floor is offered to a session that clears it.
 - Harness drivers for Claude Code, Codex, OpenCode, a generic templated `exec` driver, and a
   deterministic in-process fake.
+- Machine-local pause/resume: `conductor pause` freezes every interactive agent session on
+  the machine and `conductor resume` revives them — in place, or in freshly opened terminals
+  on each harness's own conversation-resume invocation.
 - Isolated git worktrees, scope-drift detection, runner-attested validation, evidence manifests,
   handoff bundles, portable Markdown task cards.
 - Member and token administration, TLS, a loopback-by-default bind, and auth throttling.

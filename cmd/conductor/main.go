@@ -54,6 +54,8 @@ Territory
 Execution
   conductor worker                   run a runner: claim, execute, verify, report
   conductor wrap <harness> [args…]   register a session, heartbeat, then launch a tool
+  conductor pause                    freeze the live agent terminals; save how to revive them
+  conductor resume                   wake paused sessions, reopening any closed terminals
 
 Run any command with -h for its flags.
 `
@@ -103,6 +105,10 @@ func main() {
 		err = cmdWorker(ctx, args)
 	case "wrap":
 		err = cmdWrap(ctx, args)
+	case "pause":
+		err = cmdPause(ctx, args)
+	case "resume":
+		err = cmdResume(ctx, args)
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return
