@@ -893,7 +893,8 @@ func cmdWrap(ctx context.Context, args []string) error {
 		ID: session.ID, Harness: tool, Command: tool,
 		Args: toolArgs, ResumeArgs: localstate.ResumeInvocation(tool), WrapFlags: conductorFlags,
 		Cwd: cwd, PID: cmd.Process.Pid, PGID: pgid, WrapPID: os.Getpid(),
-		TTY: localstate.CurrentTTY(), SessionID: session.ID, Project: ref,
+		TTY: localstate.CurrentTTY(), TermProgram: os.Getenv("TERM_PROGRAM"),
+		SessionID: session.ID, Project: ref,
 		Wrapped: true, Status: localstate.StatusRunning, StartedAt: time.Now(),
 	}
 	if err := localstate.Save(rec); err != nil {

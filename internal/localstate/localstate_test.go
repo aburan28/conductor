@@ -16,7 +16,8 @@ func TestRecordRoundTrip(t *testing.T) {
 		Args: []string{"--model", "claude-opus-5"}, ResumeArgs: []string{"--continue"},
 		WrapFlags: []string{"--effort", "high"},
 		Cwd:       "/home/alice/repo", PID: 41231, PGID: 41231, WrapPID: 41230,
-		TTY: "pts/3", SessionID: "abc-123", Project: "myrepo", Wrapped: true,
+		TTY: "pts/3", TermProgram: "vscode",
+		SessionID: "abc-123", Project: "myrepo", Wrapped: true,
 		Status: StatusRunning, StartedAt: time.Now().Round(time.Second),
 	}
 	if err := Save(want); err != nil {
@@ -40,6 +41,9 @@ func TestRecordRoundTrip(t *testing.T) {
 	}
 	if len(got.WrapFlags) != 2 || got.WrapFlags[0] != "--effort" {
 		t.Errorf("WrapFlags = %v, want [--effort high]", got.WrapFlags)
+	}
+	if got.TermProgram != "vscode" {
+		t.Errorf("TermProgram = %q, want vscode", got.TermProgram)
 	}
 
 	if err := Remove(want.ID); err != nil {

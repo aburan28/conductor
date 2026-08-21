@@ -1,0 +1,44 @@
+{
+  "name": "conductor-sessions",
+  "displayName": "Conductor Agent Sessions",
+  "description": "Pause and resume the coding-agent sessions running in your terminals, from VS Code. Companion to the `conductor` CLI: reopens paused Claude Code, Codex, and OpenCode sessions in integrated terminals.",
+  "publisher": "conductor",
+  "version": "0.1.0",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onUri"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "conductor.pauseAll",
+        "title": "Conductor: Pause All Agent Sessions"
+      },
+      {
+        "command": "conductor.resumeAll",
+        "title": "Conductor: Resume All Agent Sessions"
+      }
+    ],
+    "configuration": {
+      "title": "Conductor",
+      "properties": {
+        "conductor.cliPath": {
+          "type": "string",
+          "default": "conductor",
+          "description": "Path to the conductor CLI binary."
+        },
+        "conductor.stateDir": {
+          "type": "string",
+          "default": "",
+          "description": "Conductor state directory (the CLI's CONDUCTOR_STATE_DIR). Leave empty for the default, ~/.conductor."
+        }
+      }
+    }
+  }
+}
