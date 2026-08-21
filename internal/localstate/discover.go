@@ -44,6 +44,7 @@ func Discover(known []Record) ([]Record, error) {
 	records := discoverFrom(string(out), os.Getpid(), os.Getuid(), known)
 	for i := range records {
 		records[i].Cwd = cwdOf(records[i].PID)
+		records[i].TermProgram = termProgramOf(records[i].PID)
 	}
 	return records, nil
 }
@@ -228,6 +229,29 @@ func chainContains(pid int, parent map[int]int, set map[int]bool) bool {
 		pid = next
 	}
 	return false
+}
+
+// termProgramOf reads which terminal application a process is running in, from the
+// TERM_PROGRAM variable in its environment. Linux only (/proc); elsewhere it degrades to "",
+// which resume treats as "no preference". A process environment can contain secrets, so this
+// extracts exactly one well-known variable and discards the rest unread — the same posture as
+// the harness stream adapters (DESIGN.md §26.3).
+func termProgramOf(pid int) string {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
+	if err != nil {
+		return ""
+	}
+	return envValue(data, "TERM_PROGRAM")
+}
+
+// envValue extracts one variable from a NUL-separated environment block.
+func envValue(block []byte, key string) string {
+	for _, kv := range strings.Split(string(block), "\x00") {
+		if v, ok := strings.CutPrefix(kv, key+"="); ok {
+			return v
+		}
+	}
+	return ""
 }
 
 // cwdOf finds a process's working directory: /proc where it exists, lsof elsewhere. Best

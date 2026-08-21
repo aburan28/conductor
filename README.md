@@ -236,6 +236,17 @@ Wrapped sessions stay honest with the team while paused: the sidecar keeps heart
 a mystery that stopped moving. A relaunched wrap registers a fresh session with the same
 capability flags it was started with.
 
+**VS Code:** integrated terminals are ordinary ptys, so pausing and in-place resume already
+work there. Reopening a *closed* session into VS Code needs the companion extension in
+[`integrations/vscode`](integrations/vscode) — VS Code offers no command-line way to open an
+integrated terminal running a command, so `conductor resume` hands the session to the
+extension via a `vscode://` URI (carrying only a record id, never a command) and the
+extension opens the terminal in the session's working directory. Which sessions lived in
+VS Code is recorded from `TERM_PROGRAM` at save time; without the extension installed,
+resume simply falls back to the terminal chain above. The extension also adds
+`Conductor: Pause All Agent Sessions` and `Conductor: Resume All Agent Sessions` to the
+command palette.
+
 ---
 
 ## How it holds together

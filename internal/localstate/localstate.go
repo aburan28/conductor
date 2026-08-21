@@ -54,6 +54,11 @@ type Record struct {
 	PGID    int    `json:"pgid,omitempty"`
 	WrapPID int    `json:"wrap_pid,omitempty"`
 	TTY     string `json:"tty,omitempty"`
+	// TermProgram names the terminal application the session was running in, as its
+	// TERM_PROGRAM variable reported it ("vscode", "iTerm.app", …). Resume uses it to reopen
+	// a session where it actually lived: a session from a VS Code integrated terminal should
+	// come back in VS Code, not in whatever emulator happens to be installed.
+	TermProgram string `json:"term_program,omitempty"`
 
 	// SessionID and Project tie a wrapped session back to the control plane; discovered bare
 	// sessions have neither.
