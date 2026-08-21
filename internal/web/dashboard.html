@@ -340,7 +340,7 @@ function start() {
   // Named events arrive with their own type, so subscribe generically.
   ['task.claimed','task.released','task.handoff','task.blocked','task.unblocked',
    'attempt.created','attempt.progress','attempt.stalled','attempt.evidence',
-   'lease.expired','budget.downshift','budget.exhausted'].forEach(name =>
+   'lease.expired','budget.downshift','budget.exhausted','budget.shared'].forEach(name =>
     stream.addEventListener(name, ev => {
       try { logEvent(JSON.parse(ev.data)); refresh(); } catch (_) {}
     }));

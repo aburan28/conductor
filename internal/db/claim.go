@@ -52,6 +52,11 @@ type ClaimParams struct {
 	ScopePolicy      resource.Policy
 	// AllowWarnings lets the claim proceed when overlaps are advisory rather than blocking.
 	AllowWarnings bool
+	// MemberTokenBudget is the per-member token allowance from project policy
+	// (BudgetPolicy.MemberTokens). When > 0, a sponsor whose rolling-window balance is
+	// spent cannot start new work — and the remedy is collaborative: a teammate shares
+	// budget with them (ShareBudget). 0 disables the check.
+	MemberTokenBudget int64
 }
 
 // ClaimResult is what a successful claim hands back. The fence must accompany every
@@ -121,6 +126,23 @@ func (s *Store) Claim(ctx context.Context, p ClaimParams) (ClaimResult, error) {
 		if attemptsCount >= maxAttempts {
 			return fmt.Errorf("%w: retry budget exhausted (%d/%d)",
 				domain.ErrNotPermitted, attemptsCount, maxAttempts)
+		}
+
+		// (2b) Per-member token budget. Checked under the same project lock the share path
+		// takes, so a grant and a claim cannot race past each other. The balance only has
+		// to be positive to start: an attempt that overruns is recorded in full and shows
+		// up as a negative balance, which a teammate's grant can repair.
+		if p.MemberTokenBudget > 0 {
+			position, err := memberBudgetTx(ctx, tx, p.ProjectID, p.SponsorPrincipal, p.MemberTokenBudget)
+			if err != nil {
+				return err
+			}
+			if position.Remaining <= 0 {
+				return fmt.Errorf(
+					"%w: member token budget spent (%d of %d tokens used in the current window); a teammate can help with `conductor budget share`",
+					domain.ErrBudgetExhausted,
+					position.Spent+position.SharedOut-position.SharedIn, p.MemberTokenBudget)
+			}
 		}
 
 		// (3) Retire any lease that has already expired, so a dead holder does not block a

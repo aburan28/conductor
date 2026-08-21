@@ -355,6 +355,8 @@ budget:
     monthly_usd: 0        # 0 disables budget enforcement
     downshift_at: 0.75
     pause_at: 0.95
+  member:
+    monthly_tokens: 0     # per-member 30-day token allowance; share with 'conductor budget share'
 
 concurrency:
   max_concurrent_attempts: 4
