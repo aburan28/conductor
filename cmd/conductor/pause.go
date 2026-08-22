@@ -158,10 +158,11 @@ func cmdResume(ctx context.Context, args []string) error {
 		fmt.Fprint(os.Stderr, `conductor resume — wake the sessions `+"`conductor pause`"+` froze
 
 Each paused session comes back where it was: SIGCONT in its own terminal when that terminal
-still exists, or a fresh terminal otherwise — a tmux window, the platform's terminal app, or
-a detached tmux session, running the harness's own resume invocation (claude --continue,
-codex resume --last, opencode --continue). Set CONDUCTOR_TERMINAL to choose the terminal,
-e.g. CONDUCTOR_TERMINAL="kitty --directory {cwd} sh -c {cmd}".
+still exists, or a fresh terminal otherwise — a VS Code integrated terminal when the session
+lived in VS Code and the Conductor extension is installed, else a tmux window, the platform's
+terminal app, or a detached tmux session — running the harness's own resume invocation
+(claude --continue, codex resume --last, opencode --continue). Set CONDUCTOR_TERMINAL to
+choose the terminal, e.g. CONDUCTOR_TERMINAL="kitty --directory {cwd} sh -c {cmd}".
 
 Flags:
 `)
@@ -245,7 +246,13 @@ Flags:
 
 		default:
 			// Its terminal is gone (or its pid was recycled); reopen one on the harness's own
-			// resume invocation.
+			// resume invocation. A session that lived in VS Code goes back to VS Code when the
+			// companion extension can take it — the record stays paused until the extension
+			// actually opens the terminal, so a handoff that goes nowhere is retryable.
+			if where, ok := localstate.ResumeInVSCode(rec); ok {
+				res = pauseAction{Record: rec, Action: "reopened", Detail: "handed to " + where}
+				break
+			}
 			argv, fresh := relaunchArgv(rec, exe)
 			where, err := localstate.OpenTerminal(rec.Harness, rec.Cwd, argv)
 			if err != nil {
