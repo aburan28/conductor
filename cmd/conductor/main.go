@@ -34,6 +34,8 @@ Coordination
   conductor presence                 who is working on what, right now
   conductor capabilities             which models and effort levels are live right now
   conductor check                    can I start this work? (run before you edit)
+  conductor budget                   the team's token budget for this window
+  conductor budget share <who> <n>   give a teammate part of your allowance
 
 Work
   conductor task list                open tasks
@@ -97,6 +99,8 @@ func main() {
 		err = cmdCheck(ctx, args)
 	case "conflicts":
 		err = cmdConflicts(ctx, args)
+	case "budget":
+		err = cmdBudget(ctx, args)
 	case "task":
 		err = cmdTask(ctx, args)
 	case "scope":

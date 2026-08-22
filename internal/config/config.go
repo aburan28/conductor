@@ -120,6 +120,9 @@ type PoliciesFile struct {
 			DownshiftAt float64 `yaml:"downshift_at"`
 			PauseAt     float64 `yaml:"pause_at"`
 		} `yaml:"project"`
+		Member struct {
+			MonthlyTokens int64 `yaml:"monthly_tokens"`
+		} `yaml:"member"`
 	} `yaml:"budget"`
 	Concurrency struct {
 		MaxConcurrentAttempts int `yaml:"max_concurrent_attempts"`
@@ -330,6 +333,9 @@ func (b Bundle) ProjectConfig() domain.ProjectConfig {
 		c.Budget = domain.BudgetPolicy{
 			MonthlyUSD: p.MonthlyUSD, DownshiftAt: p.DownshiftAt, PauseAt: p.PauseAt,
 		}
+	}
+	if v := b.Policies.Budget.Member.MonthlyTokens; v > 0 {
+		c.Budget.MemberTokens = v
 	}
 	return c
 }

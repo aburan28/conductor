@@ -1022,6 +1022,21 @@ budget:
 
 Cost values should come from a dynamically updated model catalog. Subscription-based tools may expose capacity rather than exact per-token cost; represent both.
 
+**Per-member token budgets are shareable.** With `budget.member.monthly_tokens` set, each project member holds the same token allowance (input + output) over a rolling 30-day window, and may transfer any part of their remaining balance to a teammate:
+
+```
+POST /v1/projects/{project}/budget/share   {"to": "rachel", "tokens": 500000}
+```
+
+Rules, all enforced in one transaction under the project advisory lock so a grant cannot race a claim or another grant:
+
+- a grant must fit inside the giver's live balance: `allowance − spend + grants in − grants out`;
+- both parties must be members of the project;
+- grants are append-only ledger rows, never mutated — "undo" is the recipient sharing back;
+- a sponsor with no remaining balance cannot claim new work (`budget_exhausted`, HTTP 402); a running attempt is never killed mid-flight, and overrun is recorded in full as a negative balance a grant can repair.
+
+Balances are derived from the attempts ledger and the grants ledger on every read; there is no stored counter to drift. The `budget.shared` event carries handles and amounts only — budget coordination discloses who has headroom, never what anyone is working on.
+
 ---
 
 ## 14. Planner contract
