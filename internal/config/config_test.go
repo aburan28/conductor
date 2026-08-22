@@ -141,3 +141,33 @@ func repoRoot(t *testing.T) string {
 	t.Fatal("could not locate the repository root")
 	return ""
 }
+
+// The member token allowance flows from policies.yaml into the runtime budget policy, and
+// stays off when unset — turning on per-member budgets must be an explicit choice.
+func TestMemberTokenBudgetParses(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, Dir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	policy := "budget:\n  member:\n    monthly_tokens: 2500000\n"
+	if err := os.WriteFile(filepath.Join(dir, "policies.yaml"), []byte(policy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bundle, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := bundle.ProjectConfig().Budget.MemberTokens; got != 2_500_000 {
+		t.Errorf("member tokens = %d, want 2500000", got)
+	}
+
+	empty, err := Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("Load empty: %v", err)
+	}
+	if got := empty.ProjectConfig().Budget.MemberTokens; got != 0 {
+		t.Errorf("member tokens default = %d, want 0 (disabled)", got)
+	}
+}

@@ -84,6 +84,29 @@ ceiling calls `coord_delegate` — the same continuation bundle as a handoff, pl
 receiver must meet. If nothing live qualifies, the bundle is still written and the caller is
 told what the ceiling actually is.
 
+### Budgets bound the team, not the person
+
+With `budget.member.monthly_tokens` set, every member gets the same token allowance over a
+rolling 30-day window — and it is *transferable*. Alice heading into a slack week hands her
+headroom to Bob mid-refactor, in one command, with no admin in the loop:
+
+```
+$ conductor budget share bob 2m --note "finishing the router refactor"
+
+Shared 2m tokens with bob.
+
+  you    1.1m remaining
+  bob    3.4m remaining
+```
+
+A member whose window balance is spent cannot claim new work (HTTP 402, exit-code fail from
+the CLI) — until a teammate shares theirs. Balances are pure arithmetic over two ledgers
+(attempt spend and budget grants), so there is no counter to drift and no way to mint tokens:
+grants are checked against the giver's live balance under the same lock the claim path takes.
+`conductor budget` shows everyone's position; `conductor budget grants` is the transfer
+history; a `budget.shared` event lands on the team stream. As everywhere else, amounts and
+identities are shared — what the tokens were spent *on* is not.
+
 ### Privacy is structural, not procedural
 
 A teammate looking at Alice's private task sees:
@@ -173,6 +196,8 @@ conductor task handoff T-42 --to codex --next "write tests"
 conductor capabilities                                    # which models are live, and how hard they can think
 conductor task assign T-42 --require-tier T4 --require-effort xhigh
 conductor inbox                                           # work offered to this session
+conductor budget                                          # the team's token budget this window
+conductor budget share rachel 500k                        # give a teammate part of your allowance
 conductor pause                                           # freeze every agent terminal on this machine
 conductor resume                                          # wake them; closed terminals are reopened
 ```
@@ -305,6 +330,8 @@ Implemented and exercised by tests:
 - Session capability advertisement and capability-aware assignment: sessions declare the model
   and reasoning effort they are running, the catalog decides what that is worth, and work with
   a capability floor is offered to a session that clears it.
+- Shareable per-member token budgets: a rolling-window allowance each member can transfer to
+  a teammate, enforced at claim time and settled entirely by ledger arithmetic.
 - Harness drivers for Claude Code, Codex, OpenCode, a generic templated `exec` driver, and a
   deterministic in-process fake.
 - Machine-local pause/resume: `conductor pause` freezes every interactive agent session on

@@ -67,6 +67,11 @@ budget:
     monthly_usd: 400
     downshift_at: 0.75      # fraction of budget at which non-sensitive work drops a tier
     pause_at: 0.95          # fraction at which dispatch stops
+  member:
+    # Per-member token allowance (input + output) over a rolling 30-day window. 0 disables
+    # it. Members can move allowance between each other with `conductor budget share`, so
+    # the cap bounds the team's total, not any one person's sprint.
+    monthly_tokens: 0
 
 concurrency:
   max_concurrent_attempts: 4
