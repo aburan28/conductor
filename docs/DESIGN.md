@@ -1037,6 +1037,14 @@ Rules, all enforced in one transaction under the project advisory lock so a gran
 
 Balances are derived from the attempts ledger and the grants ledger on every read; there is no stored counter to drift. The `budget.shared` event carries handles and amounts only — budget coordination discloses who has headroom, never what anyone is working on.
 
+**Context cost visibility.** Budgets are consumed by reads: standing instruction files (AGENTS.md, CLAUDE.md and their nested variants, `.cursorrules`, copilot instructions, `WORKFLOW.md`, the README) are loaded on every session, and every file the agent opens is billed again. `conductor context` prices those reads (package `internal/tokencost`):
+
+- the default is a local, deterministic estimate — a character-class mixture calibrated to BPE-family tokenizers (±15–20%) — so content never leaves the machine and no provider credentials are involved;
+- `--exact` opts into the provider's own count-tokens endpoint using the caller's local credentials, the same trust boundary the harness itself crosses on every turn. Content still never reaches the control plane;
+- binary content is refused rather than mis-counted, and directory sweeps skip what no harness reads (`.git`, dependency caches, `.conductor/runtime`).
+
+The CLI relates the total to the caller's remaining member allowance when budgets are enabled, which is what turns "this doc is long" into "reading it costs 2% of your window."
+
 ---
 
 ## 14. Planner contract

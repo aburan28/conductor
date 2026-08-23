@@ -107,6 +107,42 @@ grants are checked against the giver's live balance under the same lock the clai
 history; a `budget.shared` event lands on the team stream. As everywhere else, amounts and
 identities are shared — what the tokens were spent *on* is not.
 
+### What does reading cost?
+
+Budgets are spent by reads nobody looks at: every session silently loads AGENTS.md,
+CLAUDE.md, workflow rules, and the README before doing anything, and then pays again for
+every file it opens. `conductor context` itemizes that bill:
+
+```
+$ conductor context
+
+Standing context an agent loads from this repository (estimate):
+
+  .conductor/WORKFLOW.md                        782 tokens
+  README.md                                    5546 tokens
+
+  total, every session, before any work        6328 tokens
+
+$ conductor context internal/db docs/DESIGN.md
+
+65.1k tokens across 8 file(s) (estimate)
+
+  docs/DESIGN.md                                              22.9k
+  internal/db/claim.go                                         7702
+  …
+```
+
+With no arguments it finds the standing-context files harnesses auto-load — AGENTS.md,
+CLAUDE.md (nested ones too), `.cursorrules`, copilot instructions, `.conductor/WORKFLOW.md`,
+the README — the recurring cost paid on every session. With paths it sweeps any files or
+directories, largest first, so a 40k-token doc stops hiding. When member budgets are on and
+you are logged in, the total is also shown as a share of *your* remaining window allowance.
+
+The default numbers are a local, deterministic estimate (±15–20%); content never leaves your
+machine and no credentials are needed. `--exact` gets the model-true count from Anthropic's
+free count-tokens endpoint using your own `ANTHROPIC_API_KEY` — the same trust boundary your
+harness already crosses, and never the Conductor server.
+
 ### Privacy is structural, not procedural
 
 A teammate looking at Alice's private task sees:
@@ -198,6 +234,8 @@ conductor task assign T-42 --require-tier T4 --require-effort xhigh
 conductor inbox                                           # work offered to this session
 conductor budget                                          # the team's token budget this window
 conductor budget share rachel 500k                        # give a teammate part of your allowance
+conductor context                                         # what the standing context files cost in tokens
+conductor context internal/db --top 20                    # token cost of any files or directories
 conductor pause                                           # freeze every agent terminal on this machine
 conductor resume                                          # wake them; closed terminals are reopened
 ```
@@ -332,6 +370,8 @@ Implemented and exercised by tests:
   a capability floor is offered to a session that clears it.
 - Shareable per-member token budgets: a rolling-window allowance each member can transfer to
   a teammate, enforced at claim time and settled entirely by ledger arithmetic.
+- Context cost visibility: `conductor context` prices AGENTS.md/CLAUDE.md and any file or
+  directory in tokens — locally estimated by default, model-exact on request.
 - Harness drivers for Claude Code, Codex, OpenCode, a generic templated `exec` driver, and a
   deterministic in-process fake.
 - Machine-local pause/resume: `conductor pause` freezes every interactive agent session on

@@ -36,6 +36,7 @@ Coordination
   conductor check                    can I start this work? (run before you edit)
   conductor budget                   the team's token budget for this window
   conductor budget share <who> <n>   give a teammate part of your allowance
+  conductor context [paths…]         what reading AGENTS.md, code, or docs costs in tokens
 
 Work
   conductor task list                open tasks
@@ -101,6 +102,8 @@ func main() {
 		err = cmdConflicts(ctx, args)
 	case "budget":
 		err = cmdBudget(ctx, args)
+	case "context":
+		err = cmdContext(ctx, args)
 	case "task":
 		err = cmdTask(ctx, args)
 	case "scope":
