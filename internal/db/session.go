@@ -187,6 +187,32 @@ func (s *Store) LiveSessions(ctx context.Context, projectID domain.ID) ([]domain
 	return out, rows.Err()
 }
 
+// ListSessions returns every session a project has ever had, newest first.
+//
+// Sessions are never deleted (see ReapSessions), so this is the complete record: live,
+// stale, and closed alike. Presence answers "who is here now"; this answers "who has been
+// here", which is what an export needs.
+func (s *Store) ListSessions(ctx context.Context, projectID domain.ID) ([]domain.Session, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT `+sessionColumns+`
+		  FROM sessions
+		 WHERE project_id = $1::uuid
+		 ORDER BY started_at DESC, id`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []domain.Session{}
+	for rows.Next() {
+		sess, err := scanSession(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, sess)
+	}
+	return out, rows.Err()
+}
+
 // ---------------------------------------------------------------------------
 // Runners
 // ---------------------------------------------------------------------------

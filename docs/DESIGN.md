@@ -2270,6 +2270,9 @@ conductor login
 conductor project register
 conductor status
 conductor presence
+conductor sessions save all
+conductor sessions list
+conductor sessions export --output sessions.json
 
 conductor task create
 conductor task list

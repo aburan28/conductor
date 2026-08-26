@@ -140,6 +140,56 @@ func TestPruneKeepsPausedDeadSessions(t *testing.T) {
 	}
 }
 
+// A saved session outlives its process: that is the whole point of `conductor sessions save`.
+// Closing the terminal or rebooting must leave a record resume can act on.
+func TestPruneKeepsSavedDeadSessions(t *testing.T) {
+	t.Setenv("CONDUCTOR_STATE_DIR", t.TempDir())
+
+	deadPID := reapedPID(t)
+	savedDead := Record{ID: "saved-dead", Harness: "claude", PID: deadPID, Saved: true,
+		Status: StatusRunning, StartedAt: time.Now().Add(-time.Hour)}
+	savedLive := Record{ID: "saved-live", Harness: "codex", PID: os.Getpid(), Saved: true,
+		Status: StatusRunning, StartedAt: time.Now()}
+	unsavedDead := Record{ID: "unsaved-dead", Harness: "opencode", PID: deadPID,
+		Status: StatusRunning, StartedAt: time.Now().Add(-time.Hour)}
+	for _, r := range []Record{savedDead, savedLive, unsavedDead} {
+		if err := Save(r); err != nil {
+			t.Fatalf("Save(%s): %v", r.ID, err)
+		}
+	}
+
+	live, err := Prune()
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	byID := map[string]Record{}
+	for _, r := range live {
+		byID[r.ID] = r
+	}
+	if r, ok := byID["saved-dead"]; !ok {
+		t.Error("Prune dropped a saved session with a dead process; resume can never reopen it now")
+	} else if r.Status != StatusSaved {
+		t.Errorf("saved-dead status = %q, want %q so the listing does not claim a dead pid is running", r.Status, StatusSaved)
+	}
+	if r, ok := byID["saved-live"]; !ok || r.Status != StatusRunning {
+		t.Errorf("a saved session that is still alive should stay running; got %+v", r)
+	}
+	if _, ok := byID["unsaved-dead"]; ok {
+		t.Error("Prune kept an unsaved running record with no process behind it")
+	}
+
+	// The flip is persisted, not just reported: a second Prune (the next command) sees it too.
+	again, err := List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, r := range again {
+		if r.ID == "saved-dead" && r.Status != StatusSaved {
+			t.Errorf("status flip was not written to disk: %q", r.Status)
+		}
+	}
+}
+
 func TestResumeInvocation(t *testing.T) {
 	cases := map[string][]string{
 		"claude":   {"--continue"},

@@ -21,12 +21,15 @@ import (
 	"time"
 )
 
-// Record statuses. There are only two: a session this machine believes is live, and a session
-// deliberately frozen by `conductor pause`. Everything else — crashed, exited, terminal
-// closed mid-run — is expressed by removing the record, not by another status.
+// Record statuses. A session this machine believes is live; a session deliberately frozen by
+// `conductor pause`; and a session `conductor sessions save` asked to keep whose process has
+// since gone, so `conductor resume` reopens it. Everything else — crashed, exited, terminal
+// closed mid-run without having been saved — is expressed by removing the record, not by
+// another status.
 const (
 	StatusRunning = "running"
 	StatusPaused  = "paused"
+	StatusSaved   = "saved"
 )
 
 // Record is one interactive harness session on this machine.
@@ -66,9 +69,17 @@ type Record struct {
 	Project   string `json:"project,omitempty"`
 	Wrapped   bool   `json:"wrapped,omitempty"`
 
+	// Saved marks a record `conductor sessions save` pinned: it outlives its process. A
+	// running record normally vanishes with its terminal (Prune treats a dead pid as debris),
+	// which is right for a crash but wrong for a laptop that was rebooted with three
+	// conversations open. A saved record is kept instead, as StatusSaved, and resume reopens
+	// it exactly the way it reopens a paused session whose terminal was closed.
+	Saved bool `json:"saved,omitempty"`
+
 	Status    string    `json:"status"`
 	StartedAt time.Time `json:"started_at"`
 	PausedAt  time.Time `json:"paused_at,omitzero"`
+	SavedAt   time.Time `json:"saved_at,omitzero"`
 }
 
 // Dir is where records live: ~/.conductor/sessions, beside the credentials file, or under
@@ -174,7 +185,9 @@ func List() ([]Record, error) {
 // Prune drops records for sessions that ended without cleaning up after themselves and
 // returns what remains. A running record whose processes are gone is debris from a crash or a
 // closed terminal. A paused record is kept even when its processes are dead: a paused session
-// whose terminal was closed is exactly the one `conductor resume` needs to reopen.
+// whose terminal was closed is exactly the one `conductor resume` needs to reopen. So is a
+// saved one — its record turns into StatusSaved here, the moment the process is found gone,
+// so `conductor resume --list` says "saved" rather than claiming a dead pid is running.
 func Prune() ([]Record, error) {
 	records, err := List()
 	if err != nil {
@@ -183,8 +196,14 @@ func Prune() ([]Record, error) {
 	live := records[:0]
 	for _, r := range records {
 		if r.Status == StatusRunning && !r.processAlive() {
-			_ = Remove(r.ID)
-			continue
+			if !r.Saved {
+				_ = Remove(r.ID)
+				continue
+			}
+			r.Status = StatusSaved
+			if err := Save(r); err != nil {
+				return nil, err
+			}
 		}
 		live = append(live, r)
 	}
