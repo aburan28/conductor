@@ -198,6 +198,23 @@ for banned in prompt transcript conversation reasoning; do
 done
 note "presence shows principal, harness, branch, and heartbeat — and nothing else"
 
+step "12b. The project's session history can be exported, including sessions presence no longer shows"
+BOB_SESSION_ID=$(field id "$SESSION")
+curl -s -o /dev/null -X POST -H "Authorization: Bearer $BOB_TOKEN" "$ENDPOINT/v1/sessions/$BOB_SESSION_ID/close"
+alice sessions export --output "$WORK/sessions.json" >/dev/null
+[[ -s "$WORK/sessions.json" ]] || fail "sessions export wrote nothing"
+grep -q "\"$BOB_SESSION_ID\"" "$WORK/sessions.json" || fail "the closed session is missing from the export"
+grep -q '"state": *"closed"' "$WORK/sessions.json"      || fail "the closed session is not marked closed"
+grep -q '"exported_at"' "$WORK/sessions.json"           || fail "the export has no envelope"
+for banned in prompt transcript conversation reasoning_text; do
+  if grep -qi "\"$banned" "$WORK/sessions.json"; then
+    fail "the session export exposed a '$banned' field"
+  fi
+done
+ONE=$(alice sessions export "${BOB_SESSION_ID:0:8}" --output -)
+printf '%s' "$ONE" | grep -q '"count": *1' || fail "exporting one session by prefix did not select exactly one: $ONE"
+note "exported $(grep -c '"principal"' "$WORK/sessions.json") session(s) to $WORK/sessions.json; a closed one is still in it"
+
 step "13. Work is offered to a session that meets a capability floor"
 # Two sessions, same person, different models: one cheap, one frontier. The catalog decides
 # what each is worth — the session's own claim about its tier is ignored.
