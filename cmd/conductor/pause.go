@@ -58,7 +58,7 @@ Flags:
 	if err != nil {
 		return err
 	}
-	discovered, err := localstate.Discover(records)
+	discovered, err := discoverSessions(records)
 	if err != nil {
 		// Wrapped sessions are still pausable from their records; say what the scan could not do.
 		fmt.Fprintf(os.Stderr, "conductor: cannot scan for unwrapped sessions: %v\n", err)
@@ -71,30 +71,46 @@ Flags:
 	}
 
 	var results []pauseAction
-	already := 0
+	already, saved := 0, 0
 	for _, rec := range records {
 		if *harness != "" && rec.Harness != *harness {
 			continue
 		}
-		if rec.Status == localstate.StatusPaused {
+		switch rec.Status {
+		case localstate.StatusPaused:
 			already++
+			continue
+		case localstate.StatusSaved:
+			// Its process is already gone; there is nothing to freeze, and the record must
+			// stay so `conductor resume` can reopen it.
+			saved++
 			continue
 		}
 		var sigErr error
 		var detail string
-		switch {
-		case rec.Wrapped && localstate.VerifyWrap(rec.WrapPID):
+		wrapLive := rec.Wrapped && localstate.VerifyWrap(rec.WrapPID)
+		harnessLive := localstate.VerifyHarness(rec.PID, rec.Harness)
+		switch pausePlan(rec, wrapLive, harnessLive) {
+		case planViaWrap:
 			// The sidecar stops the harness child and flips its heartbeat, so the pause is
 			// visible to the team, not just to this machine.
 			sigErr = syscall.Kill(rec.WrapPID, syscall.SIGUSR1)
 			detail = "via conductor wrap"
-		case localstate.VerifyHarness(rec.PID, rec.Harness):
+		case planDirect:
 			// No live sidecar (bare launch, or the wrap died): stop the group directly so the
 			// harness and whatever it spawned freeze together.
 			if sigErr = localstate.StopGroup(rec.PGID); sigErr != nil {
 				sigErr = localstate.StopProcess(rec.PID)
 			}
 			detail = "stopped directly"
+		case planKeep:
+			// Gone since the prune a moment ago, but saved: keep it for resume, as saved.
+			rec.Status = localstate.StatusSaved
+			if err := localstate.Save(rec); err != nil {
+				return err
+			}
+			saved++
+			continue
 		default:
 			// Live moments ago, unrecognizable now: it exited, or the pid was recycled.
 			// Never signal a guess.
@@ -120,9 +136,12 @@ Flags:
 		return emit(results)
 	}
 	if len(results) == 0 {
-		if already > 0 {
+		switch {
+		case already > 0:
 			fmt.Printf("Nothing running to pause; %d session(s) already paused. `conductor resume` wakes them.\n", already)
-		} else {
+		case saved > 0:
+			fmt.Printf("Nothing running to pause; %d saved session(s) are waiting for `conductor resume` to reopen them.\n", saved)
+		default:
 			fmt.Println("No live Claude Code, Codex, or OpenCode sessions found in your terminals.")
 		}
 		return nil
@@ -145,6 +164,9 @@ Flags:
 	if already > 0 {
 		fmt.Printf("\n  (%d session(s) were already paused.)\n", already)
 	}
+	if saved > 0 {
+		fmt.Printf("\n  (%d saved session(s) have no process to pause; resume reopens them.)\n", saved)
+	}
 	fmt.Printf("\nPaused %d session(s). `conductor resume` wakes them — and reopens any terminal you close.\n", paused)
 	return nil
 }
@@ -155,12 +177,14 @@ func cmdResume(ctx context.Context, args []string) error {
 	list := fs.Bool("list", false, "show saved sessions without waking anything")
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	fs.Usage = func() {
-		fmt.Fprint(os.Stderr, `conductor resume — wake the sessions `+"`conductor pause`"+` froze
+		fmt.Fprint(os.Stderr, `conductor resume — wake the sessions `+"`conductor pause`"+` froze, and reopen the ones `+"`conductor sessions save`"+` kept
 
 Each paused session comes back where it was: SIGCONT in its own terminal when that terminal
-still exists, or a fresh terminal otherwise — a VS Code integrated terminal when the session
-lived in VS Code and the Conductor extension is installed, else a tmux window, the platform's
-terminal app, or a detached tmux session — running the harness's own resume invocation
+still exists, or a fresh terminal otherwise. A saved session whose terminal is gone — closed,
+or lost to a reboot — is reopened the same way; one that is still running is left alone. A
+fresh terminal is a VS Code integrated terminal when the session lived in VS Code and the
+Conductor extension is installed, else a tmux window, the platform's terminal app, or a
+detached tmux session — running the harness's own resume invocation
 (claude --continue, codex resume --last, opencode --continue). Set CONDUCTOR_TERMINAL to
 choose the terminal, e.g. CONDUCTOR_TERMINAL="kitty --directory {cwd} sh -c {cmd}".
 
@@ -185,16 +209,14 @@ Flags:
 			fmt.Println("No saved sessions.")
 			return nil
 		}
-		for _, r := range records {
-			fmt.Printf("  %-8s %-10s %-9s %s  %s\n",
-				r.Status, r.Harness, orDash(r.TTY), shortPath(r.Cwd), describeRecord(r))
-		}
+		printRecords(records)
 		return nil
 	}
 
 	var targets []localstate.Record
 	for _, rec := range records {
-		if rec.Status == localstate.StatusPaused && (*harness == "" || rec.Harness == *harness) {
+		resumable := rec.Status == localstate.StatusPaused || rec.Status == localstate.StatusSaved
+		if resumable && (*harness == "" || rec.Harness == *harness) {
 			targets = append(targets, rec)
 		}
 	}
@@ -202,7 +224,7 @@ Flags:
 		if *asJSON {
 			return emit([]pauseAction{})
 		}
-		fmt.Println("Nothing is paused. `conductor pause` freezes the live sessions first.")
+		fmt.Println("Nothing is paused or saved. `conductor pause` freezes the live sessions; `conductor sessions save all` keeps them resumable.")
 		return nil
 	}
 
@@ -214,8 +236,18 @@ Flags:
 	var results []pauseAction
 	for _, rec := range targets {
 		var res pauseAction
-		switch {
-		case rec.Wrapped && localstate.VerifyWrap(rec.WrapPID):
+		wrapLive := rec.Wrapped && localstate.VerifyWrap(rec.WrapPID)
+		harnessLive := localstate.VerifyHarness(rec.PID, rec.Harness)
+		switch resumePlan(rec, wrapLive, harnessLive) {
+		case planRunning:
+			// A saved session found dead a moment ago and alive now: the process is back
+			// (or the pid was recycled by another copy of the same harness). Either way there
+			// is nothing to wake, and signaling a guess is never right.
+			rec.Status = localstate.StatusRunning
+			res = pauseAction{Record: rec, Action: "running",
+				Detail: fmt.Sprintf("still running in its terminal (%s); nothing to do", orDash(rec.TTY))}
+
+		case planViaWrap:
 			// The sidecar wakes its child and heartbeats `working` again; the session was in
 			// the terminal's foreground the whole time, so input works immediately.
 			if err := syscall.Kill(rec.WrapPID, syscall.SIGUSR2); err != nil {
@@ -227,7 +259,7 @@ Flags:
 			res = pauseAction{Record: rec, Action: "resumed",
 				Detail: fmt.Sprintf("woken in its terminal (%s)", orDash(rec.TTY))}
 
-		case localstate.VerifyHarness(rec.PID, rec.Harness):
+		case planDirect:
 			var contErr error
 			if contErr = localstate.ContinueGroup(rec.PGID); contErr != nil {
 				contErr = localstate.ContinueProcess(rec.PID)
@@ -267,7 +299,7 @@ Flags:
 			res = pauseAction{Record: rec, Action: "reopened", Detail: detail}
 		}
 
-		if res.Action == "resumed" {
+		if res.Action == "resumed" || res.Action == "running" {
 			if err := localstate.Save(rec); err != nil {
 				return err
 			}
@@ -278,25 +310,70 @@ Flags:
 	if *asJSON {
 		return emit(results)
 	}
-	woken, failed := 0, 0
+	woken, running, failed := 0, 0, 0
 	for _, r := range results {
 		mark := r.Action
-		if r.Action == "error" {
+		switch r.Action {
+		case "error":
 			mark, failed = "FAILED", failed+1
-		} else {
+		case "running":
+			running++
+		default:
 			woken++
 		}
 		fmt.Printf("  %-8s %-10s %s\n", mark, r.Harness, r.Detail)
 	}
 	fmt.Printf("\nResumed %d session(s).", woken)
+	if running > 0 {
+		fmt.Printf(" %d were already running.", running)
+	}
 	if failed > 0 {
 		fmt.Printf(" %d could not be resumed — see above.", failed)
 	}
 	fmt.Println()
-	if failed > 0 && woken == 0 {
+	if failed > 0 && woken == 0 && running == 0 {
 		return fmt.Errorf("no session could be resumed")
 	}
 	return nil
+}
+
+// Plans: what pause and resume decide to do with one record, given what the process table
+// says about it. Kept as pure functions so the decision — the part that must never signal
+// the wrong process — is testable without signaling anything.
+const (
+	planViaWrap = "via-wrap" // signal the `conductor wrap` sidecar; it handles its child
+	planDirect  = "direct"   // signal the harness's process group ourselves
+	planKeep    = "keep"     // process gone, record saved: keep it for resume to reopen
+	planForget  = "forget"   // process gone, nothing asked us to remember it: drop the record
+	planReopen  = "reopen"   // process gone: open a terminal on the harness's resume invocation
+	planRunning = "running"  // saved record whose process turned out to be alive: leave it be
+)
+
+func pausePlan(rec localstate.Record, wrapLive, harnessLive bool) string {
+	switch {
+	case wrapLive:
+		return planViaWrap
+	case harnessLive:
+		return planDirect
+	case rec.Saved:
+		return planKeep
+	default:
+		return planForget
+	}
+}
+
+func resumePlan(rec localstate.Record, wrapLive, harnessLive bool) string {
+	alive := wrapLive || harnessLive
+	switch {
+	case rec.Status == localstate.StatusSaved && alive:
+		return planRunning
+	case wrapLive:
+		return planViaWrap
+	case harnessLive:
+		return planDirect
+	default:
+		return planReopen
+	}
 }
 
 // relaunchArgv builds the command that revives a session whose terminal is gone. Wrapped

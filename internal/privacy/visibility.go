@@ -325,6 +325,111 @@ func ProjectSessionCapability(
 	return view
 }
 
+// SessionView is what one principal may learn about a session when a project's whole
+// session history is exported (`conductor sessions save all`).
+//
+// It is the union of what presence and the capability inventory already publish, plus the
+// lifecycle timestamps that make a historical record worth keeping. Machine identity — the
+// machine id, worktree path, and harness version — follows publishHarnessIdentity and the
+// concrete model name follows publishModelIdentity, exactly as they do for a live session;
+// a principal always sees those fields on their own sessions. The active task appears as a
+// ref only. As with every view in this file, there is no field that can carry what anyone
+// typed.
+type SessionView struct {
+	ID             domain.ID               `json:"id"`
+	ProjectID      domain.ID               `json:"project_id"`
+	Principal      string                  `json:"principal"`
+	PrincipalID    domain.ID               `json:"principal_id"`
+	Kind           domain.PrincipalKind    `json:"kind"`
+	RunnerID       domain.ID               `json:"runner_id,omitempty"`
+	Harness        string                  `json:"harness"`
+	HarnessVersion string                  `json:"harness_version,omitempty"`
+	MachineID      string                  `json:"machine_id,omitempty"`
+	WorktreePath   string                  `json:"worktree_path,omitempty"`
+	Branch         string                  `json:"branch,omitempty"`
+	BaseSHA        string                  `json:"base_sha,omitempty"`
+	Visibility     domain.Visibility       `json:"visibility"`
+	State          domain.SessionState     `json:"state"`
+	ActiveTaskRef  string                  `json:"active_task_ref,omitempty"`
+	Capabilities   SessionCapabilitiesView `json:"capabilities"`
+	StartedAt      time.Time               `json:"started_at"`
+	LastHeartbeat  time.Time               `json:"last_heartbeat"`
+	ExpiresAt      time.Time               `json:"expires_at"`
+	ClosedAt       *time.Time              `json:"closed_at,omitempty"`
+
+	// Redacted marks a view whose machine or model identity was withheld because the viewer
+	// is not the session's principal and the project does not publish it.
+	Redacted bool `json:"redacted,omitempty"`
+}
+
+// SessionCapabilitiesView is the capability record inside a SessionView. It carries the same
+// fields as SessionCapabilityView, minus the liveness ones that belong to the session itself.
+type SessionCapabilitiesView struct {
+	Model         string        `json:"model,omitempty"`
+	Alias         string        `json:"alias,omitempty"`
+	Tier          domain.Tier   `json:"tier,omitempty"`
+	Effort        domain.Effort `json:"reasoning_effort,omitempty"`
+	MaxEffort     domain.Effort `json:"max_reasoning_effort,omitempty"`
+	Capabilities  []string      `json:"capabilities,omitempty"`
+	ContextWindow int           `json:"context_window,omitempty"`
+	Roles         []string      `json:"roles,omitempty"`
+	Resolved      bool          `json:"resolved"`
+}
+
+// ProjectSession applies visibility rules to one session for export.
+func ProjectSession(
+	v Viewer,
+	s domain.Session,
+	principal domain.Principal,
+	activeTaskRef string,
+	policy AttemptPolicy,
+) SessionView {
+	caps := s.Capabilities
+	view := SessionView{
+		ID:            s.ID,
+		ProjectID:     s.ProjectID,
+		Principal:     principal.Handle,
+		PrincipalID:   principal.ID,
+		Kind:          principal.Kind,
+		RunnerID:      s.RunnerID,
+		Harness:       s.Harness,
+		Branch:        s.Branch,
+		BaseSHA:       s.BaseSHA,
+		Visibility:    s.Visibility,
+		State:         s.State,
+		ActiveTaskRef: activeTaskRef,
+		Capabilities: SessionCapabilitiesView{
+			Tier:          caps.Tier,
+			Effort:        caps.Effort,
+			MaxEffort:     caps.Ceiling(),
+			Capabilities:  caps.Capabilities,
+			ContextWindow: caps.ContextWindow,
+			Roles:         caps.Roles,
+			Resolved:      caps.Resolved,
+		},
+		StartedAt:     s.StartedAt,
+		LastHeartbeat: s.HeartbeatAt,
+		ExpiresAt:     s.ExpiresAt,
+		ClosedAt:      s.ClosedAt,
+	}
+
+	self := v.IsSelf(Owner{PrincipalID: principal.ID, Handle: principal.Handle})
+	if self || policy.PublishHarnessIdentity {
+		view.HarnessVersion = s.HarnessVersion
+		view.MachineID = s.MachineID
+		view.WorktreePath = s.WorktreePath
+	} else if s.HarnessVersion != "" || s.MachineID != "" || s.WorktreePath != "" {
+		view.Redacted = true
+	}
+	if self || policy.PublishModelIdentity {
+		view.Capabilities.Model = caps.Model
+		view.Capabilities.Alias = caps.Alias
+	} else if caps.Model != "" || caps.Alias != "" {
+		view.Redacted = true
+	}
+	return view
+}
+
 // ConflictView is what the other side of a conflict is told.
 type ConflictView struct {
 	ID         domain.ID           `json:"id"`

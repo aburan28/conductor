@@ -56,6 +56,10 @@ Territory
 Execution
   conductor worker                   run a runner: claim, execute, verify, report
   conductor wrap <harness> [args…]   register a session, heartbeat, then launch a tool
+  conductor pause | resume           freeze every agent terminal on this machine, and wake them
+  conductor sessions save all        keep every agent session resumable past a closed terminal or reboot
+  conductor sessions list            saved, paused, and running sessions on this machine
+  conductor sessions export          the project's whole session history, as JSON
   conductor pause                    freeze the live agent terminals; save how to revive them
   conductor resume                   wake paused sessions, reopening any closed terminals
 
@@ -93,6 +97,8 @@ func main() {
 		err = cmdPresence(ctx, args)
 	case "capabilities":
 		err = cmdCapabilities(ctx, args)
+	case "sessions":
+		err = cmdSessions(ctx, args)
 	case "inbox":
 		err = cmdInbox(ctx, args)
 	case "check":
