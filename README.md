@@ -200,6 +200,8 @@ conductor budget                                          # the team's token bud
 conductor budget share rachel 500k                        # give a teammate part of your allowance
 conductor pause                                           # freeze every agent terminal on this machine
 conductor resume                                          # wake them; closed terminals are reopened
+conductor sessions save all                               # keep every session resumable, even after a reboot
+conductor sessions export                                 # the project's session history, as JSON
 ```
 
 Every command takes `--json`.
@@ -255,6 +257,23 @@ because a `SIGSTOP` delivered to a recycled pid would freeze a stranger.
   never sees it. One caveat: `codex resume --last` is Codex's most recent conversation
   globally, not per-directory, so two revived Codex sessions can land on the same one —
   `codex resume` opens the picker for the other.
+
+Pausing is for stepping away; saving is for the terminals themselves going away.
+
+```bash
+conductor sessions save all     # keep every live session resumable — nothing is stopped
+conductor sessions list         # what this machine knows: saved, paused, running
+```
+
+A running session's record normally vanishes with its process — right after a crash, wrong
+after a reboot with three conversations open. `conductor sessions save all` marks every
+session on the machine as deliberately kept. The sessions keep running; if a terminal is
+closed or the machine restarts, the record stays, listed as `saved`, and `conductor resume`
+reopens the conversation exactly as it reopens a paused session whose terminal was closed. A
+saved session you quit yourself is forgotten, as it should be, and a reopened one starts a
+fresh record — save again if it should survive the next reboot too. Saving is per-machine and
+touches nothing on the server; `conductor sessions export` is the other direction — the
+project's whole session history, everyone's, as a JSON file.
 
 Wrapped sessions stay honest with the team while paused: the sidecar keeps heartbeating as
 `waiting_for_input`, so presence shows a parked session that is not offered work, rather than

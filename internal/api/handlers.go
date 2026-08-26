@@ -34,6 +34,7 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /v1/tokens/revoke-all", auth(s.revokeAllTokens))
 
 	m.HandleFunc("POST /v1/projects/{project}/sessions", auth(s.registerSession))
+	m.HandleFunc("GET /v1/projects/{project}/sessions", auth(s.listSessions))
 	m.HandleFunc("POST /v1/sessions/{session}/heartbeat", auth(s.heartbeatSession))
 	m.HandleFunc("POST /v1/sessions/{session}/close", auth(s.closeSession))
 	m.HandleFunc("POST /v1/sessions/{session}/capabilities", auth(s.setSessionCapabilities))
@@ -453,6 +454,22 @@ func (s *Server) heartbeatSession(w http.ResponseWriter, r *http.Request, p doma
 		return
 	}
 	s.ok(w, r, http.StatusOK, updated)
+}
+
+// listSessions is the read behind `conductor sessions save all`: every session the project
+// has had, including closed and stale ones, projected for the caller.
+func (s *Server) listSessions(w http.ResponseWriter, r *http.Request, p domain.Principal) {
+	project, caller, err := s.project(r, p, domain.RoleObserver)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	sessions, err := s.svc.Sessions(r.Context(), caller, project.ID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.ok(w, r, http.StatusOK, map[string]any{"sessions": sessions})
 }
 
 func (s *Server) closeSession(w http.ResponseWriter, r *http.Request, p domain.Principal) {

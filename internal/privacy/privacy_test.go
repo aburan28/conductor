@@ -213,6 +213,53 @@ func TestPresenceRedactsPrivateTaskTitle(t *testing.T) {
 	}
 }
 
+// An exported session must follow the same identity switches as a live one. If presence
+// withholds Bob's machine and model from Alice, `sessions save all` must too — otherwise the
+// export is a way around the policy rather than a record of what it allowed.
+func TestSessionViewFollowsIdentityPolicy(t *testing.T) {
+	closedAt := time.Now()
+	sess := domain.Session{
+		ID: "s1", ProjectID: "p1", Harness: "codex", HarnessVersion: "1.2.3",
+		MachineID: "bobs-laptop", WorktreePath: "/home/bob/wt", Branch: "feature/x",
+		State: domain.SessionClosed, ClosedAt: &closedAt,
+		Capabilities: domain.SessionCapabilities{
+			Model: "gpt-x", Alias: "worker.fast", Tier: domain.TierT2,
+			Effort: domain.EffortLow, Resolved: true,
+		},
+	}
+	bob := domain.Principal{ID: "p-bob", Handle: "bob"}
+	private := AttemptPolicy{}
+
+	asAlice := ProjectSession(Viewer{PrincipalID: "p-alice"}, sess, bob, "T-7", private)
+	if asAlice.MachineID != "" || asAlice.WorktreePath != "" || asAlice.HarnessVersion != "" {
+		t.Errorf("teammate saw machine identity: %+v", asAlice)
+	}
+	if asAlice.Capabilities.Model != "" || asAlice.Capabilities.Alias != "" {
+		t.Errorf("teammate saw model identity: %+v", asAlice.Capabilities)
+	}
+	if !asAlice.Redacted {
+		t.Error("a narrowed view must say so")
+	}
+	// Coordination state survives the redaction: that is the point of the export.
+	if asAlice.Principal != "bob" || asAlice.Harness != "codex" || asAlice.Branch != "feature/x" ||
+		asAlice.ActiveTaskRef != "T-7" || asAlice.State != domain.SessionClosed || asAlice.ClosedAt == nil ||
+		asAlice.Capabilities.Tier != domain.TierT2 || asAlice.Capabilities.Effort != domain.EffortLow {
+		t.Errorf("coordination fields were lost: %+v", asAlice)
+	}
+
+	asBob := ProjectSession(Viewer{PrincipalID: "p-bob"}, sess, bob, "T-7", private)
+	if asBob.MachineID != "bobs-laptop" || asBob.WorktreePath != "/home/bob/wt" ||
+		asBob.Capabilities.Model != "gpt-x" || asBob.Redacted {
+		t.Errorf("owner should see their own session in full: %+v", asBob)
+	}
+
+	published := AttemptPolicy{PublishModelIdentity: true, PublishHarnessIdentity: true}
+	asAlice = ProjectSession(Viewer{PrincipalID: "p-alice"}, sess, bob, "", published)
+	if asAlice.MachineID != "bobs-laptop" || asAlice.Capabilities.Model != "gpt-x" || asAlice.Redacted {
+		t.Errorf("a publishing project should show identity to teammates: %+v", asAlice)
+	}
+}
+
 // The conflict view must not carry the similarity score. A numeric oracle over someone
 // else's private intent can be probed to reconstruct it.
 func TestConflictViewOmitsSimilarityScore(t *testing.T) {
@@ -307,6 +354,7 @@ func TestNoTranscriptFieldsInSharedTypes(t *testing.T) {
 		domain.ValidationResult{}, domain.ReviewFinding{}, domain.DecisionRecord{},
 		domain.Principal{}, domain.Project{}, domain.Runner{}, domain.ModelProfile{},
 		TaskView{}, ConflictView{}, ConflictParty{},
+		SessionView{}, SessionCapabilitiesView{}, SessionCapabilityView{},
 	}
 
 	for _, v := range types {
