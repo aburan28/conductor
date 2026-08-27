@@ -186,9 +186,10 @@ Capacity: 2 runner(s), 3 session(s) accepting work, 5 free slot(s), 1 waiting in
 Share budget with a teammate: conductor budget share <who> <tokens>
 ```
 
-A teammate joins in one command — `conductor swarm join --endpoint https://conductor.team
---project myrepo` — and then contributes interactive capacity with `conductor wrap`, autonomous
-capacity with `conductor worker`, or spare tokens with `conductor budget share`.
+A teammate joins from the link `conductor invite <them>` prints — `conductor join "<link>"`
+(`conductor swarm join "<link>"` is the same thing) — and then contributes interactive capacity
+with `conductor wrap`, autonomous capacity with `conductor worker`, or spare tokens with
+`conductor budget share`.
 
 When too many sessions or attempts are running at once, new work does not fail — it takes a
 place in an **admission queue** and waits. Set the caps in `.conductor/policies.yaml`:
@@ -245,12 +246,48 @@ conductor dashboard                         # prints a ready-to-open link
 
 ### Adding your coworkers
 
+The fastest way is one link. `conductor invite` mints a teammate their own token and bundles
+the endpoint, project, and token into a single join link; they redeem it with `conductor join`
+(or by opening it in a browser) and they are in:
+
 ```bash
-conductor member add rachel --role contributor   # prints a token, once
+$ conductor invite rachel --role maintainer --expires 7d
+
+Invited rachel as maintainer on myrepo.
+
+Send them this link, once, over a channel you trust:
+
+  https://conductor.team/#project=myrepo&token=cdt_QaltIz7t…
+
+They run:  conductor join "<link>"     (or open it in a browser)
+
+The token expires 2026-09-03T19:37:59Z.
+```
+
+```bash
+# on the teammate's machine
+conductor join "https://conductor.team/#project=myrepo&token=cdt_QaltIz7t…"
+# Joined https://conductor.team as rachel. Then: conductor wrap claude / conductor worker.
+```
+
+The token rides in the URL **fragment** (after `#`), which a browser never sends to the server —
+so the credential stays out of every request line and access log, unlike a query-string link.
+The same link opens the web dashboard: it reads the fragment on load, then strips it from the
+address bar. If the endpoint you are logged in against is loopback (`127.0.0.1`), `invite` warns
+that a teammate cannot reach it and shows how to expose the control plane and pass a public
+`--endpoint`.
+
+The longer form still works, and is what a script or CI wants:
+
+```bash
+conductor member add rachel --role contributor   # prints a `conductor login …` line, once
 conductor member list
 conductor member remove rachel                   # also revokes their tokens
 conductor token create --save                    # rotate your own
 ```
+
+A joined teammate contributes to the swarm — `conductor wrap` for interactive work, `conductor
+worker` for autonomous work, `conductor budget share` for spare tokens (see below).
 
 `conductord` binds loopback by default and **refuses to serve a reachable address in
 plaintext**, because bearer tokens would cross the network in the clear. To expose it:
@@ -537,6 +574,9 @@ Implemented and exercised by tests:
 - Member and token administration, TLS, a loopback-by-default bind, and auth throttling.
 - A runner that reaches the control plane over HTTP and holds no database credential
   (§28.2), alongside the in-process backend for single-host use (§28.1).
+- One-link onboarding: `conductor invite <handle>` mints a teammate their own token and prints
+  a single join link (token in the URL fragment, off the wire); `conductor join <link>` redeems
+  it, and the same link self-connects the web dashboard.
 - One-command integration into eight coding tools (Claude Code, Cursor, Codex, OpenCode,
   Windsurf, VS Code, Zed, Gemini CLI): MCP config plus, where supported, pre-edit hooks that
   run the conflict check before every edit and block on a hard conflict.
