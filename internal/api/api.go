@@ -31,22 +31,30 @@ type Server struct {
 	svc    *coord.Service
 	logger *slog.Logger
 	mux    *http.ServeMux
-	// dashboard is served at / when non-empty.
-	dashboard []byte
-	limiter   *authLimiter
+	// web serves the dashboard SPA at / and its assets under /static/ when non-nil.
+	web     http.Handler
+	limiter *authLimiter
 	// behindProxy makes X-Forwarded-For trustworthy for client identification. Off by
 	// default, because the header is attacker-controlled unless a proxy rewrites it.
 	behindProxy bool
 	// tlsEnabled controls whether HSTS is advertised. Sending it over plaintext is at best
 	// useless and at worst locks a developer out of their own local server.
 	tlsEnabled bool
+	// self is Options.SelfEndpoint.
+	self string
 }
 
 type Options struct {
-	Logger      *slog.Logger
-	Dashboard   []byte
+	Logger *slog.Logger
+	// Web is the dashboard: an http.Handler serving the SPA's index at "/" and its assets
+	// under "/static/". Nil disables the dashboard entirely.
+	Web         http.Handler
 	BehindProxy bool
 	TLSEnabled  bool
+	// SelfEndpoint is the URL at which this server can reach itself. The MCP HTTP transport
+	// uses it to call the control plane through the same public API every other client
+	// uses, so the gateway never grows a private path into the store.
+	SelfEndpoint string
 }
 
 func New(store *db.Store, svc *coord.Service, opts Options) *Server {
@@ -58,10 +66,11 @@ func New(store *db.Store, svc *coord.Service, opts Options) *Server {
 		svc:         svc,
 		logger:      opts.Logger,
 		mux:         http.NewServeMux(),
-		dashboard:   opts.Dashboard,
+		web:         opts.Web,
 		limiter:     newAuthLimiter(),
 		behindProxy: opts.BehindProxy,
 		tlsEnabled:  opts.TLSEnabled,
+		self:        opts.SelfEndpoint,
 	}
 	s.routes()
 	return s

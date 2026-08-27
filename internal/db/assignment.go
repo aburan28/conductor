@@ -156,7 +156,7 @@ func (s *Store) CancelAssignmentsForTask(ctx context.Context, taskID domain.ID, 
 // The second half matters more than the first. A laptop that closes mid-offer would otherwise
 // hold a task hostage behind the unique open-offer index, and no other session could be given
 // it — the exact failure the session TTL exists to prevent for leases.
-func (s *Store) ExpireAssignments(ctx context.Context) (int64, error) {
+func (s *Store) ExpireAssignments(ctx context.Context, projectID domain.ID) (int64, error) {
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE task_assignments a
 		   SET state = 'expired', responded_at = now(),
@@ -165,12 +165,22 @@ func (s *Store) ExpireAssignments(ctx context.Context) (int64, error) {
 		                       ELSE 'session went stale' END
 		  FROM sessions s
 		 WHERE s.id = a.session_id
+		   AND ($1 = '' OR a.project_id = $1::uuid)
 		   AND a.state IN ('offered','accepted')
-		   AND (a.expires_at < now() OR s.state IN ('stale','closed') OR s.closed_at IS NOT NULL)`)
+		   AND (a.expires_at < now() OR s.state IN ('stale','closed') OR s.closed_at IS NOT NULL)`,
+		emptyIfNil(projectID))
 	if err != nil {
 		return 0, err
 	}
 	return tag.RowsAffected(), nil
+}
+
+// emptyIfNil lets a query treat an empty id as "all", so a call may scope to a project or not.
+func emptyIfNil(id domain.ID) any {
+	if id == "" {
+		return ""
+	}
+	return id
 }
 
 // FulfilledByAttempt marks the offer satisfied once the session actually claims the task.

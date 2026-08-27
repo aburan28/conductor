@@ -79,6 +79,17 @@ type ProjectConfig struct {
 	PublishHarnessIdentity bool `json:"publish_harness_identity"`
 
 	Budget BudgetPolicy `json:"budget"`
+
+	// Queue caps how much may be active at once; past the cap, work waits for a ticket
+	// rather than failing (see AdmissionTicket).
+	Queue QueuePolicy `json:"queue"`
+
+	// RouterRules and FeaturePaths are policies.yaml's router section, stored so a runner
+	// anywhere evaluates the same rules the repository declares. Dispatch is
+	// dispatch.yaml. All three are optional; absent, the built-in defaults apply.
+	RouterRules  []RouterRule      `json:"router_rules,omitempty"`
+	FeaturePaths FeaturePathPolicy `json:"feature_paths"`
+	Dispatch     *DispatchPolicy   `json:"dispatch,omitempty"`
 }
 
 // DefaultProjectConfig returns the defaults from DESIGN.md §10.1 and §20.2. Every value is
@@ -435,15 +446,18 @@ type Task struct {
 	FencingEpoch       int64                 `json:"fencing_epoch"`
 	ModelAlias         string                `json:"model_alias,omitempty"`
 	HarnessPref        string                `json:"harness_pref,omitempty"`
-	Budget             Budget                `json:"budget"`
-	Features           TaskFeatures          `json:"features"`
-	AttemptsCount      int                   `json:"attempts_count"`
-	MaxAttempts        int                   `json:"max_attempts"`
-	SupersededBy       ID                    `json:"superseded_by,omitempty"`
-	CreatedBy          ID                    `json:"created_by"`
-	CreatedAt          time.Time             `json:"created_at"`
-	UpdatedAt          time.Time             `json:"updated_at"`
-	CompletedAt        *time.Time            `json:"completed_at,omitempty"`
+	// Labels are free-form tags ("docs", "backend", "flaky-test") that dispatch rules match
+	// on and people filter by. They are coordination metadata, visible with the title.
+	Labels        []string     `json:"labels,omitempty"`
+	Budget        Budget       `json:"budget"`
+	Features      TaskFeatures `json:"features"`
+	AttemptsCount int          `json:"attempts_count"`
+	MaxAttempts   int          `json:"max_attempts"`
+	SupersededBy  ID           `json:"superseded_by,omitempty"`
+	CreatedBy     ID           `json:"created_by"`
+	CreatedAt     time.Time    `json:"created_at"`
+	UpdatedAt     time.Time    `json:"updated_at"`
+	CompletedAt   *time.Time   `json:"completed_at,omitempty"`
 
 	// Fingerprint and MinHash are coordination metadata, never rendered to another
 	// principal. See internal/privacy for why they can be stored without exposing text.
