@@ -18,7 +18,7 @@ import (
 	"github.com/adamburan/conductor/internal/client"
 )
 
-const usage = `conductor — coordinate humans and coding agents on one repository
+const usageText = `conductor — coordinate humans and coding agents on one repository
 
 Setup
   conductor init                     scaffold .conductor/ into this repository
@@ -28,6 +28,9 @@ Setup
   conductor member list|remove       see or revoke who has access
   conductor token create|list|revoke manage your own credentials
   conductor dashboard                print a ready-to-open dashboard link
+  conductor integrate <tool>         connect Claude Code, Cursor, Codex, OpenCode, … to this project
+  conductor models                   the model catalog; models discover finds local ones
+  conductor policy lint              validate .conductor/ policy files and their rules
 
 Coordination
   conductor status                   what is in flight, and what is contested
@@ -55,6 +58,12 @@ Territory
   conductor scope list                   active reservations
   conductor conflicts                    open conflicts and what to do about them
 
+Dispatch
+  conductor dispatch <objective|T-n> plan work, then send it to models by policy
+  conductor route <ref> --explain    show what the dispatch policy would decide, and why
+  conductor swarm join|status        contribute this machine's sessions to the team's queue
+  conductor queue                    the admission queue: who is waiting for a slot
+
 Execution
   conductor worker                   run a runner: claim, execute, verify, report
   conductor wrap <harness> [args…]   register a session, heartbeat, then launch a tool
@@ -70,7 +79,7 @@ Run any command with -h for its flags.
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Print(usage)
+		fmt.Print(usageText)
 		os.Exit(2)
 	}
 
@@ -123,11 +132,27 @@ func main() {
 		err = cmdPause(ctx, args)
 	case "resume":
 		err = cmdResume(ctx, args)
+	case "integrate":
+		err = cmdIntegrate(ctx, args)
+	case "hook":
+		err = cmdHook(ctx, args)
+	case "dispatch":
+		err = cmdDispatch(ctx, args)
+	case "route":
+		err = cmdRoute(ctx, args)
+	case "policy":
+		err = cmdPolicy(ctx, args)
+	case "models":
+		err = cmdModels(ctx, args)
+	case "swarm":
+		err = cmdSwarm(ctx, args)
+	case "queue":
+		err = cmdQueue(ctx, args)
 	case "help", "-h", "--help":
-		fmt.Print(usage)
+		fmt.Print(usageText)
 		return
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", os.Args[1], usage)
+		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", os.Args[1], usageText)
 		os.Exit(2)
 	}
 

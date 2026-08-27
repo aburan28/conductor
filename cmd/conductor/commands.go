@@ -836,6 +836,11 @@ func cmdWrap(ctx context.Context, args []string) error {
 		session.ID[:8], tool)
 	printCapabilityNotice(session)
 
+	// Admission: if the project caps how many sessions run at once, take a ticket and wait
+	// for a slot before launching. The sidecar heartbeats the ticket so the slot is not
+	// reclaimed while the session runs; a closed session releases it (`admission` below).
+	admission := admitSession(ctx, api, ref, session.ID, tool, caps.Model)
+
 	// paused is flipped by SIGUSR1/SIGUSR2 from `conductor pause` and `conductor resume`.
 	// While paused this sidecar keeps heartbeating as waiting_for_input: the session is
 	// present but must not be offered work, and presence should say why nothing is moving.
@@ -858,6 +863,7 @@ func cmdWrap(ctx context.Context, args []string) error {
 				b, _ := gitOutput(heartbeatCtx, "rev-parse", "--abbrev-ref", "HEAD")
 				_ = api.Post(heartbeatCtx, "/v1/sessions/"+session.ID+"/heartbeat",
 					map[string]any{"state": string(state), "branch": b}, nil)
+				admission.heartbeat(heartbeatCtx)
 			}
 		}
 	}()
@@ -867,9 +873,16 @@ func cmdWrap(ctx context.Context, args []string) error {
 		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
 		_ = api.Post(closeCtx, "/v1/sessions/"+session.ID+"/close", nil, nil)
+		admission.release(closeCtx)
 	}
 
-	cmd := exec.CommandContext(ctx, tool, toolArgs...)
+	// Auto-mount Conductor's MCP tools inside the session so the agent can claim, reserve,
+	// and report from within its own run — unless the user already passed an MCP config.
+	mcpArgs, mcpCleanup := wrapMCPArgs(tool, toolArgs, session.ID, ref, creds.Endpoint)
+	defer mcpCleanup()
+	launchArgs := append(append([]string(nil), toolArgs...), mcpArgs...)
+
+	cmd := exec.CommandContext(ctx, tool, launchArgs...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	cmd.Env = append(os.Environ(),
 		"CONDUCTOR_SESSION_ID="+session.ID,

@@ -13,6 +13,7 @@ import (
 	"github.com/adamburan/conductor/internal/client"
 	"github.com/adamburan/conductor/internal/config"
 	"github.com/adamburan/conductor/internal/harness"
+	"github.com/adamburan/conductor/internal/integrations"
 )
 
 // ---------------------------------------------------------------------------
@@ -40,6 +41,7 @@ func cmdInit(args []string) error {
 		"project.yaml":  scaffoldProject(filepath.Base(root)),
 		"policies.yaml": scaffoldPolicies,
 		"models.yaml":   scaffoldModels,
+		"dispatch.yaml": scaffoldDispatch,
 		"WORKFLOW.md":   scaffoldWorkflow,
 	}
 	for name, body := range files {
@@ -194,12 +196,13 @@ func cmdDoctor(ctx context.Context, args []string) error {
 	caps := reg.CapabilityReport(ctx)
 
 	type report struct {
-		Endpoint   string                 `json:"endpoint"`
-		Reachable  bool                   `json:"reachable"`
-		Principal  string                 `json:"principal,omitempty"`
-		Project    string                 `json:"project,omitempty"`
-		Harnesses  []harness.Capabilities `json:"harnesses"`
-		Repository string                 `json:"repository,omitempty"`
+		Endpoint     string                 `json:"endpoint"`
+		Reachable    bool                   `json:"reachable"`
+		Principal    string                 `json:"principal,omitempty"`
+		Project      string                 `json:"project,omitempty"`
+		Harnesses    []harness.Capabilities `json:"harnesses"`
+		Repository   string                 `json:"repository,omitempty"`
+		Integrations []integrations.Status  `json:"integrations"`
 	}
 
 	creds := client.LoadCredentials()
@@ -220,6 +223,11 @@ func cmdDoctor(ctx context.Context, args []string) error {
 	if root, err := config.FindRoot("."); err == nil {
 		out.Repository = root
 	}
+	// Which coding tools on this machine are wired to Conductor, and how.
+	home, _ := os.UserHomeDir()
+	out.Integrations = integrations.Statuses(integrations.Options{
+		Root: out.Repository, Home: home, Getenv: os.Getenv,
+	})
 
 	if *asJSON {
 		return emit(out)
@@ -240,6 +248,37 @@ func cmdDoctor(ctx context.Context, args []string) error {
 		fmt.Printf("  %-12s %s\n", "repository", out.Repository)
 	}
 	fmt.Printf("\nHarnesses\n%s", harness.Describe(caps))
+
+	fmt.Printf("\nIntegrations\n")
+	var absent []string
+	for _, st := range out.Integrations {
+		if !st.Detected && !st.Configured {
+			absent = append(absent, st.Tool)
+			continue
+		}
+		state := "not connected"
+		if st.Configured {
+			state = "connected"
+			if st.Transport != "" {
+				state += " (" + st.Transport + ")"
+			}
+			if st.HooksSupported {
+				if st.Hooks {
+					state += " · hooks on"
+				} else {
+					state += " · hooks off"
+				}
+			}
+		}
+		fix := ""
+		if !st.Configured || (st.HooksSupported && !st.Hooks) {
+			fix = st.Fix
+		}
+		fmt.Printf("  %-11s %-32s %s\n", st.Tool, state, fix)
+	}
+	if len(absent) > 0 {
+		fmt.Printf("  %-11s %s\n", "not found", strings.Join(absent, ", "))
+	}
 	return nil
 }
 
@@ -362,6 +401,11 @@ concurrency:
   max_concurrent_attempts: 4
   max_per_principal: 2
   max_protected_writers: 1
+  # Admission queue: past these caps, new sessions and attempts wait for a slot rather than
+  # failing. 0 means unlimited. See "conductor queue" and "conductor swarm".
+  max_active_sessions: 0
+  max_sessions_per_principal: 0
+  queue_ticket_ttl_seconds: 90
 `
 
 const scaffoldModels = `models:

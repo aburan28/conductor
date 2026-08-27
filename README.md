@@ -84,6 +84,66 @@ ceiling calls `coord_delegate` — the same continuation bundle as a handoff, pl
 receiver must meet. If nothing live qualifies, the bundle is still written and the caller is
 told what the ceiling actually is.
 
+### The CLI dispatches to the right model, by policy
+
+`conductor capabilities` is about the sessions live *right now*. The other half is a repository
+policy that says which concrete model each kind of work should go to — declared in
+`.conductor/dispatch.yaml`, versioned with the code, and hashed onto every attempt so a routing
+decision is always explainable.
+
+```yaml
+# .conductor/dispatch.yaml
+lanes:
+  implement:
+    role: implementer
+    candidates:
+      - model: ollama/qwen3:27b        # a local model for small, low-risk work
+        harness: opencode
+        tags: [local]
+        when: task.estimated_files <= 3 && !task.security_sensitive
+        max_concurrent: 1              # one GPU, one attempt at a time
+      - model: claude-sonnet-5
+        harness: claude
+      - model: claude-opus-5           # escalation walks down the ladder on failure
+        harness: claude
+
+rules:
+  - id: docs-local
+    when: task.labels has "docs"
+    prefer: { tag: local }
+  - id: routing-changes
+    when: task.paths any "internal/router/**"
+    require: { tier: T3 }
+
+defaults: { lane: implement, on_failure: escalate, max_escalations: 2 }
+```
+
+The `when` expressions read deterministic facts derived from the ledger — scopes, labels,
+attempt history, budget position — never a prompt. `conductor route T-42` shows what the policy
+would decide and why, before a token is spent:
+
+```
+$ conductor route T-42
+
+T-42 would route to:
+
+  claude-sonnet-5 on claude  (lane implement, effort medium, tier T2)
+
+  Considered:
+    ✗ ollama/qwen3:27b on opencode — condition not met: task.estimated_files <= 3 && !task.security_sensitive
+    ✓ claude-sonnet-5 on claude
+    · claude-opus-5 on claude
+
+  Rationale:
+    • lane implement (3 candidates)
+    • chose claude-sonnet-5 on claude at effort medium
+```
+
+A dispatch candidate can never route *below* a hard floor: a security-sensitive task keeps its
+T4 floor whatever the ladder says. `conductor policy lint` validates the whole file — unknown
+facts, undefined lanes, malformed expressions — and `conductor models discover` finds the local
+models (Ollama today) worth adding to the ladder.
+
 ### Budgets bound the team, not the person
 
 With `budget.member.monthly_tokens` set, every member gets the same token allowance over a
@@ -106,6 +166,45 @@ grants are checked against the giver's live balance under the same lock the clai
 `conductor budget` shows everyone's position; `conductor budget grants` is the transfer
 history; a `budget.shared` event lands on the team stream. As everywhere else, amounts and
 identities are shared — what the tokens were spent *on* is not.
+
+### The team pools capacity, and queues when it is full
+
+Coworkers connect to each other through Conductor: a teammate joins the same control plane and
+their machines and sessions become shared capacity — a *swarm*. `conductor swarm` rolls up who
+is contributing what, and who has budget to spare:
+
+```
+$ conductor swarm
+
+Capacity: 2 runner(s), 3 session(s) accepting work, 5 free slot(s), 1 waiting in queue
+
+  WHO            KIND     STATE       LOAD        BUDGET LEFT
+  alice          session  working     ready       3.4m
+  rachel         runner   online      1/4         1.1m
+  bob            session  online_idle ready       0
+
+Share budget with a teammate: conductor budget share <who> <tokens>
+```
+
+A teammate joins in one command — `conductor swarm join --endpoint https://conductor.team
+--project myrepo` — and then contributes interactive capacity with `conductor wrap`, autonomous
+capacity with `conductor worker`, or spare tokens with `conductor budget share`.
+
+When too many sessions or attempts are running at once, new work does not fail — it takes a
+place in an **admission queue** and waits. Set the caps in `.conductor/policies.yaml`:
+
+```yaml
+concurrency:
+  max_active_sessions: 6          # across the whole team
+  max_sessions_per_principal: 2   # so one person cannot take every slot
+  max_concurrent_attempts: 4
+```
+
+Past the cap, `conductor wrap` parks with its place in line (`waiting for a session slot,
+position 2…`) and starts the moment a slot frees up; the scheduler grants tickets in arrival
+order, and a granted slot that stops heartbeating is handed on rather than held forever.
+`conductor queue` shows the whole line. As everywhere else, a ticket carries identity, a kind,
+and a model name — never what the work is about.
 
 ### Privacy is structural, not procedural
 
@@ -203,28 +302,69 @@ conductor resume                                          # wake them; closed te
 conductor sessions save all                               # keep every session resumable, even after a reboot
 conductor usage --by day,harness                          # tokens and cost over time, across claude/codex/opencode
 conductor sessions export                                 # the project's session history, as JSON
+conductor integrate cursor                                # wire a coding tool to this project (MCP + hooks)
+conductor route T-42                                      # what would this route to, and why — before spending a token
+conductor dispatch T-42                                   # send work to a model by policy, through the queue
+conductor models                                          # the model catalog; `models discover` finds local ones
+conductor policy lint                                     # validate .conductor/ policy and dispatch rules
+conductor swarm                                           # the team's pooled capacity and who has budget to share
+conductor queue                                           # the admission line when the team is at capacity
 ```
 
 Every command takes `--json`.
 
-### Mounting the MCP tools in an agent
+### Connecting your coding tool
+
+One command wires Conductor's MCP tools — and, where the tool supports them, pre-edit hooks —
+into whatever you drive:
+
+```bash
+conductor integrate claude        # Claude Code: .mcp.json + PreToolUse/SessionStart hooks
+conductor integrate cursor        # Cursor: .cursor/mcp.json + a rules file
+conductor integrate codex         # Codex: ~/.codex/config.toml
+conductor integrate opencode      # OpenCode: opencode.json + a pre-tool plugin
+conductor integrate all           # every tool this machine has
+```
+
+Also supported: `windsurf`, `vscode`, `zed`, `gemini`. Each merges into the tool's own config
+without disturbing anything else already there, and `--print` shows exactly what it would write
+before it writes it. `conductor doctor` reports which tools are connected.
+
+Every write is idempotent and never puts a bearer token into a project file that could be
+committed: stdio configs need no token (the `conductor-mcp` binary reads your saved login), and
+HTTP configs reference the token through the tool's own `${env:CONDUCTOR_TOKEN}` syntax.
+
+**Two transports.** The `conductor-mcp` binary speaks MCP over stdio, for any tool that launches
+a local process:
 
 ```json
-{
-  "mcpServers": {
-    "conductor": {
-      "command": "conductor-mcp",
-      "env": { "CONDUCTOR_TOKEN": "cdt_…", "CONDUCTOR_PROJECT": "myrepo" }
-    }
-  }
-}
+{ "mcpServers": { "conductor": {
+  "command": "conductor-mcp", "args": ["--project", "myrepo"] } } }
 ```
+
+Or point an HTTP-capable client straight at the control plane — no local binary, which is what a
+teammate on a shared server wants:
+
+```json
+{ "mcpServers": { "conductor": { "type": "http",
+  "url": "https://conductor.team/mcp",
+  "headers": { "Authorization": "Bearer ${CONDUCTOR_TOKEN}", "X-Conductor-Project": "myrepo" }
+} } }
+```
+
+`conductord` serves the Streamable HTTP transport at `/mcp` (and `/mcp/{project}`), negotiating
+protocol revisions `2024-11-05` through `2025-06-18`, with per-session ids and the same bearer
+auth every other client uses — the gateway holds no private path into the store, over either
+transport.
 
 Eleven tools: `conductor_check_conflicts`, `coord_start_work`, `coord_get_work`,
 `coord_expand_scope`, `coord_report_progress`, `coord_publish_result`, `coord_finish_work`,
 `coord_handoff`, `coord_delegate`, `coord_capabilities`, `coord_project_status`. Heartbeats are
 deliberately *not* an MCP tool — a model should never spend tokens telling the server it is
-still alive.
+still alive. And where a harness supports pre-edit hooks, `conductor integrate` installs
+`conductor hook pre-tool`, which calls the same conflict check before every edit and blocks the
+tool call (exit 2, with the holder named) when someone else holds the file — enforcement, not
+just advice.
 
 ### Token usage across harnesses
 
@@ -259,7 +399,7 @@ usage fields of each record; there is no struct field the transcript text could 
 and OpenCode's export is asked to redact before Conductor even sees it. Team totals by day,
 harness, and model are visible to every member. Per-session detail is your own unless you
 maintain the project, and other people's model names follow `publishModelIdentity`, exactly
-as they do in presence. The dashboard shows the last seven days by harness.
+as they do in presence. The dashboard shows usage over time by harness and model, alongside the task board, fleet, swarm, and admission queue.
 
 ### Pausing the wall of terminals
 
@@ -397,6 +537,20 @@ Implemented and exercised by tests:
 - Member and token administration, TLS, a loopback-by-default bind, and auth throttling.
 - A runner that reaches the control plane over HTTP and holds no database credential
   (§28.2), alongside the in-process backend for single-host use (§28.1).
+- One-command integration into eight coding tools (Claude Code, Cursor, Codex, OpenCode,
+  Windsurf, VS Code, Zed, Gemini CLI): MCP config plus, where supported, pre-edit hooks that
+  run the conflict check before every edit and block on a hard conflict.
+- MCP over Streamable HTTP served by `conductord` itself, so an HTTP-capable client connects
+  with a bearer token and no local binary — the same eleven tools as the stdio gateway.
+- Repository dispatch policy: named lanes, ordered model ladders, `when`-gated candidates, and
+  hard-floor-respecting escalation, evaluated by a small deterministic expression language,
+  with `conductor route` to preview and `conductor policy lint` to validate.
+- A pooled-capacity swarm view and per-member budget sharing across a team, and an admission
+  queue that makes sessions and attempts wait for a slot instead of failing when the team is at
+  capacity, granted in arrival order with heartbeat-expiry hand-off.
+- A single-page dashboard (no build step, no external requests) with task board, fleet and
+  swarm views, live usage charts, the admission queue, conflict radar, and a per-tool
+  integration guide.
 
 Not built, and where the design says it goes:
 

@@ -31,10 +31,19 @@ type Bundle struct {
 	Policies    PoliciesFile
 	Models      ModelsFile
 	Workflow    WorkflowFile
+	Dispatch    DispatchFile
 	ProjectSHA  string
 	PoliciesSHA string
 	ModelsSHA   string
 	WorkflowSHA string
+	DispatchSHA string
+}
+
+// DispatchFile mirrors .conductor/dispatch.yaml: which concrete models a team wants its
+// work sent to, in what order, under which conditions. The `dispatch:` key of policies.yaml
+// is accepted as an alternative home for smaller setups.
+type DispatchFile struct {
+	domain.DispatchPolicy `yaml:",inline"`
 }
 
 // ProjectFile mirrors .conductor/project.yaml.
@@ -88,14 +97,11 @@ type ProjectFile struct {
 // PoliciesFile mirrors .conductor/policies.yaml.
 type PoliciesFile struct {
 	Router struct {
-		Rules    []RouterRule `yaml:"rules"`
-		Features struct {
-			SecuritySensitivePaths     []string `yaml:"security_sensitive_paths"`
-			CryptographySensitivePaths []string `yaml:"cryptography_sensitive_paths"`
-			SchemaOrMigrationPaths     []string `yaml:"schema_or_migration_paths"`
-			InfraPaths                 []string `yaml:"infra_paths"`
-		} `yaml:"features"`
+		Rules    []RouterRule             `yaml:"rules"`
+		Features domain.FeaturePathPolicy `yaml:"features"`
 	} `yaml:"router"`
+	// Dispatch may live here instead of in dispatch.yaml. dispatch.yaml wins when both exist.
+	Dispatch *domain.DispatchPolicy `yaml:"dispatch"`
 	Conflict struct {
 		DuplicateExact            string  `yaml:"duplicate_exact"`
 		DuplicateSimilarThreshold float64 `yaml:"duplicate_similar_threshold"`
@@ -129,24 +135,18 @@ type PoliciesFile struct {
 		MaxPerPrincipal       int `yaml:"max_per_principal"`
 		MaxPerRunner          int `yaml:"max_per_runner"`
 		MaxProtectedWriters   int `yaml:"max_protected_writers"`
+		// Admission caps. Past these, new sessions and attempts queue for a slot rather
+		// than failing (see `conductor queue`). 0 means unlimited.
+		MaxActiveSessions       int `yaml:"max_active_sessions"`
+		MaxSessionsPerPrincipal int `yaml:"max_sessions_per_principal"`
+		QueueTicketTTLSeconds   int `yaml:"queue_ticket_ttl_seconds"`
 	} `yaml:"concurrency"`
 }
 
 // RouterRule is one hard routing rule (DESIGN.md §13.5). Rules are declarative and
-// deterministic; a model recommendation can never route around one.
-type RouterRule struct {
-	ID                       string `yaml:"id"`
-	When                     string `yaml:"when"`
-	RequireTier              string `yaml:"require_tier"`
-	PreferTier               string `yaml:"prefer_tier"`
-	RequireIndependentReview bool   `yaml:"require_independent_review"`
-	HumanMergeApproval       bool   `yaml:"human_merge_approval"`
-	RequireScope             string `yaml:"require_scope"`
-	MaxParallelWriters       int    `yaml:"max_parallel_writers"`
-	RequireRollbackPlan      bool   `yaml:"require_rollback_plan"`
-	EscalateOneTier          bool   `yaml:"escalate_one_tier"`
-	RequireReplan            bool   `yaml:"require_replan"`
-}
+// deterministic; a model recommendation can never route around one. The `when` expression
+// is evaluated by internal/policy.
+type RouterRule = domain.RouterRule
 
 // ModelsFile mirrors .conductor/models.yaml.
 type ModelsFile struct {
@@ -214,6 +214,14 @@ func Load(root string) (Bundle, error) {
 	}
 	if err := readYAML(filepath.Join(dir, "models.yaml"), &b.Models, &b.ModelsSHA); err != nil {
 		return b, err
+	}
+
+	if err := readYAML(filepath.Join(dir, "dispatch.yaml"), &b.Dispatch, &b.DispatchSHA); err != nil {
+		return b, err
+	}
+	if b.Dispatch.Empty() && b.Policies.Dispatch != nil {
+		b.Dispatch.DispatchPolicy = *b.Policies.Dispatch
+		b.DispatchSHA = b.PoliciesSHA
 	}
 
 	workflowPath := b.Project.Workflow.File
@@ -336,6 +344,19 @@ func (b Bundle) ProjectConfig() domain.ProjectConfig {
 	}
 	if v := b.Policies.Budget.Member.MonthlyTokens; v > 0 {
 		c.Budget.MemberTokens = v
+	}
+
+	c.Queue = domain.QueuePolicy{
+		MaxActiveSessions:       b.Policies.Concurrency.MaxActiveSessions,
+		MaxSessionsPerPrincipal: b.Policies.Concurrency.MaxSessionsPerPrincipal,
+		MaxConcurrentAttempts:   c.MaxConcurrentAttempts,
+		TicketTTLSeconds:        b.Policies.Concurrency.QueueTicketTTLSeconds,
+	}
+	c.RouterRules = b.Policies.Router.Rules
+	c.FeaturePaths = b.Policies.Router.Features
+	if !b.Dispatch.Empty() {
+		p := b.Dispatch.DispatchPolicy
+		c.Dispatch = &p
 	}
 	return c
 }

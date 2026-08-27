@@ -45,6 +45,7 @@ type TaskView struct {
 	Priority      int               `json:"priority"`
 	RiskLevel     domain.RiskLevel  `json:"risk_level"`
 	Scopes        []string          `json:"scopes"`
+	Labels        []string          `json:"labels,omitempty"`
 	Branch        string            `json:"branch,omitempty"`
 	FencingEpoch  int64             `json:"fencing_epoch"`
 	AttemptsCount int               `json:"attempts_count"`
@@ -121,6 +122,7 @@ func ProjectTask(v Viewer, t domain.Task, p TaskProjection) TaskView {
 	if self || t.Visibility.AtLeast(domain.VisibilityTeamSummary) {
 		view.Title = t.Title
 		view.Objective = t.Objective
+		view.Labels = t.Labels
 		view.ExternalRef = t.ExternalRef
 		view.AcceptanceCriteria = t.AcceptanceCriteria
 		view.DependsOn = p.DependsOn
@@ -515,6 +517,9 @@ var EventPayloadAllowlist = map[string]bool{
 	"fencing_epoch": true, "attempt_number": true, "expires_at": true,
 	"visibility": true, "count": true, "error": true, "title": true,
 	"workflow_sha": true, "similarity": true, "tier": true,
+	// Queue and swarm.
+	"ticket_id": true, "position": true, "queue_depth": true, "lane": true,
+	"granted": true, "expired": true, "labels": true, "provider": true, "priority": true,
 }
 
 // SanitizeEventPayload drops any key not on the allowlist. Returns the sanitized map and the

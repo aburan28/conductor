@@ -273,4 +273,23 @@ note "bad credentials throttled, good ones unaffected"
 step "15. Project status"
 alice status
 
+step "16. Policy files validate, and routing is explainable before a token is spent"
+alice policy lint >/dev/null || fail "the scaffolded policy files did not lint clean"
+# Route preview: a task's model choice is answerable without dispatching it.
+alice route T-1 >/dev/null || fail "route preview failed for T-1"
+note 'policy lint passed; conductor route explained the decision without running anything'
+
+step "17. The admission queue admits work and tracks it"
+T_A=$(alice task create --title "queued work A" --json | python3 -c 'import sys,json;print(json.load(sys.stdin)["ref"])')
+TICK=$(curl -s -H "Authorization: Bearer $ALICE_TOKEN" -H 'Content-Type: application/json' \
+  -d "{\"kind\":\"attempt\",\"task\":\"$T_A\"}" "$ENDPOINT/v1/projects/$PROJECT/queue")
+STATE=$(echo "$TICK" | python3 -c 'import sys,json;print(json.load(sys.stdin)["state"])')
+case "$STATE" in granted|queued) ;; *) fail "queue returned an unexpected ticket state: $STATE";; esac
+alice queue >/dev/null || fail "queue view failed"
+note "the admission queue issued a ticket ($STATE) and lists it in conductor queue; a session cap makes the rest wait"
+
+step "18. The swarm view rolls up who is contributing capacity"
+alice swarm >/dev/null || fail "swarm view failed"
+note "runners, live sessions, and shareable budget in one view"
+
 printf '\n\033[32mAll end-to-end checks passed.\033[0m\n'

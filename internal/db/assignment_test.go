@@ -97,7 +97,7 @@ func TestOffersHeldByAStaleSessionAreReleased(t *testing.T) {
 		t.Fatalf("ReapSessions: %v", err)
 	}
 
-	n, err := f.store.ExpireAssignments(f.ctx)
+	n, err := f.store.ExpireAssignments(f.ctx, f.project.ID)
 	if err != nil {
 		t.Fatalf("ExpireAssignments: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestUnansweredOffersExpireOnTheirOwn(t *testing.T) {
 		t.Fatalf("age offer: %v", err)
 	}
 
-	if _, err := f.store.ExpireAssignments(f.ctx); err != nil {
+	if _, err := f.store.ExpireAssignments(f.ctx, f.project.ID); err != nil {
 		t.Fatalf("ExpireAssignments: %v", err)
 	}
 	assignments, err := f.store.SessionInbox(f.ctx, session.ID, true)

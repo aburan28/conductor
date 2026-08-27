@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/adamburan/conductor/internal/domain"
+	"github.com/adamburan/conductor/internal/policy"
 )
 
 func price(v float64) *float64 { return &v }
@@ -297,5 +298,66 @@ func TestScopeGrowthDetectsDrift(t *testing.T) {
 		[]string{"internal/router/a.go", "internal/api/handler.go", "internal/db/store.go"})
 	if drifted <= 1.0 {
 		t.Errorf("out-of-scope work reported growth %.2f, want > 1.0", drifted)
+	}
+}
+
+func TestRepositoryRulesRaiseFloorsAndEscalate(t *testing.T) {
+	cat := Catalog{
+		Profiles: []domain.ModelProfile{
+			{Alias: "worker.fast", Harness: "claude", Model: "fast", Tier: domain.TierT1, ReasoningEffort: "low", Enabled: true},
+			{Alias: "worker.general", Harness: "claude", Model: "general", Tier: domain.TierT2, ReasoningEffort: "medium", Enabled: true},
+			{Alias: "planner.frontier", Harness: "claude", Model: "frontier", Tier: domain.TierT4, ReasoningEffort: "high", Enabled: true},
+		},
+		Aliases: map[string]AliasPolicy{
+			"worker.fast":      {Tier: domain.TierT1, DefaultEffort: "low"},
+			"worker.general":   {Tier: domain.TierT2, DefaultEffort: "medium"},
+			"planner.frontier": {Tier: domain.TierT4, DefaultEffort: "high"},
+		},
+		Ladder:       []string{"worker.fast", "worker.general", "planner.frontier"},
+		DefaultAlias: "worker.general",
+	}
+	rules := []domain.RouterRule{
+		{ID: "infra-frontier", When: "task.infra_or_deployment", RequireTier: domain.TierT4, HumanMergeApproval: true},
+		{ID: "docs-cheap", When: `task.labels has "docs"`, PreferTier: domain.TierT1},
+		{ID: "two-strikes", When: "attempt.failures >= 2", EscalateOneTier: true, RequireReplan: true},
+	}
+	// A plain small task with the docs label prefers T1.
+	d, err := Route(cat, Request{
+		Role: domain.RoleImplementer, AvailableHarnesses: []string{"claude"}, Rules: rules,
+		Facts:    &policy.Facts{Task: domain.Task{Labels: []string{"docs"}}, Features: domain.TaskFeatures{EstimatedFiles: 4}},
+		Features: domain.TaskFeatures{EstimatedFiles: 4},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Tier != domain.TierT1 || d.Model != "fast" {
+		t.Fatalf("docs task routed to %s/%s: %v", d.Tier, d.Model, d.Rationale)
+	}
+	// Infra work carries a T4 floor from the repository even though the built-in floor is T3.
+	d, err = Route(cat, Request{
+		Role: domain.RoleImplementer, AvailableHarnesses: []string{"claude"}, Rules: rules,
+		Features: domain.TaskFeatures{EstimatedFiles: 1, InfraOrDeployment: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Tier != domain.TierT4 || !d.HumanMergeApproval || len(d.MatchedRules) != 1 {
+		t.Fatalf("infra task = %+v", d)
+	}
+	// Two failures escalate one tier via the rule (T2 → T3, then the built-in escalation
+	// takes it to T4) and require a replan.
+	d, err = Route(cat, Request{
+		Role: domain.RoleImplementer, AvailableHarnesses: []string{"claude"}, Rules: rules,
+		Features: domain.TaskFeatures{EstimatedFiles: 4}, PriorFailures: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.RequireReplan || !d.Tier.AtLeast(domain.TierT3) {
+		t.Fatalf("failed task = %+v", d)
+	}
+	// A broken rule is an error, not a silent pass.
+	if _, err := Route(cat, Request{Rules: []domain.RouterRule{{ID: "bad", When: "(("}}, AvailableHarnesses: []string{"claude"}}); err == nil {
+		t.Fatal("expected a compile error from a malformed rule")
 	}
 }
