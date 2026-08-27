@@ -170,6 +170,10 @@ func (c *Client) Post(ctx context.Context, path string, body, out any) error {
 	return c.Do(ctx, http.MethodPost, path, body, out)
 }
 
+func (c *Client) Delete(ctx context.Context, path string, out any) error {
+	return c.Do(ctx, http.MethodDelete, path, nil, out)
+}
+
 // Raw fetches a non-JSON endpoint, such as the Markdown task card.
 func (c *Client) Raw(ctx context.Context, path string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.Endpoint+path, nil)

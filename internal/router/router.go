@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/adamburan/conductor/internal/domain"
+	"github.com/adamburan/conductor/internal/policy"
 )
 
 // AliasPolicy is a role definition: the capability floor a model must meet, not a model name.
@@ -63,6 +64,29 @@ type Request struct {
 	// Mechanical marks work that is applying an already-approved plan, addressing
 	// line-level review comments, or similar (DESIGN.md §13.7).
 	Mechanical bool
+	// Rules are the repository's policies.yaml router rules. Their `when` expressions are
+	// evaluated against Facts; the built-in floors below still apply underneath them, so a
+	// repository can only ever add floors, never remove the security one.
+	Rules []domain.RouterRule
+	// Facts are what the rules read. Nil means "derive from Features and history".
+	Facts *policy.Facts
+}
+
+// facts renders the request for rule evaluation.
+func (r Request) facts() policy.Env {
+	if r.Facts != nil {
+		return r.Facts.Env()
+	}
+	return policy.Facts{
+		Features:         r.Features,
+		Task:             domain.Task{RiskLevel: r.RiskLevel, ModelAlias: r.RequestedAlias, HarnessPref: r.HarnessPref},
+		AttemptNumber:    r.AttemptNumber,
+		PriorFailures:    r.PriorFailures,
+		ReviewRejections: r.ReviewRejections,
+		Role:             r.Role,
+		Harnesses:        r.AvailableHarnesses,
+		Budget:           policy.BudgetFacts{MonthlyUSD: r.Budget.MonthlyUSD, SpentUSD: r.Budget.SpentUSD},
+	}.Env()
 }
 
 // Decision is the routing outcome plus the reasoning that produced it, which is recorded as
@@ -80,6 +104,8 @@ type Decision struct {
 	RequireReplan            bool          `json:"require_replan"`
 	MaxParallelWriters       int           `json:"max_parallel_writers,omitempty"`
 	Paused                   bool          `json:"paused"`
+	RequireRollbackPlan      bool          `json:"require_rollback_plan,omitempty"`
+	MatchedRules             []string      `json:"matched_rules,omitempty"`
 	Rationale                []string      `json:"rationale"`
 	CatalogVersion           string        `json:"catalog_version,omitempty"`
 }
@@ -108,8 +134,41 @@ func Route(cat Catalog, req Request) (Decision, error) {
 		d.Rationale = append(d.Rationale, floorReason)
 	}
 
+	// Repository rules. They evaluate against the same facts a dispatch policy sees and can
+	// only raise floors, add review requirements, or escalate — the built-in floors above
+	// remain underneath them.
+	var effects policy.RouterEffects
+	if len(req.Rules) > 0 {
+		var err error
+		effects, err = policy.ApplyRouterRules(req.Rules, req.facts())
+		if err != nil {
+			return d, err
+		}
+		d.MatchedRules = effects.Matched
+		if len(effects.Matched) > 0 {
+			d.Rationale = append(d.Rationale, "policy rules matched: "+strings.Join(effects.Matched, ", "))
+		}
+		if effects.Floor != "" && effects.Floor.AtLeast(floor) && effects.Floor != floor {
+			floor = effects.Floor
+			d.Rationale = append(d.Rationale, fmt.Sprintf("policy raised the floor to %s", floor))
+		}
+	}
+
 	tier := baseTier(req)
 	d.Rationale = append(d.Rationale, fmt.Sprintf("base tier %s from task shape", tier))
+	if effects.PreferTier != "" && !floorApplies(req) && effects.Floor == "" {
+		tier = effects.PreferTier
+		d.Rationale = append(d.Rationale, fmt.Sprintf("policy prefers tier %s", tier))
+	}
+	for i := 0; i < effects.EscalateSteps; i++ {
+		tier = tier.Up()
+		d.Rationale = append(d.Rationale, fmt.Sprintf("policy escalated to %s", tier))
+	}
+	if effects.RequireReplan {
+		d.RequireReplan = true
+		d.Rationale = append(d.Rationale, "policy requires a replan")
+	}
+	d.RequireRollbackPlan = effects.RequireRollbackPlan
 
 	// Escalation: repeated failure means the current tier is not solving it (§13.6).
 	if req.PriorFailures >= 2 {
@@ -165,6 +224,11 @@ func Route(cat Catalog, req Request) (Decision, error) {
 	}
 	if req.Features.SchemaOrMigration {
 		d.MaxParallelWriters = 1
+	}
+	d.RequireIndependentReview = d.RequireIndependentReview || effects.RequireIndependentReview
+	d.HumanMergeApproval = d.HumanMergeApproval || effects.HumanMergeApproval
+	if effects.MaxParallelWriters > 0 && (d.MaxParallelWriters == 0 || effects.MaxParallelWriters < d.MaxParallelWriters) {
+		d.MaxParallelWriters = effects.MaxParallelWriters
 	}
 
 	alias := req.RequestedAlias

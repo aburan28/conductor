@@ -91,6 +91,8 @@ type TickReport struct {
 	ConflictEdges   int
 	SessionsReaped  int
 	OffersExpired   int
+	TicketsExpired  int
+	TicketsGranted  int
 }
 
 // Tick runs one full cycle across all projects.
@@ -145,7 +147,7 @@ func (s *Scheduler) TickProject(ctx context.Context, project domain.Project) (Ti
 	//     Reaping runs first for a reason: an offer is only released once the session
 	//     holding it is known to be gone, and until then the open-offer index would keep any
 	//     other session from being given the same task.
-	expired, err := s.store.ExpireAssignments(ctx)
+	expired, err := s.store.ExpireAssignments(ctx, project.ID)
 	if err != nil {
 		return report, err
 	}
@@ -188,7 +190,23 @@ func (s *Scheduler) TickProject(ctx context.Context, project domain.Project) (Ti
 		report.ConflictEdges = edges
 	}
 
-	// 6. Budget.
+	// 6. Admission queue: expire abandoned tickets, release slots whose session or attempt
+	//    ended, and grant what the freed slots allow. Only when the project caps something —
+	//    an unlimited project has no queue to service.
+	if project.Config.Queue.Enabled() || project.Config.Queue.MaxConcurrentAttempts > 0 {
+		expired, granted, err := s.store.ReconcileQueue(ctx, project.ID, project.Config.Queue)
+		if err != nil {
+			s.opts.Logger.Warn("queue reconcile failed", "project", project.Slug, "error", err)
+		} else {
+			report.TicketsExpired = int(expired)
+			report.TicketsGranted = int(granted)
+			if granted > 0 {
+				s.emit(ctx, project, "", "queue.granted", map[string]any{"granted": int(granted)})
+			}
+		}
+	}
+
+	// 7. Budget.
 	if err := s.checkBudget(ctx, project); err != nil {
 		s.opts.Logger.Warn("budget check failed", "project", project.Slug, "error", err)
 	}
@@ -282,12 +300,15 @@ func (s *Scheduler) checkBudget(ctx context.Context, project domain.Project) err
 }
 
 func (s *Scheduler) emit(ctx context.Context, project domain.Project, taskID domain.ID, eventType string, payload map[string]any) {
-	task, err := s.store.GetTask(ctx, taskID)
-	if err == nil {
-		payload["task_ref"] = task.Ref
+	aggregateType, aggregateID := "project", project.ID
+	if taskID != "" {
+		aggregateType, aggregateID = "task", taskID
+		if task, err := s.store.GetTask(ctx, taskID); err == nil {
+			payload["task_ref"] = task.Ref
+		}
 	}
 	if err := s.store.AppendEvent(ctx, project.OrganizationID, project.ID, "",
-		"task", taskID, eventType, domain.VisibilityTeamSummary, payload); err != nil {
+		aggregateType, aggregateID, eventType, domain.VisibilityTeamSummary, payload); err != nil {
 		s.opts.Logger.Warn("emit event failed", "type", eventType, "error", err)
 	}
 }
