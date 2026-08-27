@@ -201,6 +201,7 @@ conductor budget share rachel 500k                        # give a teammate part
 conductor pause                                           # freeze every agent terminal on this machine
 conductor resume                                          # wake them; closed terminals are reopened
 conductor sessions save all                               # keep every session resumable, even after a reboot
+conductor usage --by day,harness                          # tokens and cost over time, across claude/codex/opencode
 conductor sessions export                                 # the project's session history, as JSON
 ```
 
@@ -224,6 +225,41 @@ Eleven tools: `conductor_check_conflicts`, `coord_start_work`, `coord_get_work`,
 `coord_handoff`, `coord_delegate`, `coord_capabilities`, `coord_project_status`. Heartbeats are
 deliberately *not* an MCP tool — a model should never spend tokens telling the server it is
 still alive.
+
+### Token usage across harnesses
+
+Every harness meters itself and none of them compare notes. Claude Code writes a usage
+block on each message of its transcript, Codex logs a running total after every response,
+OpenCode stores tokens and cost on every message — each on one machine, each for itself.
+Conductor reads those logs and keeps one ledger.
+
+```bash
+conductor usage                          # last 7 days, by harness
+conductor usage --by day,harness         # a daily series per harness
+conductor usage --by model --since 30d   # which models carry the load
+conductor usage --by principal           # who used what
+conductor usage sync                     # report this directory's unwrapped sessions
+```
+
+A session launched through `conductor wrap` reports as it runs: the sidecar re-reads the
+harness's own log once a minute, folds it into hourly buckets — one per harness session and
+model — and sends only what changed, with a final flush at exit (`CONDUCTOR_USAGE=off`
+disables it). Sessions that were not wrapped are reported after the fact with `conductor
+usage sync`, which reads the same logs for the current directory. Runner attempts land in
+the same ledger from their progress reports. Buckets carry absolute counts, so re-reporting
+replaces rather than adds, and a restarted collector cannot double-count.
+
+Cost is what the harness reported where it reports one (OpenCode); otherwise Conductor
+estimates it from the organization's model catalog at list price, cache reads at a tenth,
+and marks the row `catalog`. A model the catalog does not know stays unpriced rather than
+guessed.
+
+What crosses the wire is numbers, a model name, and an hour. The readers decode only the
+usage fields of each record; there is no struct field the transcript text could land in,
+and OpenCode's export is asked to redact before Conductor even sees it. Team totals by day,
+harness, and model are visible to every member. Per-session detail is your own unless you
+maintain the project, and other people's model names follow `publishModelIdentity`, exactly
+as they do in presence. The dashboard shows the last seven days by harness.
 
 ### Pausing the wall of terminals
 

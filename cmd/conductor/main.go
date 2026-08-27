@@ -35,6 +35,8 @@ Coordination
   conductor capabilities             which models and effort levels are live right now
   conductor check                    can I start this work? (run before you edit)
   conductor budget                   the team's token budget for this window
+  conductor usage                    tokens and cost over time, by day, harness, model, or person
+  conductor usage sync               report this machine's unwrapped sessions
   conductor budget share <who> <n>   give a teammate part of your allowance
 
 Work
@@ -107,6 +109,8 @@ func main() {
 		err = cmdConflicts(ctx, args)
 	case "budget":
 		err = cmdBudget(ctx, args)
+	case "usage":
+		err = cmdUsage(ctx, args)
 	case "task":
 		err = cmdTask(ctx, args)
 	case "scope":

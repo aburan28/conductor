@@ -72,6 +72,10 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /v1/projects/{project}/conflicts", auth(s.listConflicts))
 	m.HandleFunc("POST /v1/conflicts/{conflict}/resolve", auth(s.resolveConflict))
 
+	m.HandleFunc("POST /v1/sessions/{session}/usage", auth(s.recordSessionUsage))
+	m.HandleFunc("POST /v1/projects/{project}/usage", auth(s.recordSyncedUsage))
+	m.HandleFunc("GET /v1/projects/{project}/usage", auth(s.getUsage))
+
 	m.HandleFunc("GET /v1/projects/{project}/budget", auth(s.getBudget))
 	m.HandleFunc("POST /v1/projects/{project}/budget/share", auth(s.shareBudget))
 	m.HandleFunc("GET /v1/projects/{project}/budget/grants", auth(s.listBudgetGrants))
