@@ -58,6 +58,8 @@ func serve(args []string) error {
 		"trust X-Forwarded-For (only set this when a proxy you control rewrites it)")
 	insecure := fs.Bool("insecure", false,
 		"permit binding a non-loopback address without TLS")
+	publicURL := fs.String("public-url", envOr("CONDUCTOR_PUBLIC_URL", ""),
+		"URL at which clients reach this server (used for the MCP endpoint and self-calls); defaults to the bind address")
 	verbose := fs.Bool("v", false, "verbose logging")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, `conductord — Conductor control plane
@@ -117,12 +119,22 @@ Binding 127.0.0.1 needs none of these.`, *addr)
 	}
 	logger.Info("database ready")
 
+	scheme := "http"
+	if tlsEnabled {
+		scheme = "https"
+	}
+	selfEndpoint := *publicURL
+	if selfEndpoint == "" {
+		selfEndpoint = scheme + "://" + displayHost(*addr)
+	}
+
 	svc := coord.New(store)
 	server := api.New(store, svc, api.Options{
-		Logger:      logger,
-		Dashboard:   web.Dashboard(),
-		BehindProxy: *behindProxy,
-		TLSEnabled:  tlsEnabled,
+		Logger:       logger,
+		Web:          web.Handler(),
+		BehindProxy:  *behindProxy,
+		TLSEnabled:   tlsEnabled,
+		SelfEndpoint: selfEndpoint,
 	})
 
 	if !*noScheduler {
@@ -152,9 +164,7 @@ Binding 127.0.0.1 needs none of these.`, *addr)
 		_ = httpServer.Shutdown(shutdownCtx)
 	}()
 
-	scheme := "http"
 	if tlsEnabled {
-		scheme = "https"
 		httpServer.TLSConfig = &tls.Config{
 			MinVersion: tls.VersionTLS12,
 			// Prefer forward-secret suites. Go picks sensibly for TLS 1.3; this only
@@ -171,7 +181,7 @@ Binding 127.0.0.1 needs none of these.`, *addr)
 	}
 	logger.Info("conductor listening",
 		"addr", *addr, "tls", tlsEnabled, "behind_proxy", *behindProxy,
-		"dashboard", scheme+"://"+displayHost(*addr)+"/")
+		"dashboard", selfEndpoint+"/", "mcp", selfEndpoint+"/mcp")
 
 	if tlsEnabled {
 		return httpServer.ListenAndServeTLS(*tlsCert, *tlsKey)

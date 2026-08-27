@@ -24,6 +24,7 @@ import (
 	"github.com/adamburan/conductor/internal/db"
 	"github.com/adamburan/conductor/internal/domain"
 	"github.com/adamburan/conductor/internal/harness"
+	"github.com/adamburan/conductor/internal/policy"
 	"github.com/adamburan/conductor/internal/router"
 	"github.com/adamburan/conductor/internal/worktree"
 )
@@ -478,7 +479,7 @@ func (r *Runner) route(ctx context.Context, snap coord.RunnerSnapshot, task doma
 	profiles := snap.Profiles
 
 	features := router.DeriveFeatures(scopeStrings(reservations), attempt.ChangedPaths,
-		router.DefaultFeaturePolicy(), task.Features)
+		router.FeaturePolicyFrom(project.Config.FeaturePaths), task.Features)
 
 	// The fake harness has no catalog entries of its own, so supply them in memory — but
 	// only when it was explicitly asked for. Its profiles are capacity-billed and therefore
@@ -488,8 +489,16 @@ func (r *Runner) route(ctx context.Context, snap coord.RunnerSnapshot, task doma
 		profiles = append(profiles, harness.FakeProfiles(project.OrganizationID, aliasesOf(profiles))...)
 	}
 
+	facts := policy.Facts{
+		Task: task, Features: features, Scopes: scopeStrings(reservations),
+		ChangedPaths:  attempt.ChangedPaths,
+		AttemptNumber: attempt.AttemptNumber, PriorFailures: max(0, task.AttemptsCount-1),
+		Role: domain.RoleImplementer, Harnesses: available,
+		Budget: policy.BudgetFacts{MonthlyUSD: project.Config.Budget.MonthlyUSD, SpentUSD: snap.SpentUSD},
+	}
+
 	cat := buildCatalog(profiles)
-	return router.Route(cat, router.Request{
+	decision, err := router.Route(cat, router.Request{
 		Role:               domain.RoleImplementer,
 		Features:           features,
 		RiskLevel:          task.RiskLevel,
@@ -504,7 +513,45 @@ func (r *Runner) route(ctx context.Context, snap coord.RunnerSnapshot, task doma
 			DownshiftAt: project.Config.Budget.DownshiftAt,
 			PauseAt:     project.Config.Budget.PauseAt,
 		},
+		Rules: project.Config.RouterRules,
+		Facts: &facts,
 	})
+	if err != nil || decision.Paused {
+		return decision, err
+	}
+
+	// Repository dispatch policy, when configured, chooses the concrete model within the
+	// floors the router just computed. It never routes below the router's hard floor.
+	if dp := project.Config.Dispatch; dp != nil && !dp.Empty() && !r.usingFake() {
+		compiled, issues := policy.CompileDispatch(dp)
+		if policy.HasErrors(issues) {
+			r.opts.Logger.Warn("dispatch policy has errors; using the tier router", "task", task.Ref)
+			return decision, nil
+		}
+		dd, derr := compiled.Resolve(facts, policy.ResolveOptions{Catalog: policy.ProfileCatalog(profiles)})
+		if derr != nil {
+			r.opts.Logger.Info("dispatch policy did not place the task; using the tier router",
+				"task", task.Ref, "reason", derr.Error())
+			return decision, nil
+		}
+		if decision.Tier == "" || dd.Tier == "" || dd.Tier.AtLeast(decision.Tier) {
+			decision.Model, decision.Harness, decision.Effort = dd.Model, dd.Harness, dd.Effort
+			if dd.Provider != "" {
+				decision.Provider = dd.Provider
+			}
+			if dd.Alias != "" {
+				decision.Alias = dd.Alias
+			}
+			if dd.Tier != "" {
+				decision.Tier = dd.Tier
+			}
+			decision.Rationale = append(decision.Rationale, dd.Rationale...)
+		} else {
+			decision.Rationale = append(decision.Rationale,
+				"dispatch candidate below the router floor; kept the router's model")
+		}
+	}
+	return decision, nil
 }
 
 // usingFake reports whether this runner was explicitly asked to use the built-in fake

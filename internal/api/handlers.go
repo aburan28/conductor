@@ -91,9 +91,15 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /v1/attempts/{attempt}/route", auth(s.setAttemptRoute))
 	m.HandleFunc("POST /v1/attempts/{attempt}/state", auth(s.setAttemptState))
 
-	if len(s.dashboard) > 0 {
-		m.HandleFunc("GET /{$}", s.serveDashboard)
-		m.HandleFunc("GET /dashboard", s.serveDashboard)
+	s.inspectRoutes(m)
+	s.mcpRoutes(m)
+	s.queueRoutes(m)
+
+	// The SPA owns every path the API does not. Go's mux prefers the more specific pattern,
+	// so /v1/... always wins and everything else — "/", "/tasks/T-42", "/static/app.js" —
+	// is the dashboard's to route client-side.
+	if s.web != nil {
+		m.Handle("GET /", s.web)
 	}
 }
 
@@ -608,6 +614,7 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request, p domain.Prin
 	}
 	filter := db.ListTasksFilter{
 		OpenOnly: r.URL.Query().Get("open") == "true",
+		Labels:   r.URL.Query()["label"],
 		Limit:    intParam(r, "limit", 200),
 	}
 	for _, st := range r.URL.Query()["status"] {
@@ -631,7 +638,8 @@ type createTaskBody struct {
 	RiskLevel          domain.RiskLevel             `json:"risk_level"`
 	ModelAlias         string                       `json:"model_alias"`
 	HarnessPref        string                       `json:"harness"`
-	DependsOn          []domain.ID                  `json:"depends_on"`
+	Labels             []string                     `json:"labels"`
+	DependsOn          []string                     `json:"depends_on"`
 	AcceptanceCriteria []domain.AcceptanceCriterion `json:"acceptance_criteria"`
 	Scopes             []domain.ScopeRequest        `json:"scopes"`
 }
@@ -665,6 +673,23 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request, p domain.Pri
 	for _, sc := range body.Scopes {
 		scopeStrings = append(scopeStrings, sc.Resource)
 	}
+
+	// Dependencies may be given as task refs (T-12) or ids; resolve refs to ids so the UI
+	// can link by the ref a person actually types.
+	dependsOn := make([]domain.ID, 0, len(body.DependsOn))
+	for _, dep := range body.DependsOn {
+		if dep == "" {
+			continue
+		}
+		if dt, err := s.store.GetTask(r.Context(), dep); err == nil {
+			dependsOn = append(dependsOn, dt.ID)
+		} else if dt, err := s.store.GetTaskByRef(r.Context(), project.ID, dep); err == nil {
+			dependsOn = append(dependsOn, dt.ID)
+		} else {
+			s.fail(w, r, fmt.Errorf("%w: unknown dependency %q", domain.ErrInvalidArgument, dep))
+			return
+		}
+	}
 	env := privacy.Envelope{
 		Summary:     body.Title + " " + body.Objective,
 		Scopes:      scopeStrings,
@@ -683,8 +708,9 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request, p domain.Pri
 		RiskLevel:          body.RiskLevel,
 		ModelAlias:         body.ModelAlias,
 		HarnessPref:        body.HarnessPref,
+		Labels:             body.Labels,
 		MaxAttempts:        project.Config.MaxAttempts,
-		DependsOn:          body.DependsOn,
+		DependsOn:          dependsOn,
 		Fingerprint:        env.Fingerprint(key),
 		MinHash:            env.Signature(key),
 		WorkflowSHA:        project.WorkflowSHA,
@@ -785,6 +811,7 @@ type patchTaskBody struct {
 	RiskLevel  *domain.RiskLevel  `json:"risk_level"`
 	Visibility *domain.Visibility `json:"visibility"`
 	ModelAlias *string            `json:"model_alias"`
+	Labels     *[]string          `json:"labels"`
 }
 
 func (s *Server) patchTask(w http.ResponseWriter, r *http.Request, p domain.Principal) {
@@ -808,6 +835,7 @@ func (s *Server) patchTask(w http.ResponseWriter, r *http.Request, p domain.Prin
 	if _, err := s.store.PatchTask(r.Context(), task.ID, db.TaskPatch{
 		Title: body.Title, Objective: body.Objective, Priority: body.Priority,
 		RiskLevel: body.RiskLevel, Visibility: body.Visibility, ModelAlias: body.ModelAlias,
+		Labels: body.Labels,
 	}); err != nil {
 		s.fail(w, r, err)
 		return
@@ -1519,11 +1547,6 @@ func (s *Server) heartbeatRunner(w http.ResponseWriter, r *http.Request, p domai
 // ---------------------------------------------------------------------------
 // Dashboard
 // ---------------------------------------------------------------------------
-
-func (s *Server) serveDashboard(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write(s.dashboard)
-}
 
 func firstNonEmpty(values ...string) string {
 	for _, v := range values {

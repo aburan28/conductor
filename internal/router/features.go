@@ -28,6 +28,25 @@ func DefaultFeaturePolicy() FeaturePolicy {
 	}
 }
 
+// FeaturePolicyFrom converts the project's stored feature paths into a FeaturePolicy,
+// falling back to the defaults for any list the project left empty.
+func FeaturePolicyFrom(p domain.FeaturePathPolicy) FeaturePolicy {
+	out := DefaultFeaturePolicy()
+	if len(p.SecuritySensitivePaths) > 0 {
+		out.SecurityPaths = p.SecuritySensitivePaths
+	}
+	if len(p.CryptographySensitivePaths) > 0 {
+		out.CryptographyPaths = p.CryptographySensitivePaths
+	}
+	if len(p.SchemaOrMigrationPaths) > 0 {
+		out.SchemaOrMigration = p.SchemaOrMigrationPaths
+	}
+	if len(p.InfraPaths) > 0 {
+		out.InfraPaths = p.InfraPaths
+	}
+	return out
+}
+
 // DeriveFeatures computes the router's feature record from scopes and attempt history
 // (DESIGN.md §13.3).
 //

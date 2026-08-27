@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -20,7 +21,7 @@ const taskColumns = `
 	COALESCE(t.intent_fingerprint, ''), COALESCE(t.intent_minhash, '{}'),
 	t.model_alias, t.harness_pref, t.budget, t.features,
 	t.attempts_count, t.max_attempts, COALESCE(t.superseded_by::text, ''),
-	t.created_by::text, t.created_at, t.updated_at, t.completed_at`
+	t.created_by::text, t.created_at, t.updated_at, t.completed_at, t.labels`
 
 func scanTask(scan func(...any) error) (domain.Task, error) {
 	var t domain.Task
@@ -33,7 +34,7 @@ func scanTask(scan func(...any) error) (domain.Task, error) {
 		&t.Fingerprint, &t.MinHash,
 		&t.ModelAlias, &t.HarnessPref, &budget, &features,
 		&t.AttemptsCount, &t.MaxAttempts, &t.SupersededBy,
-		&t.CreatedBy, &t.CreatedAt, &t.UpdatedAt, &t.CompletedAt); err != nil {
+		&t.CreatedBy, &t.CreatedAt, &t.UpdatedAt, &t.CompletedAt, &t.Labels); err != nil {
 		return domain.Task{}, err
 	}
 	if err := decodeJSON(criteria, &t.AcceptanceCriteria); err != nil {
@@ -62,6 +63,7 @@ type CreateTaskParams struct {
 	RiskLevel          domain.RiskLevel
 	ModelAlias         string
 	HarnessPref        string
+	Labels             []string
 	MaxAttempts        int
 	Budget             domain.Budget
 	Features           domain.TaskFeatures
@@ -125,14 +127,15 @@ func (s *Store) CreateTask(ctx context.Context, p CreateTaskParams) (domain.Task
 			INSERT INTO tasks (organization_id, project_id, ref, parent_id, external_ref,
 			        title, objective, acceptance_criteria, status, visibility, priority,
 			        risk_level, base_sha, workflow_sha, intent_fingerprint, intent_minhash,
-			        model_alias, harness_pref, budget, features, max_attempts, created_by)
+			        model_alias, harness_pref, budget, features, max_attempts, created_by, labels)
 			VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5, $6, $7, $8, $9, $10, $11,
-			        $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22::uuid)
+			        $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22::uuid, $23)
 			RETURNING `+strings.ReplaceAll(taskColumns, "t.", "tasks."),
 			orgID, p.ProjectID, ref, nullable(p.ParentID), nullableText(p.ExternalRef),
 			p.Title, p.Objective, criteria, p.Status, p.Visibility, p.Priority,
 			p.RiskLevel, p.BaseSHA, p.WorkflowSHA, nullableText(p.Fingerprint), p.MinHash,
 			p.ModelAlias, p.HarnessPref, budget, features, p.MaxAttempts, p.CreatedBy,
+			normalizeLabels(p.Labels),
 		).Scan)
 		if err != nil {
 			return err
@@ -234,7 +237,9 @@ type ListTasksFilter struct {
 	OpenOnly    bool
 	CreatedBy   domain.ID
 	ExternalRef string
-	Limit       int
+	// Labels keeps tasks carrying any of the given labels.
+	Labels []string
+	Limit  int
 }
 
 func (s *Store) ListTasks(ctx context.Context, projectID domain.ID, f ListTasksFilter) ([]domain.Task, error) {
@@ -260,6 +265,10 @@ func (s *Store) ListTasks(ctx context.Context, projectID domain.ID, f ListTasksF
 	if f.ExternalRef != "" {
 		args = append(args, f.ExternalRef)
 		fmt.Fprintf(&q, " AND t.external_ref = $%d", len(args))
+	}
+	if len(f.Labels) > 0 {
+		args = append(args, normalizeLabels(f.Labels))
+		fmt.Fprintf(&q, " AND t.labels && $%d", len(args))
 	}
 	q.WriteString(` ORDER BY t.priority DESC, t.created_at`)
 	if f.Limit > 0 {
@@ -327,6 +336,7 @@ type TaskPatch struct {
 	AcceptanceCriteria *[]domain.AcceptanceCriterion
 	Features           *domain.TaskFeatures
 	BaseSHA            *string
+	Labels             *[]string
 }
 
 func (s *Store) PatchTask(ctx context.Context, id domain.ID, p TaskPatch) (domain.Task, error) {
@@ -363,6 +373,9 @@ func (s *Store) PatchTask(ctx context.Context, id domain.ID, p TaskPatch) (domai
 	}
 	if p.MaxAttempts != nil {
 		add("max_attempts = $%d", *p.MaxAttempts)
+	}
+	if p.Labels != nil {
+		add("labels = $%d", normalizeLabels(*p.Labels))
 	}
 	if p.BaseSHA != nil {
 		add("base_sha = $%d", *p.BaseSHA)
@@ -502,4 +515,22 @@ func (s *Store) BlockTasksWithUnmetDependencies(ctx context.Context, projectID d
 		out = append(out, id)
 	}
 	return out, rows.Err()
+}
+
+// normalizeLabels lower-cases, trims, de-duplicates, and sorts labels so "Docs" and "docs"
+// are one label and a filter can compare them exactly. The result is never nil, because a
+// text[] column does not accept NULL.
+func normalizeLabels(in []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, l := range in {
+		l = strings.ToLower(strings.TrimSpace(l))
+		if l == "" || seen[l] || len(l) > 64 {
+			continue
+		}
+		seen[l] = true
+		out = append(out, l)
+	}
+	sort.Strings(out)
+	return out
 }
