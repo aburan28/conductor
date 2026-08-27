@@ -25,6 +25,8 @@ Setup
   conductor login                    save endpoint, token, and project
   conductor doctor                   report which harnesses are installed
   conductor member add <handle>      give a coworker access (prints a token once)
+  conductor invite <handle>          mint a teammate a token and print one join link
+  conductor join <link>              accept an invite link and log in
   conductor member list|remove       see or revoke who has access
   conductor token create|list|revoke manage your own credentials
   conductor dashboard                print a ready-to-open dashboard link
@@ -96,6 +98,10 @@ func main() {
 		err = cmdLogin(ctx, args)
 	case "member":
 		err = cmdMember(ctx, args)
+	case "invite":
+		err = cmdInvite(ctx, args)
+	case "join":
+		err = cmdJoin(ctx, args)
 	case "token":
 		err = cmdToken(ctx, args)
 	case "doctor":

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -147,34 +146,17 @@ func cmdLogin(ctx context.Context, args []string) error {
 		return errors.New("no token: pass --token (get one from `conductord bootstrap`)")
 	}
 
-	api := client.New(creds.Endpoint, creds.Token)
-	var who struct {
-		Principal struct {
-			Handle string `json:"handle"`
-		} `json:"principal"`
-		Projects []struct {
-			Slug string `json:"slug"`
-			Role string `json:"role"`
-		} `json:"projects"`
-	}
-	if err := api.Get(ctx, "/v1/whoami", &who); err != nil {
+	saved, projects, err := connectAndSave(ctx, creds)
+	if err != nil {
 		return fmt.Errorf("verifying token: %w", err)
-	}
-	creds.Handle = who.Principal.Handle
-
-	if creds.Project == "" && len(who.Projects) == 1 {
-		creds.Project = who.Projects[0].Slug
-	}
-	if err := client.SaveCredentials(creds); err != nil {
-		return err
 	}
 
 	path, _ := client.CredentialsPath()
-	fmt.Printf("Logged in as %s at %s\n", creds.Handle, creds.Endpoint)
-	if creds.Project != "" {
-		fmt.Printf("Default project: %s\n", creds.Project)
+	fmt.Printf("Logged in as %s at %s\n", saved.Handle, saved.Endpoint)
+	if saved.Project != "" {
+		fmt.Printf("Default project: %s\n", saved.Project)
 	}
-	for _, p := range who.Projects {
+	for _, p := range projects {
 		fmt.Printf("  %-24s %s\n", p.Slug, p.Role)
 	}
 	fmt.Printf("Saved to %s (mode 0600)\n", path)
@@ -301,11 +283,10 @@ func cmdDashboard(args []string) error {
 		return err
 	}
 
-	// The token rides in the query string because EventSource cannot set headers. That is a
-	// local-URL convenience, not a pattern to copy: the server accepts a query token on GET
-	// only, so it never appears on a mutating request.
-	link := fmt.Sprintf("%s/?project=%s&token=%s",
-		creds.Endpoint, url.QueryEscape(ref), url.QueryEscape(creds.Token))
+	// The token rides in the URL fragment, not the query string: a browser never sends the
+	// fragment to the server, so the credential stays out of the request line and any access
+	// log along the way. The dashboard reads it on load and strips it from the address bar.
+	link := joinLink(creds.Endpoint, ref, creds.Token)
 	fmt.Println(link)
 	fmt.Fprintln(os.Stderr,
 		"\nThis link contains your token. Do not paste it into a shared channel.")
