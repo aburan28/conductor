@@ -2273,6 +2273,8 @@ conductor presence
 conductor sessions save all
 conductor sessions list
 conductor sessions export --output sessions.json
+conductor usage --by day,harness --since 30d
+conductor usage sync
 
 conductor task create
 conductor task list

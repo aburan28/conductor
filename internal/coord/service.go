@@ -517,15 +517,23 @@ func (s *Service) ReportProgress(ctx context.Context, c Caller, fence domain.Fen
 	if r.Blocker != "" {
 		state = domain.AttemptPausedConflict
 	}
-	if _, err := s.Store.UpdateAttempt(ctx, fence.AttemptID, db.AttemptProgress{
+	attempt, err := s.Store.UpdateAttempt(ctx, fence.AttemptID, db.AttemptProgress{
 		State:        state,
 		ChangedPaths: r.ChangedPaths,
 		TokensIn:     r.TokensIn,
 		TokensOut:    r.TokensOut,
 		CostUSD:      r.CostUSD,
 		Turns:        r.Turns,
-	}); err != nil && !errors.Is(err, domain.ErrIllegalTransition) {
+	})
+	if err != nil && !errors.Is(err, domain.ErrIllegalTransition) {
 		return err
+	}
+	if err == nil {
+		// The ledger sees what the attempt row sees, so `conductor usage` covers runner work
+		// without a second reporting path.
+		if err := s.recordAttemptUsage(ctx, c, attempt); err != nil {
+			return err
+		}
 	}
 
 	task, err := s.Store.GetTask(ctx, fence.TaskID)

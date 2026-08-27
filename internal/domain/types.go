@@ -214,6 +214,58 @@ type Session struct {
 	ClosedAt       *time.Time          `json:"closed_at,omitempty"`
 }
 
+// UsageBucket is one row of the token ledger: one harness session, one model, one hour
+// (DESIGN.md §26.1). Counters are absolute for the hour, so re-reporting is idempotent.
+type UsageBucket struct {
+	ID                ID        `json:"id,omitempty"`
+	ProjectID         ID        `json:"project_id"`
+	PrincipalID       ID        `json:"principal_id"`
+	SessionID         ID        `json:"session_id,omitempty"`
+	AttemptID         ID        `json:"attempt_id,omitempty"`
+	Source            string    `json:"source"`
+	Harness           string    `json:"harness"`
+	Model             string    `json:"model,omitempty"`
+	Provider          string    `json:"provider,omitempty"`
+	Effort            string    `json:"reasoning_effort,omitempty"`
+	ExternalSessionID string    `json:"external_session_id"`
+	BucketStart       time.Time `json:"bucket_start"`
+	Requests          int64     `json:"requests"`
+	InputTokens       int64     `json:"input_tokens"`
+	CacheReadTokens   int64     `json:"cache_read_tokens"`
+	CacheWriteTokens  int64     `json:"cache_write_tokens"`
+	OutputTokens      int64     `json:"output_tokens"`
+	ReasoningTokens   int64     `json:"reasoning_tokens"`
+	CostUSD           float64   `json:"cost_usd"`
+	CostSource        string    `json:"cost_source,omitempty"`
+	UpdatedAt         time.Time `json:"updated_at,omitempty"`
+}
+
+// UsageRow is one line of a usage report: the dimensions it was grouped by, and the totals.
+// Dimension fields that were not asked for are empty.
+type UsageRow struct {
+	Period            *time.Time `json:"period,omitempty"` // start of the day or hour
+	PrincipalID       ID         `json:"principal_id,omitempty"`
+	Principal         string     `json:"principal,omitempty"`
+	Harness           string     `json:"harness,omitempty"`
+	Model             string     `json:"model,omitempty"`
+	Provider          string     `json:"provider,omitempty"`
+	Effort            string     `json:"reasoning_effort,omitempty"`
+	Source            string     `json:"source,omitempty"`
+	ExternalSessionID string     `json:"external_session_id,omitempty"`
+	SessionID         ID         `json:"session_id,omitempty"`
+	Requests          int64      `json:"requests"`
+	InputTokens       int64      `json:"input_tokens"`
+	CacheReadTokens   int64      `json:"cache_read_tokens"`
+	CacheWriteTokens  int64      `json:"cache_write_tokens"`
+	OutputTokens      int64      `json:"output_tokens"`
+	ReasoningTokens   int64      `json:"reasoning_tokens"`
+	TotalTokens       int64      `json:"total_tokens"`
+	CostUSD           float64    `json:"cost_usd"`
+	// Redacted marks a row whose model was withheld because the viewer is not its principal
+	// and the project does not publish model identity.
+	Redacted bool `json:"redacted,omitempty"`
+}
+
 // SessionCapabilities is what a live session can actually do: which model it is driving, how
 // hard it is allowed to think, and what the catalog says that combination is worth
 // (DESIGN.md §7.3, §13).

@@ -125,6 +125,16 @@
   </section>
 
   <section>
+    <h2>Token usage — last 7 days, by harness</h2>
+    <div class="sub" id="usage-total"></div>
+    <div class="body" id="usage"><div class="empty">No usage recorded yet.</div></div>
+    <div class="privacy">
+      Counts come from each harness's own usage log, reported by the wrap sidecar. Numbers,
+      model, and hour only — nothing that was said.
+    </div>
+  </section>
+
+  <section>
     <h2>Conflict radar</h2>
     <div class="body" id="conflicts"><div class="empty">No open conflicts.</div></div>
   </section>
@@ -239,6 +249,42 @@ function renderCapabilities(inv) {
     </div>`).join('');
 }
 
+function fmtTokens(n) {
+  n = Number(n || 0);
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
+  return String(n);
+}
+
+function renderUsage(report) {
+  const rows = (report && report.rows) || [];
+  const t = (report && report.total) || {};
+  el('usage-total').textContent = rows.length
+    ? `${fmtTokens(t.total_tokens)} tokens · ${fmtTokens(t.requests)} calls` +
+      (t.cost_usd ? ` · $${Number(t.cost_usd).toFixed(2)}` : '')
+    : '';
+  if (!rows.length) {
+    el('usage').innerHTML = '<div class="empty">No usage recorded yet. Sessions launched through <code>conductor wrap</code> report automatically.</div>';
+    return;
+  }
+  const max = Math.max(...rows.map(r => Number(r.total_tokens || 0)), 1);
+  el('usage').innerHTML = rows.map(r => `
+    <div class="row">
+      <div class="who">${esc(r.harness || '—')}</div>
+      <div class="what">
+        <div class="chips">
+          <span class="chip">${fmtTokens(r.total_tokens)} tokens</span>
+          <span class="chip">${fmtTokens(r.input_tokens + r.cache_read_tokens + r.cache_write_tokens)} in</span>
+          <span class="chip">${fmtTokens(r.output_tokens)} out</span>
+          <span class="chip">${fmtTokens(r.requests)} calls</span>
+          ${r.cost_usd ? '<span class="chip">$' + Number(r.cost_usd).toFixed(2) + '</span>' : ''}
+        </div>
+        <div style="height:4px;margin-top:6px;background:var(--accent,#5b8def);opacity:.7;width:${Math.round(100 * Number(r.total_tokens || 0) / max)}%"></div>
+      </div>
+    </div>`).join('');
+}
+
 function renderConflicts(list) {
   if (!list || !list.length) {
     el('conflicts').innerHTML = '<div class="empty">No open conflicts.</div>';
@@ -315,6 +361,11 @@ async function refresh() {
     renderConflicts(status.conflicts);
     renderBoard([...(status.active || []), ...(status.ready || [])]);
     renderReservations(reservations.reservations);
+    if (!renderUsage.last || Date.now() - renderUsage.last > 60000) {
+      renderUsage.last = Date.now();
+      api(`/v1/projects/${encodeURIComponent(project)}/usage?since=7d&by=harness`)
+        .then(renderUsage).catch(() => {});
+    }
     el('counts').textContent = Object.entries(status.counts || {})
       .map(([k, v]) => `${k} ${v}`).join(' · ');
   } catch (err) {

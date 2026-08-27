@@ -298,6 +298,18 @@ func (r *Runner) execute(ctx context.Context, snap coord.RunnerSnapshot, claim d
 	stopSupervision()
 	<-supervision // let the heartbeat loop unwind before collecting evidence
 
+	// The supervision ticker only ever saw the totals as of its last tick; whatever the
+	// harness used in its final seconds would otherwise never reach the ledger. Totals are
+	// merged monotonically server-side, so reporting them once more is safe.
+	if result.TokensIn > 0 || result.TokensOut > 0 || result.CostUSD > 0 {
+		if err := r.backend.ReportProgress(ctx, claim.Fence, coord.ProgressReport{
+			Phase: "finishing", TokensIn: result.TokensIn, TokensOut: result.TokensOut,
+			CostUSD: result.CostUSD, Turns: result.Turns,
+		}); err != nil {
+			r.opts.Logger.Warn("final usage report failed", "error", err)
+		}
+	}
+
 	// --- Collect evidence ---------------------------------------------------
 	changed, head, _ := r.trees.Status(ctx, ws.Path, ws.BaseSHA)
 

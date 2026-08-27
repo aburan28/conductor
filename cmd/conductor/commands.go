@@ -875,6 +875,18 @@ func cmdWrap(ctx context.Context, args []string) error {
 		"CONDUCTOR_SESSION_ID="+session.ID,
 		"CONDUCTOR_PROJECT="+ref,
 	)
+
+	// Token usage. The harness writes its own usage log as it runs; this sidecar reads that
+	// log — numbers, model, timestamp, nothing else — and reports hourly buckets, so the
+	// team's usage is one report rather than three tools' private counters. Off with
+	// CONDUCTOR_USAGE=off.
+	var collector *usageCollector
+	if !usageDisabled(os.Getenv) {
+		launchDir, _ := os.Getwd()
+		collector = newUsageCollector(api, session.ID, tool, launchDir)
+		go collector.run(heartbeatCtx, time.Minute)
+	}
+
 	if err := cmd.Start(); err != nil {
 		stopHeartbeat()
 		closeSession()
@@ -935,6 +947,22 @@ func cmdWrap(ctx context.Context, args []string) error {
 	// defers, and a stale record would make the next pause chase a dead pid.
 	_ = localstate.Remove(rec.ID)
 	stopHeartbeat()
+	if collector != nil {
+		// The harness has finished writing; report the tail, on a context that survives Ctrl-C.
+		flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		collector.flush(flushCtx)
+		cancel()
+		if calls, tokens, cost := collector.totals(); calls > 0 {
+			line := fmt.Sprintf("Conductor recorded %s calls, %s tokens", humanTokens(calls), humanTokens(tokens))
+			if cost > 0 {
+				line += ", " + dollars(cost)
+			}
+			if collector.lastErr != nil {
+				line += " (last report failed: " + errString(collector.lastErr) + ")"
+			}
+			fmt.Fprintln(os.Stderr, line+" for this session. `conductor usage` has the team view.")
+		}
+	}
 	closeSession()
 
 	if runErr != nil {
