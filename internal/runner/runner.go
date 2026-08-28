@@ -405,9 +405,10 @@ func (r *Runner) supervise(
 				}
 				tokensIn += ev.TokensIn
 				tokensOut += ev.TokensOut
-				if ev.CostUSD > cost {
-					cost = ev.CostUSD
-				}
+				// Incremental per-turn costs sum to the attempt's spend, mirroring the
+				// driver's own accumulation; a max here reported the priciest turn and
+				// left the heartbeat ledger understating the run.
+				cost += ev.CostUSD
 				if ev.Turns > turns {
 					turns = ev.Turns
 				}

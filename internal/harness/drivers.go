@@ -108,8 +108,10 @@ func NewCodexDriver(cfg HarnessConfig) *ProcessDriver {
 
 // NewOpenCodeDriver drives OpenCode's non-interactive run mode.
 //
-// OpenCode addresses models as provider/model, which is why the router stores the resolved
-// model as an opaque string rather than splitting provider out.
+// `--format json` is what makes the run meterable: without it stdout is the final
+// assistant text and no usage ever reaches the adapter. OpenCode addresses models as
+// provider/model, which is why the router stores the resolved model as an opaque string
+// rather than splitting provider out.
 func NewOpenCodeDriver(cfg HarnessConfig) *ProcessDriver {
 	command := cfg.Command
 	if command == "" {
@@ -119,7 +121,7 @@ func NewOpenCodeDriver(cfg HarnessConfig) *ProcessDriver {
 		Kind:             "opencode",
 		Command:          command,
 		VersionArgs:      []string{"--version"},
-		Adapt:            genericAdapter,
+		Adapt:            opencodeAdapter,
 		StdinInstruction: stdinDefault(cfg, true),
 		Caps: Capabilities{
 			Kind: "opencode", SupportsMCP: true, SupportsJSON: true, SupportsEffort: true,
@@ -128,7 +130,7 @@ func NewOpenCodeDriver(cfg HarnessConfig) *ProcessDriver {
 			if len(cfg.ArgTemplate) > 0 {
 				return expandTemplate(cfg.ArgTemplate, spec)
 			}
-			args := []string{"run", "--print-logs"}
+			args := []string{"run", "--print-logs", "--format", "json"}
 			if spec.Model != "" {
 				args = append(args, "--model", spec.Model)
 			}
