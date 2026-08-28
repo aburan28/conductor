@@ -2086,6 +2086,29 @@ Recommended properties:
 
 Stateless API replicas are safe when all claim operations are transactional in PostgreSQL. Scheduler replicas use leader election or `SKIP LOCKED`. Runner dispatch uses a durable queue/outbox. Presence is a projection and can tolerate eventual consistency; claims cannot.
 
+### 28.4 Connectivity and NAT
+
+The topology is hub-and-spoke. Every participant — the CLI, the `conductor wrap` sidecar, the
+MCP gateway (stdio or HTTP), runners, and the dashboard — makes only *outbound* connections to
+the control plane; the control plane never initiates a connection to a tool, and no tool ever
+connects to another. `conductord` is the only process that listens.
+
+The consequence is that client-side NAT is irrelevant: a team spread across residential NAT,
+corporate NAT, and cloud instances coordinates as long as each host has an outbound path to the
+one control-plane endpoint. There is no peer discovery, no LAN broadcast, and no NAT traversal
+to implement, because there is never a tool-to-tool connection to establish. "Finding each
+other" is a read against shared control-plane state (presence, capability inventory, the swarm,
+task offers, the queue), not a network rendezvous.
+
+The single reachability requirement is the control plane. It binds loopback and refuses a
+non-loopback plaintext bind (§25.1), so exposing it to a NATed team is a deliberate choice among
+three shapes: a shared private overlay (VPN/Tailscale/WireGuard, where every host including the
+plane may remain behind NAT and plaintext is acceptable on the trusted network); a reachable
+host with TLS; or a reverse tunnel / TLS-terminating proxy. `--public-url` records the address
+teammates use, `conductord` states at startup whether it is reachable beyond the local machine,
+and `conductor doctor` classifies the endpoint and probes `/v1/health` so an unreachable or
+loopback endpoint is caught before it is handed out in an invite.
+
 ---
 
 ## 29. Proposed repository layout

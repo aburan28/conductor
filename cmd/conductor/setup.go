@@ -182,6 +182,7 @@ func cmdDoctor(ctx context.Context, args []string) error {
 		Reachable    bool                   `json:"reachable"`
 		Principal    string                 `json:"principal,omitempty"`
 		Project      string                 `json:"project,omitempty"`
+		Networking   networkDiag            `json:"networking"`
 		Harnesses    []harness.Capabilities `json:"harnesses"`
 		Repository   string                 `json:"repository,omitempty"`
 		Integrations []integrations.Status  `json:"integrations"`
@@ -189,6 +190,7 @@ func cmdDoctor(ctx context.Context, args []string) error {
 
 	creds := client.LoadCredentials()
 	out := report{Endpoint: creds.Endpoint, Project: creds.Project, Harnesses: caps}
+	out.Networking = diagnoseNetworking(ctx, creds.Endpoint)
 
 	if creds.Token != "" {
 		api := client.New(creds.Endpoint, creds.Token)
@@ -229,6 +231,9 @@ func cmdDoctor(ctx context.Context, args []string) error {
 	if out.Repository != "" {
 		fmt.Printf("  %-12s %s\n", "repository", out.Repository)
 	}
+
+	printNetworking(out.Networking)
+
 	fmt.Printf("\nHarnesses\n%s", harness.Describe(caps))
 
 	fmt.Printf("\nIntegrations\n")

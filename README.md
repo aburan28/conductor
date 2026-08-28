@@ -301,6 +301,45 @@ Clients using a private CA set `CONDUCTOR_CA_CERT=/path/to/ca.pem`. Failed authe
 throttled per client; a correct token is never throttled, so one person mistyping theirs
 cannot lock out an office behind a shared NAT.
 
+### Working across NAT
+
+Conductor is hub-and-spoke, not peer-to-peer. Every tool — the CLI, `conductor wrap`, the MCP
+gateway, runners, the dashboard — connects **outbound** to one control plane, and nothing ever
+connects to anything else. NAT only blocks *inbound* connections, so a team scattered across
+home networks, corporate NAT, and cloud boxes all coordinate fine: each machine just needs an
+outbound path to `conductord`. The only host that must be reachable is the control plane itself
+— and it never reaches back into a tool, so no port-forwarding, no hole-punching, no discovery
+protocol.
+
+There is exactly one thing to get right: the endpoint you hand teammates must be one they can
+reach. `conductord` binds `127.0.0.1` by default, which only your own machine can reach, so pick
+one way to expose it:
+
+- **A shared private network — the simplest for a small team.** Put the control-plane host on
+  Tailscale / WireGuard / a VPN and run `conductord --addr <tailnet-ip>:8080 --public-url
+  https://<tailnet-name>:8080`. Every machine dials that address and can stay **fully behind
+  NAT**; nothing is exposed to the public internet. (Plaintext is acceptable on a trusted
+  overlay; pass `--insecure` to bind a non-loopback address without TLS, or add certs.)
+- **A reachable host + TLS.** Run `conductord` on a cloud VM: `conductord --addr 0.0.0.0:8080
+  --tls-cert cert.pem --tls-key key.pem --public-url https://your-host:8080`.
+- **A reverse tunnel.** `cloudflared`/`ngrok` to a public URL, or `--behind-proxy` behind a
+  proxy that terminates TLS, then `--public-url https://…`.
+
+`conductord` prints on startup whether it is reachable only from this machine, and
+`conductor doctor` answers the question directly — it classifies the endpoint (loopback? TLS?)
+and live-probes `/v1/health`, so you find out before a teammate does:
+
+```
+$ conductor doctor
+…
+Networking (can teammates reach this?)
+  endpoint     https://conductor.example.com:8080
+  reachable    yes
+  verdict      ok — reachable over TLS — a teammate behind NAT can connect to this
+```
+
+`conductor invite` uses the same check and warns when the link points at `127.0.0.1`.
+
 Prove the whole execution loop with no API key and no vendor CLI installed:
 
 ```bash

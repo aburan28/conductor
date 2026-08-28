@@ -183,6 +183,20 @@ Binding 127.0.0.1 needs none of these.`, *addr)
 		"addr", *addr, "tls", tlsEnabled, "behind_proxy", *behindProxy,
 		"dashboard", selfEndpoint+"/", "mcp", selfEndpoint+"/mcp")
 
+	// Say plainly whether anyone but this machine can reach the plane. Conductor is
+	// hub-and-spoke — every tool connects outbound to here and never to each other — so a team
+	// behind NAT works fine as long as this one host is reachable. The common misstep is
+	// leaving it on loopback and then wondering why an invited teammate cannot connect.
+	if isLoopback(*addr) && *publicURL == "" {
+		logger.Warn("reachable only from this machine (bound to loopback)",
+			"hint", "for a team behind NAT, run on a reachable host: --addr 0.0.0.0:PORT with "+
+				"--tls-cert/--tls-key (or --behind-proxy, or a private network like Tailscale), "+
+				"then set --public-url and invite with that URL. `conductor doctor` checks reachability.")
+	} else {
+		logger.Info("teammates connect outbound to this endpoint (no inbound port needed on their side)",
+			"endpoint", selfEndpoint)
+	}
+
 	if tlsEnabled {
 		return httpServer.ListenAndServeTLS(*tlsCert, *tlsKey)
 	}
