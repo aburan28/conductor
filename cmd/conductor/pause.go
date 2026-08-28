@@ -196,6 +196,10 @@ Flags:
 		return err
 	}
 
+	// On a fresh machine (a replaced cloud instance) there are no local records to resume;
+	// pull this machine's records back from S3 first, when off-host backup is configured.
+	maybeRestoreBeforeResume(ctx)
+
 	records, err := localstate.Prune()
 	if err != nil {
 		return err

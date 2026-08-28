@@ -20,7 +20,7 @@ func cmdMember(ctx context.Context, args []string) error {
 		return errors.New("usage: conductor member <add|list|remove>")
 	}
 	switch sub, rest := args[0], args[1:]; sub {
-	case "add", "invite":
+	case "add":
 		return memberAdd(ctx, rest)
 	case "list":
 		return memberList(ctx, rest)
@@ -38,7 +38,8 @@ func memberAdd(ctx context.Context, args []string) error {
 	kind := fs.String("kind", "human", "human | runner_service | review_bot")
 	name := fs.String("name", "", "display name")
 	email := fs.String("email", "", "email address")
-	ttl := fs.Duration("ttl", 0, "token lifetime (default: 90d for humans, no expiry for services)")
+	ttl := fs.Duration("ttl", 0, "token lifetime as a Go duration, e.g. 168h (default: 90d for humans, no expiry for services)")
+	expires := fs.String("expires", "", "token lifetime in friendly form, e.g. 7d or 2w (overrides --ttl)")
 	noToken := fs.Bool("no-token", false, "add the membership without minting a token")
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	fs.Usage = func() {
@@ -77,10 +78,20 @@ Flags:
 		ExpiresAt string `json:"expires_at"`
 		Created   bool   `json:"created_principal"`
 	}
+	// --expires (friendly: 7d, 2w) takes precedence over --ttl (Go duration), so the flag
+	// name matches `conductor invite` while --ttl stays for back-compat.
+	tokenTTL := ttl.String()
+	if *expires != "" {
+		d, err := parseFriendlyDuration(*expires)
+		if err != nil {
+			return err
+		}
+		tokenTTL = d.String()
+	}
 	if err := api.Post(ctx, "/v1/projects/"+ref+"/members", map[string]any{
 		"handle": positional[0], "role": *role, "kind": *kind,
 		"display_name": *name, "email": *email,
-		"token_ttl": ttl.String(), "no_token": *noToken,
+		"token_ttl": tokenTTL, "no_token": *noToken,
 	}, &result); err != nil {
 		return err
 	}

@@ -246,3 +246,34 @@ func fileName(id string) string {
 	}, id)
 	return safe + ".json"
 }
+
+// Get returns one record by id, or false when it is absent. Used at shutdown to re-read the
+// on-disk record, which `conductor sessions save` may have marked Saved after the wrap sidecar
+// wrote its own copy at launch.
+func Get(id string) (Record, bool) {
+	dir, err := Dir()
+	if err != nil {
+		return Record{}, false
+	}
+	body, err := os.ReadFile(filepath.Join(dir, fileName(id)))
+	if err != nil {
+		return Record{}, false
+	}
+	var r Record
+	if json.Unmarshal(body, &r) != nil || r.ID == "" {
+		return Record{}, false
+	}
+	return r, true
+}
+
+// KeepForResume marks a record as deliberately kept and persists it as StatusSaved, so a
+// closed terminal, an SSH drop, or a machine shutdown leaves the session resumable rather
+// than forgotten. It is idempotent and safe to call from a signal handler.
+func KeepForResume(r Record) error {
+	r.Saved = true
+	r.Status = StatusSaved
+	if r.SavedAt.IsZero() {
+		r.SavedAt = time.Now()
+	}
+	return Save(r)
+}

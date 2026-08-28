@@ -1996,6 +1996,38 @@ Before verification/merge:
 
 Treat the branch as an orphan artifact. An operator or new attempt may adopt it, but adoption creates a new lease/epoch and reruns validation.
 
+### 27.7 Machine shutdown and session durability
+
+An interactive agent session is a process in a terminal plus a transcript the harness keeps in
+its own local state. Conductor does not store the transcript (§12); what it must preserve
+across a shutdown is only the *resume record* — how to reopen that conversation — held per
+machine under `~/.conductor/sessions`. Durability is layered so no single failure mode loses a
+session:
+
+1. **Signal capture in the wrapper.** `conductor wrap` catches `SIGTERM` (shutdown) and
+   `SIGHUP` (closed terminal / dropped SSH) and marks its record kept-for-resume before the
+   harness is reaped. On a normal quit — the child exits without a signal — the record is
+   forgotten, so "quit" and "was taken down" stay distinct.
+
+2. **Machine capture hook.** `conductor sessions install-hook` emits a systemd user
+   service+timer (Linux) or a launchd agent (macOS) that runs `conductor sessions save all` at
+   logout/shutdown and on an interval. This covers bare sessions (no wrapper to signal) and
+   unclean shutdowns; the interval bounds worst-case loss when a machine dies without notice.
+   Conductor writes the units but never enables a system service on the operator's behalf.
+
+3. **Off-host backup.** For a machine that does not return — a terminated cloud instance takes
+   its disk — resume records are pushed to an object store (`conductor backup push`, and
+   automatically from `sessions save`, the shutdown hook, and the `wrap` signal handler), keyed
+   by machine under a prefix, as a current manifest plus timestamped snapshots. A replacement
+   instance restores them (`conductor backup pull`, and automatically on `resume` when local
+   state is empty) and reopens the conversations. The S3 client is SigV4-signed over the
+   standard library — no vendor SDK, consistent with §4's dependency posture — and speaks to any
+   S3-compatible endpoint. Only resume metadata is uploaded; the transcript never leaves the
+   harness's own store, exactly as in every other Conductor channel.
+
+Recovery in all three cases is the same command: `conductor resume`, which reopens a saved
+record whose process is gone using the harness's own conversation-resume invocation.
+
 ---
 
 ## 28. Deployment design

@@ -186,9 +186,10 @@ Capacity: 2 runner(s), 3 session(s) accepting work, 5 free slot(s), 1 waiting in
 Share budget with a teammate: conductor budget share <who> <tokens>
 ```
 
-A teammate joins in one command — `conductor swarm join --endpoint https://conductor.team
---project myrepo` — and then contributes interactive capacity with `conductor wrap`, autonomous
-capacity with `conductor worker`, or spare tokens with `conductor budget share`.
+A teammate joins from the link `conductor invite <them>` prints — `conductor join "<link>"`
+(`conductor swarm join "<link>"` is the same thing) — and then contributes interactive capacity
+with `conductor wrap`, autonomous capacity with `conductor worker`, or spare tokens with
+`conductor budget share`.
 
 When too many sessions or attempts are running at once, new work does not fail — it takes a
 place in an **admission queue** and waits. Set the caps in `.conductor/policies.yaml`:
@@ -245,12 +246,48 @@ conductor dashboard                         # prints a ready-to-open link
 
 ### Adding your coworkers
 
+The fastest way is one link. `conductor invite` mints a teammate their own token and bundles
+the endpoint, project, and token into a single join link; they redeem it with `conductor join`
+(or by opening it in a browser) and they are in:
+
 ```bash
-conductor member add rachel --role contributor   # prints a token, once
+$ conductor invite rachel --role maintainer --expires 7d
+
+Invited rachel as maintainer on myrepo.
+
+Send them this link, once, over a channel you trust:
+
+  https://conductor.team/#project=myrepo&token=cdt_QaltIz7t…
+
+They run:  conductor join "<link>"     (or open it in a browser)
+
+The token expires 2026-09-03T19:37:59Z.
+```
+
+```bash
+# on the teammate's machine
+conductor join "https://conductor.team/#project=myrepo&token=cdt_QaltIz7t…"
+# Joined https://conductor.team as rachel. Then: conductor wrap claude / conductor worker.
+```
+
+The token rides in the URL **fragment** (after `#`), which a browser never sends to the server —
+so the credential stays out of every request line and access log, unlike a query-string link.
+The same link opens the web dashboard: it reads the fragment on load, then strips it from the
+address bar. If the endpoint you are logged in against is loopback (`127.0.0.1`), `invite` warns
+that a teammate cannot reach it and shows how to expose the control plane and pass a public
+`--endpoint`.
+
+The longer form still works, and is what a script or CI wants:
+
+```bash
+conductor member add rachel --role contributor   # prints a `conductor login …` line, once
 conductor member list
 conductor member remove rachel                   # also revokes their tokens
 conductor token create --save                    # rotate your own
 ```
+
+A joined teammate contributes to the swarm — `conductor wrap` for interactive work, `conductor
+worker` for autonomous work, `conductor budget share` for spare tokens (see below).
 
 `conductord` binds loopback by default and **refuses to serve a reachable address in
 plaintext**, because bearer tokens would cross the network in the clear. To expose it:
@@ -302,6 +339,8 @@ conductor resume                                          # wake them; closed te
 conductor sessions save all                               # keep every session resumable, even after a reboot
 conductor usage --by day,harness                          # tokens and cost over time, across claude/codex/opencode
 conductor sessions export                                 # the project's session history, as JSON
+conductor sessions install-hook                          # capture every session at shutdown (systemd/launchd)
+conductor backup push | pull | status                    # copy this machine's resume records to/from S3
 conductor integrate cursor                                # wire a coding tool to this project (MCP + hooks)
 conductor route T-42                                      # what would this route to, and why — before spending a token
 conductor dispatch T-42                                   # send work to a model by policy, through the queue
@@ -451,6 +490,47 @@ fresh record — save again if it should survive the next reboot too. Saving is 
 touches nothing on the server; `conductor sessions export` is the other direction — the
 project's whole session history, everyone's, as a JSON file.
 
+### Surviving a shutdown, and the machine itself
+
+You should not have to remember to run `save` before a reboot. Three layers make a shutdown
+non-destructive:
+
+1. **Wrapped sessions save themselves.** `conductor wrap` catches the `SIGTERM` a shutdown
+   sends (and the `SIGHUP` a closed terminal or dropped SSH connection sends) and marks its
+   record kept-for-resume *before* the harness is killed. The harness has already written its
+   own transcript, so all that must be preserved is how to reopen it. Nothing to run first.
+
+2. **A machine-wide capture hook** covers bare sessions (no sidecar to catch the signal) and
+   unclean shutdowns. `conductor sessions install-hook` generates a systemd user
+   service+timer (Linux) or a launchd agent (macOS) that runs `conductor sessions save all` at
+   logout/shutdown and periodically — so even a machine that dies without a clean shutdown
+   loses at most one interval of state. It writes the unit files and prints the one command to
+   enable them; it never starts a system service for you.
+
+3. **Off-host backup**, for when the machine itself does not come back — a terminated cloud
+   instance takes its disk, and the local `~/.conductor/sessions` records with it. Point
+   Conductor at an S3 bucket and the resume records travel too:
+
+   ```bash
+   export CONDUCTOR_BACKUP_S3_BUCKET=my-team-conductor
+   export CONDUCTOR_BACKUP_S3_REGION=us-east-1
+   export AWS_ACCESS_KEY_ID=…  AWS_SECRET_ACCESS_KEY=…   # or an instance role's env
+
+   conductor backup push        # bundle this machine's records to S3 (a manifest + a snapshot)
+   conductor backup status      # where they go, and the latest snapshot
+   conductor backup pull        # on a fresh instance: restore them, then `conductor resume`
+   ```
+
+   `conductor sessions save all` pushes automatically once a bucket is configured, the
+   shutdown hook and the `wrap` SIGTERM handler push on the way down, and `conductor resume`
+   pulls first when a machine has no local records — so a replaced instance resumes where the
+   old one left off. Objects are keyed by machine under a prefix; set `CONDUCTOR_MACHINE_ID`
+   to a stable id if hostnames are not (autoscaled hosts), or to another machine's id to
+   adopt its sessions. The S3 client is dependency-free (SigV4 signed over the standard
+   library) and works against any S3-compatible store — real S3, MinIO, R2 — via
+   `CONDUCTOR_BACKUP_S3_ENDPOINT`. As everywhere else, only coordination metadata travels:
+   how to reopen a session, never a transcript. `CONDUCTOR_BACKUP=off` disables it.
+
 Wrapped sessions stay honest with the team while paused: the sidecar keeps heartbeating as
 `waiting_for_input`, so presence shows a parked session that is not offered work, rather than
 a mystery that stopped moving. A relaunched wrap registers a fresh session with the same
@@ -529,6 +609,11 @@ Implemented and exercised by tests:
   a teammate, enforced at claim time and settled entirely by ledger arithmetic.
 - Harness drivers for Claude Code, Codex, OpenCode, a generic templated `exec` driver, and a
   deterministic in-process fake.
+- Shutdown-durable sessions: `conductor wrap` saves its own session on the SIGTERM/SIGHUP a
+  shutdown or closed terminal sends; `conductor sessions install-hook` adds a systemd/launchd
+  hook that captures bare sessions at shutdown and periodically; and a dependency-free,
+  SigV4-signed S3 backend (`conductor backup push|pull`) carries the resume records off-host,
+  so a terminated cloud instance resumes on its replacement.
 - Machine-local pause/resume: `conductor pause` freezes every interactive agent session on
   the machine and `conductor resume` revives them — in place, or in freshly opened terminals
   on each harness's own conversation-resume invocation.
@@ -537,6 +622,9 @@ Implemented and exercised by tests:
 - Member and token administration, TLS, a loopback-by-default bind, and auth throttling.
 - A runner that reaches the control plane over HTTP and holds no database credential
   (§28.2), alongside the in-process backend for single-host use (§28.1).
+- One-link onboarding: `conductor invite <handle>` mints a teammate their own token and prints
+  a single join link (token in the URL fragment, off the wire); `conductor join <link>` redeems
+  it, and the same link self-connects the web dashboard.
 - One-command integration into eight coding tools (Claude Code, Cursor, Codex, OpenCode,
   Windsurf, VS Code, Zed, Gemini CLI): MCP config plus, where supported, pre-edit hooks that
   run the conflict check before every edit and block on a hard conflict.

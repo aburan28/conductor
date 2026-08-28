@@ -7,12 +7,15 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/adamburan/conductor/internal/localstate"
 	"github.com/adamburan/conductor/internal/privacy"
+	"github.com/adamburan/conductor/internal/shutdownhook"
 )
 
 // ---------------------------------------------------------------------------
@@ -31,7 +34,7 @@ var discoverSessions = localstate.Discover
 
 func cmdSessions(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: conductor sessions <save|list|export>")
+		return errors.New("usage: conductor sessions <save|list|export|install-hook>")
 	}
 	sub, rest := args[0], args[1:]
 
@@ -42,8 +45,120 @@ func cmdSessions(ctx context.Context, args []string) error {
 		return sessionsList(ctx, rest)
 	case "export":
 		return sessionsExport(ctx, rest)
+	case "install-hook":
+		return sessionsInstallHook(ctx, rest)
 	default:
 		return fmt.Errorf("unknown sessions subcommand %q", sub)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// sessions install-hook — capture at shutdown, machine-wide
+// ---------------------------------------------------------------------------
+
+// sessionsInstallHook installs the OS integration that captures every session when the
+// machine goes down. `conductor wrap` already saves its own session on shutdown; this covers
+// bare sessions and unclean shutdowns, by running `conductor sessions save all` at
+// logout/shutdown and periodically. It writes the unit files but never enables them for you —
+// activating a system service is a deliberate act, so it prints the exact command to run.
+func sessionsInstallHook(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("sessions install-hook", flag.ExitOnError)
+	install := fs.Bool("install", false, "write the unit files (default is to print them)")
+	uninstall := fs.Bool("uninstall", false, "remove the unit files")
+	interval := fs.Duration("interval", 5*time.Minute, "how often the periodic capture runs")
+	asJSON := fs.Bool("json", false, "machine-readable output")
+	fs.Usage = func() {
+		fmt.Fprint(os.Stderr, `conductor sessions install-hook — capture sessions when the machine shuts down
+
+Generates a systemd user service+timer (Linux) or a launchd agent (macOS) that runs
+`+"`conductor sessions save all`"+` at shutdown and periodically, so a reboot — even an unclean
+one — leaves your agent sessions resumable. Sessions started with `+"`conductor wrap`"+` already
+save themselves on shutdown; this adds bare sessions and the periodic safety net, and pushes
+to S3 when off-host backup is configured.
+
+  conductor sessions install-hook              print the unit files and how to enable them
+  conductor sessions install-hook --install    write the files (then run the printed command)
+  conductor sessions install-hook --uninstall  remove the files
+
+Flags:
+`)
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	exe, err := os.Executable()
+	if err != nil || exe == "" {
+		exe = "conductor"
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	plan, err := shutdownhook.Build(shutdownhook.Options{
+		Exe: exe, Home: home, GOOS: runtime.GOOS, User: os.Getenv("USER"), Interval: *interval,
+	})
+	if err != nil {
+		return err
+	}
+
+	if *uninstall {
+		removed := 0
+		for _, f := range plan.Files {
+			if err := os.Remove(f.Path); err == nil {
+				removed++
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+		if *asJSON {
+			return emit(map[string]any{"removed": removed, "disable": plan.Disable})
+		}
+		fmt.Printf("Removed %d hook file(s). Deactivate it with:\n", removed)
+		for _, cmd := range plan.Disable {
+			fmt.Printf("  %s\n", cmd)
+		}
+		return nil
+	}
+
+	if *asJSON {
+		return emit(plan)
+	}
+
+	if !*install {
+		fmt.Printf("Shutdown-capture hook for %s. Run with --install to write these files:\n\n", plan.OS)
+		for _, f := range plan.Files {
+			fmt.Printf("# %s\n%s\n", f.Path, f.Content)
+		}
+		fmt.Println("Then enable it:")
+		for _, cmd := range plan.Enable {
+			fmt.Printf("  %s\n", cmd)
+		}
+		printHookNotes(plan)
+		return nil
+	}
+
+	for _, f := range plan.Files {
+		if err := os.MkdirAll(filepath.Dir(f.Path), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(f.Path, []byte(f.Content), f.Mode); err != nil {
+			return err
+		}
+		fmt.Printf("  wrote  %s\n", f.Path)
+	}
+	fmt.Println("\nActivate it (Conductor does not run system commands for you):")
+	for _, cmd := range plan.Enable {
+		fmt.Printf("  %s\n", cmd)
+	}
+	printHookNotes(plan)
+	return nil
+}
+
+func printHookNotes(plan shutdownhook.Plan) {
+	for _, n := range plan.Notes {
+		fmt.Printf("\nNote: %s\n", n)
 	}
 }
 
@@ -115,6 +230,12 @@ Flags:
 		if err := localstate.Save(selected[i]); err != nil {
 			return err
 		}
+	}
+
+	// Off-host durability, when configured: a local save survives a reboot, an S3 push
+	// survives losing the machine. Best-effort; it never fails the local save.
+	if len(selected) > 0 {
+		maybeBackupAfterSave(ctx)
 	}
 
 	if *asJSON {
