@@ -135,6 +135,23 @@ set -e
 [[ $ESCALATE -ne 0 ]] || fail "a contributor was able to invite an admin"
 note "a contributor cannot invite; privilege does not escalate"
 
+step "9b. One-link onboarding: invite prints a join link, join redeems it"
+INVITE_JSON=$(alice invite dana --role contributor --json)
+JOIN_URL=$(printf '%s' "$INVITE_JSON" | python3 -c 'import sys,json;print(json.load(sys.stdin)["join_url"])')
+# The token must ride in the fragment (after '#'), never in the query string.
+FRAG="${JOIN_URL#*#}"
+case "$JOIN_URL" in *"?token="*) fail "join link leaks the token in the query string: $JOIN_URL";; esac
+case "$FRAG" in *"token=cdt_"*) : ;; *) fail "join link does not carry the token in the fragment: $JOIN_URL";; esac
+# Redeem it as the teammate would — sandboxed to a throwaway HOME so the real credentials
+# file is never touched.
+FAKE_HOME="$WORK/dana-home"
+mkdir -p "$FAKE_HOME"
+JOINED=$(HOME="$FAKE_HOME" "$BIN/conductor" join "$JOIN_URL" --json)
+JOINED_HANDLE=$(printf '%s' "$JOINED" | python3 -c 'import sys,json;print(json.load(sys.stdin)["handle"])')
+[[ "$JOINED_HANDLE" == "dana" ]] || fail "join did not authenticate as dana (got: $JOINED_HANDLE)"
+[[ -f "$FAKE_HOME/.conductor/credentials" ]] || fail "join did not save credentials"
+note "invite emitted a fragment-form link; join redeemed it and logged dana in"
+
 step "10. A worker executes a task, reaching the control plane over HTTP only"
 # No DATABASE_URL in this environment: the runner holds no database credential.
 WORKER_LOG="$WORK/worker.log"

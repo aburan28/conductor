@@ -225,3 +225,21 @@ func reapedPID(t *testing.T) int {
 	}
 	return pid
 }
+
+func TestGetAndKeepForResume(t *testing.T) {
+	t.Setenv("CONDUCTOR_STATE_DIR", t.TempDir())
+	if _, ok := Get("missing"); ok {
+		t.Fatal("Get of a missing record should report not-found")
+	}
+	rec := Record{ID: "p777", Harness: "codex", Status: StatusRunning, StartedAt: time.Now()}
+	if err := KeepForResume(rec); err != nil {
+		t.Fatalf("KeepForResume: %v", err)
+	}
+	got, ok := Get("p777")
+	if !ok {
+		t.Fatal("record not found after KeepForResume")
+	}
+	if got.Status != StatusSaved || !got.Saved || got.SavedAt.IsZero() {
+		t.Fatalf("record not marked saved: %+v", got)
+	}
+}

@@ -39,15 +39,20 @@ const NAV = [
 
 const app = document.getElementById('app');
 const params = new URLSearchParams(location.search);
-const demoMode = params.get('demo') === '1';
-
-// Credentials can arrive on the URL (conductor dashboard prints such a link); they are
-// moved into storage and stripped from the address bar immediately.
-if (params.get('token')) prefs.set('token', params.get('token'));
-if (params.get('project')) prefs.set('project', params.get('project'));
-if (params.get('token') || params.get('project')) {
+// An invite link (from `conductor invite`) carries the token in the URL fragment, which the
+// browser never sends to the server, so the credential stays out of every request line and
+// access log. `conductor dashboard` historically used the query string; both are accepted,
+// fragment first, and either is stripped from the address bar the moment it is read.
+const frag = new URLSearchParams((location.hash || '').replace(/^#/, ''));
+const demoMode = params.get('demo') === '1' || frag.get('demo') === '1';
+const urlToken = frag.get('token') || params.get('token');
+const urlProject = frag.get('project') || params.get('project');
+if (urlToken) prefs.set('token', urlToken);
+if (urlProject) prefs.set('project', urlProject);
+if (urlToken || urlProject) {
   params.delete('token'); params.delete('project');
-  history.replaceState({}, '', location.pathname + (params.toString() ? '?' + params : ''));
+  const query = params.toString() ? '?' + params : '';
+  history.replaceState({}, '', location.pathname + query);
 }
 
 const store = createStore({

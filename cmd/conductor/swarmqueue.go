@@ -43,7 +43,7 @@ spare can see it here and hand some over with `+"`conductor budget share`"+`.
 
   conductor swarm
   conductor swarm --watch
-  conductor swarm join --endpoint https://conductor.team --project myrepo
+  conductor swarm join "<invite-link>"        # or: conductor join "<invite-link>"
 
 Flags:
 `)
@@ -94,7 +94,7 @@ func printSwarm(v coord.SwarmView) {
 		v.Capacity.Runners, v.Capacity.SessionsAccepting, v.Capacity.SlotsFree, v.QueueDepth)
 	if len(v.Contributors) == 0 {
 		fmt.Println("No one is contributing capacity right now.")
-		fmt.Println("A teammate joins with: conductor swarm join --endpoint <url> --project <slug>")
+		fmt.Println("A teammate joins with the link from `conductor invite <them>` (conductor join \"<link>\").")
 		return
 	}
 	fmt.Printf("  %-14s %-8s %-10s %-14s %s\n", "WHO", "KIND", "STATE", "LOAD", "BUDGET LEFT")
@@ -127,13 +127,23 @@ func printSwarm(v coord.SwarmView) {
 func swarmJoin(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("swarm join", flag.ExitOnError)
 	endpoint := fs.String("endpoint", "", "the team's control plane URL")
-	token := fs.String("token", "", "your access token (from a teammate's `conductor member add`)")
+	token := fs.String("token", "", "your access token (or paste a `conductor invite` link as the argument)")
 	project := fs.String("project", "", "project slug")
 	asRunner := fs.Bool("runner", false, "start a runner immediately after joining")
-	if err := fs.Parse(args); err != nil {
+	positional, err := parseFlags(fs, args)
+	if err != nil {
 		return err
 	}
 	creds := client.LoadCredentials()
+	// Accept a pasted invite link, exactly like `conductor join`, so "swarm join <link>" and
+	// "join <link>" are interchangeable.
+	if len(positional) > 0 {
+		parsed, perr := parseJoinLink(positional[0])
+		if perr != nil {
+			return perr
+		}
+		creds = mergeCreds(creds, parsed)
+	}
 	if *endpoint != "" {
 		creds.Endpoint = *endpoint
 	}
@@ -144,34 +154,15 @@ func swarmJoin(ctx context.Context, args []string) error {
 		creds.Project = *project
 	}
 	if creds.Token == "" {
-		return errors.New("no token: pass --token (ask a teammate to run `conductor member add <you>`)")
+		return errors.New("no token: pass --token or an invite link (ask a teammate to run `conductor invite <you>`)")
 	}
 
-	api := client.New(creds.Endpoint, creds.Token)
-	var who struct {
-		Principal struct {
-			Handle string `json:"handle"`
-		} `json:"principal"`
-		Projects []struct {
-			Slug string `json:"slug"`
-		} `json:"projects"`
-	}
-	if err := api.Get(ctx, "/v1/whoami", &who); err != nil {
+	saved, _, err := connectAndSave(ctx, creds)
+	if err != nil {
 		return fmt.Errorf("joining %s: %w", creds.Endpoint, err)
 	}
-	if creds.Project == "" && len(who.Projects) == 1 {
-		creds.Project = who.Projects[0].Slug
-	}
-	if err := client.SaveCredentials(creds); err != nil {
-		return err
-	}
-	ref, _ := projectRef(*project, creds)
-	fmt.Printf("Joined %s as %s on %s.\n\n", creds.Endpoint, who.Principal.Handle, orDash(ref))
-	fmt.Println("Contribute capacity:")
-	fmt.Println("  • interactive work:  conductor wrap claude       (your sessions take work offered to them)")
-	fmt.Println("  • autonomous work:   conductor worker            (this machine executes queued tasks)")
-	fmt.Println("  • spare budget:      conductor budget share <teammate> <tokens>")
-	fmt.Println("\nSee the whole swarm with `conductor swarm`.")
+	fmt.Printf("Joined %s as %s on %s.\n", saved.Endpoint, saved.Handle, orDash(saved.Project))
+	printContributeGuidance()
 
 	if *asRunner {
 		fmt.Println("\nStarting a runner…")
