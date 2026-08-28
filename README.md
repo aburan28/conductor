@@ -339,6 +339,8 @@ conductor resume                                          # wake them; closed te
 conductor sessions save all                               # keep every session resumable, even after a reboot
 conductor usage --by day,harness                          # tokens and cost over time, across claude/codex/opencode
 conductor sessions export                                 # the project's session history, as JSON
+conductor sessions install-hook                          # capture every session at shutdown (systemd/launchd)
+conductor backup push | pull | status                    # copy this machine's resume records to/from S3
 conductor integrate cursor                                # wire a coding tool to this project (MCP + hooks)
 conductor route T-42                                      # what would this route to, and why — before spending a token
 conductor dispatch T-42                                   # send work to a model by policy, through the queue
@@ -488,6 +490,47 @@ fresh record — save again if it should survive the next reboot too. Saving is 
 touches nothing on the server; `conductor sessions export` is the other direction — the
 project's whole session history, everyone's, as a JSON file.
 
+### Surviving a shutdown, and the machine itself
+
+You should not have to remember to run `save` before a reboot. Three layers make a shutdown
+non-destructive:
+
+1. **Wrapped sessions save themselves.** `conductor wrap` catches the `SIGTERM` a shutdown
+   sends (and the `SIGHUP` a closed terminal or dropped SSH connection sends) and marks its
+   record kept-for-resume *before* the harness is killed. The harness has already written its
+   own transcript, so all that must be preserved is how to reopen it. Nothing to run first.
+
+2. **A machine-wide capture hook** covers bare sessions (no sidecar to catch the signal) and
+   unclean shutdowns. `conductor sessions install-hook` generates a systemd user
+   service+timer (Linux) or a launchd agent (macOS) that runs `conductor sessions save all` at
+   logout/shutdown and periodically — so even a machine that dies without a clean shutdown
+   loses at most one interval of state. It writes the unit files and prints the one command to
+   enable them; it never starts a system service for you.
+
+3. **Off-host backup**, for when the machine itself does not come back — a terminated cloud
+   instance takes its disk, and the local `~/.conductor/sessions` records with it. Point
+   Conductor at an S3 bucket and the resume records travel too:
+
+   ```bash
+   export CONDUCTOR_BACKUP_S3_BUCKET=my-team-conductor
+   export CONDUCTOR_BACKUP_S3_REGION=us-east-1
+   export AWS_ACCESS_KEY_ID=…  AWS_SECRET_ACCESS_KEY=…   # or an instance role's env
+
+   conductor backup push        # bundle this machine's records to S3 (a manifest + a snapshot)
+   conductor backup status      # where they go, and the latest snapshot
+   conductor backup pull        # on a fresh instance: restore them, then `conductor resume`
+   ```
+
+   `conductor sessions save all` pushes automatically once a bucket is configured, the
+   shutdown hook and the `wrap` SIGTERM handler push on the way down, and `conductor resume`
+   pulls first when a machine has no local records — so a replaced instance resumes where the
+   old one left off. Objects are keyed by machine under a prefix; set `CONDUCTOR_MACHINE_ID`
+   to a stable id if hostnames are not (autoscaled hosts), or to another machine's id to
+   adopt its sessions. The S3 client is dependency-free (SigV4 signed over the standard
+   library) and works against any S3-compatible store — real S3, MinIO, R2 — via
+   `CONDUCTOR_BACKUP_S3_ENDPOINT`. As everywhere else, only coordination metadata travels:
+   how to reopen a session, never a transcript. `CONDUCTOR_BACKUP=off` disables it.
+
 Wrapped sessions stay honest with the team while paused: the sidecar keeps heartbeating as
 `waiting_for_input`, so presence shows a parked session that is not offered work, rather than
 a mystery that stopped moving. A relaunched wrap registers a fresh session with the same
@@ -566,6 +609,11 @@ Implemented and exercised by tests:
   a teammate, enforced at claim time and settled entirely by ledger arithmetic.
 - Harness drivers for Claude Code, Codex, OpenCode, a generic templated `exec` driver, and a
   deterministic in-process fake.
+- Shutdown-durable sessions: `conductor wrap` saves its own session on the SIGTERM/SIGHUP a
+  shutdown or closed terminal sends; `conductor sessions install-hook` adds a systemd/launchd
+  hook that captures bare sessions at shutdown and periodically; and a dependency-free,
+  SigV4-signed S3 backend (`conductor backup push|pull`) carries the resume records off-host,
+  so a terminated cloud instance resumes on its replacement.
 - Machine-local pause/resume: `conductor pause` freezes every interactive agent session on
   the machine and `conductor resume` revives them — in place, or in freshly opened terminals
   on each harness's own conversation-resume invocation.
