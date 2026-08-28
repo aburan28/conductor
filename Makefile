@@ -33,9 +33,17 @@ unit:
 	          ./internal/router/... ./internal/resource/... ./internal/harness/... \
 	          ./internal/taskcard/... ./internal/config/... ./internal/localstate/...
 
-# Full suite; integration tests skip themselves unless DATABASE_URL points at a live db.
+# Full suite. When Docker is available, bring up the local Postgres first so
+# the integration tests actually run; otherwise unset DATABASE_URL so they
+# skip themselves instead of failing against an unreachable database.
 test:
-	$(GO) test ./...
+	@if docker compose up -d db >/dev/null 2>&1; then \
+	  $(MAKE) --no-print-directory db-wait; \
+	  $(GO) test ./...; \
+	else \
+	  echo ">> no docker compose; integration tests will skip (DATABASE_URL unset)"; \
+	  env -u DATABASE_URL $(GO) test ./...; \
+	fi
 
 db-up:
 	docker compose up -d db
