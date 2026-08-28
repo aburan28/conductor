@@ -73,6 +73,7 @@ Execution
   conductor sessions save all        keep every agent session resumable past a closed terminal or reboot
   conductor sessions list            saved, paused, and running sessions on this machine
   conductor sessions export          the project's whole session history, as JSON
+  conductor backup push|pull|status  copy this machine's resume records to/from S3
   conductor pause                    freeze the live agent terminals; save how to revive them
   conductor resume                   wake paused sessions, reopening any closed terminals
 
@@ -116,6 +117,8 @@ func main() {
 		err = cmdCapabilities(ctx, args)
 	case "sessions":
 		err = cmdSessions(ctx, args)
+	case "backup":
+		err = cmdBackup(ctx, args)
 	case "inbox":
 		err = cmdInbox(ctx, args)
 	case "check":

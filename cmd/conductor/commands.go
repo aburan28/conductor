@@ -954,11 +954,86 @@ func cmdWrap(ctx context.Context, args []string) error {
 		}
 	}()
 
+	// Decide the session's fate on the way down. A machine shutdown (SIGTERM from
+	// init/systemd/launchd) or a closed terminal / dropped SSH connection (SIGHUP) should
+	// KEEP the session for resume; a deliberate interrupt (SIGINT / Ctrl-C) should FORGET it,
+	// matching a normal quit. The handler records that intent *before* it tears the harness
+	// down, so the exit path never has to guess: the child cannot die (and cmd.Wait cannot
+	// return) until after outcome is set. `captured` lets the exit path wait for a shutdown
+	// backup to finish before it calls os.Exit.
+	const (
+		outcomeUnset int32 = iota
+		outcomeKeep
+		outcomeForget
+	)
+	var outcome atomic.Int32
+	captured := make(chan struct{})
+	termCh := make(chan os.Signal, 3)
+	signal.Notify(termCh, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGINT)
+	defer signal.Stop(termCh)
+	go func() {
+		// Wait on the signal alone, not on heartbeatCtx: this process's context is cancelled
+		// only by SIGINT/SIGTERM (main's NotifyContext), which are the very signals delivered
+		// here too — so selecting on ctx.Done() would race the signal and could drop the
+		// keep/forget intent. On a clean exit no signal arrives and this goroutine simply ends
+		// with the process.
+		sig, ok := <-termCh
+		if !ok {
+			return
+		}
+		keep := sig != syscall.SIGINT
+		if keep {
+			outcome.Store(outcomeKeep)
+			if err := localstate.KeepForResume(rec); err != nil {
+				fmt.Fprintf(os.Stderr, "conductor: could not save this session for resume: %v\n", err)
+			} else {
+				fmt.Fprintf(os.Stderr, "\nConductor saved this session; `conductor resume` reopens it.\n")
+			}
+			// Push off-host synchronously here (bounded), so a terminated cloud instance's
+			// records reach S3 before the process goes away. close(captured) then releases the
+			// exit path.
+			backupOnShutdown(rec)
+		} else {
+			outcome.Store(outcomeForget)
+		}
+		close(captured)
+		// Tear the harness down. SIGCONT first in case it was paused (SIGSTOP'd by
+		// `conductor pause`), or a stopped child would ignore the term signal and hang
+		// cmd.Wait. main's ctx cancellation also kills the child on SIGTERM/SIGINT, but not on
+		// SIGHUP, so this is what guarantees teardown there.
+		_ = syscall.Kill(cmd.Process.Pid, syscall.SIGCONT)
+		_ = syscall.Kill(cmd.Process.Pid, syscall.SIGTERM)
+	}()
+
 	runErr := cmd.Wait()
 
-	// Explicit rather than deferred: the exit-code path below calls os.Exit, which skips
-	// defers, and a stale record would make the next pause chase a dead pid.
-	_ = localstate.Remove(rec.ID)
+	// Decide the record's fate (the exit-code path below calls os.Exit, which skips defers).
+	// The handler above sets `outcome` before it kills the child, so on a signal-driven exit
+	// the intent is already recorded. When a signal killed the child but no intent is set yet
+	// — main's ctx-cancel can kill it a hair before the handler runs — wait briefly for the
+	// handler, which only ever needs to finish a small file write.
+	if outcome.Load() == outcomeUnset && killedBySignal(runErr) {
+		select {
+		case <-captured:
+		case <-time.After(2 * time.Second):
+		}
+	}
+	kept, _ := localstate.Get(rec.ID)
+	switch {
+	case outcome.Load() == outcomeForget:
+		// The user interrupted the wrapped session: forget it, as a quit would.
+		_ = localstate.Remove(rec.ID)
+	case outcome.Load() == outcomeKeep || kept.Saved || killedBySignal(runErr):
+		// Shutdown, closed terminal, an explicit `sessions save`, or a crash: keep it so
+		// `conductor resume` can reopen it. (KeepForResume is idempotent if the handler
+		// already ran.)
+		if err := localstate.KeepForResume(rec); err != nil {
+			fmt.Fprintf(os.Stderr, "conductor: could not save this session for resume: %v\n", err)
+		}
+	default:
+		// Clean exit the user chose: a stale record would make the next pause chase a dead pid.
+		_ = localstate.Remove(rec.ID)
+	}
 	stopHeartbeat()
 	if collector != nil {
 		// The harness has finished writing; report the tail, on a context that survives Ctrl-C.
@@ -998,4 +1073,17 @@ func boolStr(b bool) string {
 		return "true"
 	}
 	return ""
+}
+
+// killedBySignal reports whether a finished child was terminated by a signal (shutdown's
+// SIGTERM/SIGKILL, a terminal's SIGHUP, or a crash) rather than exiting on its own. A
+// signalled exit means the session did not end by the user's choice, so its resume record is
+// worth keeping.
+func killedBySignal(runErr error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(runErr, &exitErr) {
+		return false
+	}
+	ws, ok := exitErr.Sys().(syscall.WaitStatus)
+	return ok && ws.Signaled()
 }
