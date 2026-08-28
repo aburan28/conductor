@@ -228,9 +228,12 @@ func (h *processHandle) pump(stdout io.Reader, adapt Adapter) {
 		if ev.TokensOut > 0 {
 			h.result.TokensOut += ev.TokensOut
 		}
-		if ev.CostUSD > h.result.CostUSD {
-			h.result.CostUSD = ev.CostUSD
-		}
+		// Cost accumulates; adapters emit the incremental cost of one turn (OpenCode's
+		// per-step `part.cost`) or a single session total on the final event (Claude's
+		// `result.total_cost_usd`). The sum is the attempt's spend either way — a max
+		// would silently report only the most expensive turn while tokens still summed
+		// every turn, which is how cost and tokens ended up telling different stories.
+		h.result.CostUSD += ev.CostUSD
 		if ev.Turns > h.result.Turns {
 			h.result.Turns = ev.Turns
 		}
@@ -423,6 +426,50 @@ func (u *usagePayload) out() int64 {
 		return u.OutputTokens
 	}
 	return u.CompletionTokens
+}
+
+// opencodeAdapter parses OpenCode's `run --format json` event stream.
+//
+// Only two of its event shapes carry metadata worth keeping: `tool_use` (whose `part.tool`
+// is the tool's *name*; `part.state` holds the arguments and results and is never read) and
+// `step_finish` (one model call's tokens and cost, incremental per step). `text` parts —
+// the assistant's own output — are skipped outright, so nothing readable leaves the adapter.
+func opencodeAdapter(line []byte) (Event, bool) {
+	var msg struct {
+		Type string `json:"type"`
+		Part struct {
+			Tool   string  `json:"tool"`
+			Cost   float64 `json:"cost"`
+			Tokens *struct {
+				Input     int64 `json:"input"`
+				Output    int64 `json:"output"`
+				Reasoning int64 `json:"reasoning"`
+				Cache     struct {
+					Read  int64 `json:"read"`
+					Write int64 `json:"write"`
+				} `json:"cache"`
+			} `json:"tokens"`
+		} `json:"part"`
+	}
+	if err := json.Unmarshal(line, &msg); err != nil {
+		return Event{}, false
+	}
+
+	switch msg.Type {
+	case "step_finish":
+		ev := Event{Kind: EventTurn, CostUSD: msg.Part.Cost}
+		if tk := msg.Part.Tokens; tk != nil {
+			ev.TokensIn = tk.Input + tk.Cache.Read + tk.Cache.Write
+			ev.TokensOut = tk.Output
+		}
+		return ev, true
+	case "tool_use":
+		if msg.Part.Tool == "" {
+			return Event{}, false
+		}
+		return Event{Kind: EventToolUse, Tool: msg.Part.Tool}, true
+	}
+	return Event{}, false
 }
 
 // genericAdapter parses a JSONL event stream defensively, extracting whichever of the
