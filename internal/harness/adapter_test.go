@@ -116,12 +116,63 @@ func TestGenericAdapterExtractsMetadataOnly(t *testing.T) {
 	}
 }
 
+func TestOpenCodeAdapterExtractsMetadataOnly(t *testing.T) {
+	lines := []string{
+		`{"type":"step_start","sessionID":"ses_x","part":{"type":"step-start"}}`,
+		`{"type":"text","sessionID":"ses_x","part":{"type":"text","text":"` + secret + `"}}`,
+		`{"type":"tool_use","sessionID":"ses_x","part":{"type":"tool","tool":"bash","callID":"c1",` +
+			`"state":{"status":"completed","input":{"command":"` + secret + `"},"output":"` + secret + `"}}}`,
+		`{"type":"step_finish","sessionID":"ses_x","part":{"type":"step-finish","cost":0.25,` +
+			`"tokens":{"input":1000,"output":50,"reasoning":10,"cache":{"read":400,"write":50}}}}`,
+		`{"type":"step_finish","sessionID":"ses_x","part":{"type":"step-finish","cost":0.75,` +
+			`"tokens":{"input":200,"output":30,"reasoning":0,"cache":{"read":0,"write":0}}}}`,
+	}
+
+	var got []Event
+	for _, line := range lines {
+		ev, ok := opencodeAdapter([]byte(line))
+		if !ok {
+			continue
+		}
+		eventContainsSecret(t, ev)
+		got = append(got, ev)
+	}
+
+	// step_start carries nothing and text carries the assistant's own output: both are
+	// dropped, not merely redacted.
+	if len(got) != 3 {
+		t.Fatalf("parsed %d events, want 3 (step_start and text skipped)", len(got))
+	}
+	if got[0].Kind != EventToolUse || got[0].Tool != "bash" {
+		t.Errorf("tool event = %+v, want tool_use/bash", got[0])
+	}
+
+	var totalIn, totalOut int64
+	var cost float64
+	for _, ev := range got {
+		if ev.Kind == EventTurn && ev.TokensIn == 0 && ev.TokensOut == 0 {
+			t.Errorf("step_finish produced no token counts: %+v", ev)
+		}
+		totalIn += ev.TokensIn
+		totalOut += ev.TokensOut
+		cost += ev.CostUSD
+	}
+	// Per-step: (1000+400+50, 200) in, (50, 30) out, 0.25+0.75 across the two steps.
+	if totalIn != 1650 || totalOut != 80 {
+		t.Errorf("token totals = (%d, %d), want (1650, 80)", totalIn, totalOut)
+	}
+	if cost != 1.0 {
+		t.Errorf("cost = %v, want 1.0 (per-step costs are incremental)", cost)
+	}
+}
+
 func TestAdaptersRejectGarbageWithoutPanicking(t *testing.T) {
 	for _, line := range []string{"", "not json", "{", `{"type":`, `[]`, `null`} {
 		if _, ok := claudeAdapter([]byte(line)); ok && line != "null" {
 			t.Errorf("claudeAdapter accepted garbage: %q", line)
 		}
 		_, _ = genericAdapter([]byte(line))
+		_, _ = opencodeAdapter([]byte(line))
 	}
 }
 
