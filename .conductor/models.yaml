@@ -77,9 +77,8 @@ profiles:
     capabilities: [code_review, architecture, long_context]
     billing: tokens
 
-  # Codex and OpenCode profiles are disabled until the operator supplies model ids for their
-  # own installation. The design forbids hardcoding provider model names we have not
-  # verified, so these are declared but inert.
+  # Codex ids stay empty until this installation names a verified Codex model.
+  # OpenCode talks to local vLLM (`conductor serve`). Model ids match --served-model-name.
   - alias: worker.general
     harness: codex
     provider: openai
@@ -90,8 +89,30 @@ profiles:
 
   - alias: worker.fast
     harness: opencode
-    provider: ""
-    model: ""
+    provider: vllm
+    model: vllm/qwen3.8-27b
     reasoning_effort: low
-    capabilities: [code_edit, tests]
-    enabled: false
+    capabilities: [code_edit, tests, read_diff, strong_tool_use]
+    tier: T1
+    context_window: 32768
+    billing: capacity
+
+  - alias: worker.general
+    harness: opencode
+    provider: vllm
+    model: vllm/zai-org/GLM-5.3-Flash
+    reasoning_effort: medium
+    capabilities: [code_edit, tests, multi_file, read_diff, strong_tool_use]
+    tier: T2
+    context_window: 32768
+    billing: capacity
+
+  - alias: planner.frontier
+    harness: opencode
+    provider: vllm
+    model: vllm/glm-5.3
+    reasoning_effort: high
+    capabilities: [architecture, long_context, strong_tool_use, code_edit, code_review]
+    tier: T3
+    context_window: 32768
+    billing: capacity

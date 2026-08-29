@@ -2323,6 +2323,9 @@ conductor scope conflicts T-42
 conductor wrap claude
 conductor wrap codex
 conductor wrap opencode
+conductor serve flash
+conductor serve glm53
+conductor serve qwen
 
 conductor worker start
 conductor worker status
