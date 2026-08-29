@@ -77,6 +77,21 @@ conductor task handoff T-42 --to codex --note "policy evaluator done, tests pend
 An abandoned session is reclaimed after the lease TTL, but its worktree is retained for
 recovery and adoption requires a fresh epoch plus re-validation.
 
+## Local models (OpenCode)
+
+Bring up one vLLM endpoint, then wrap OpenCode. Only one model binds `:8000` at a time.
+
+```bash
+conductor serve qwen                 # Qwen 3.8 27B FP8  →  vllm/qwen3.8-27b
+conductor serve flash                # GLM-5.3-Flash     →  vllm/zai-org/GLM-5.3-Flash
+conductor serve glm53                # GLM-5.3           →  vllm/glm-5.3
+conductor wrap opencode --model vllm/qwen3.8-27b
+```
+
+Merge `scripts/opencode.vllm.json` into OpenCode's config so those ids resolve. Weights are
+looked up under `$HOME` and `/tmp/models` (and the Hugging Face hub cache for Qwen). Override
+with `WEIGHTS=`.
+
 ## Never
 
 - Never bypass a claim because it is "a one-line fix".

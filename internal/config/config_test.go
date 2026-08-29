@@ -92,6 +92,36 @@ func TestModelProfilesSkipUnconfiguredModels(t *testing.T) {
 	}
 }
 
+func TestOpenCodeLocalVLLMProfiles(t *testing.T) {
+	bundle, err := Load(repoRoot(t))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := map[string]string{
+		"vllm/qwen3.8-27b":           "worker.fast",
+		"vllm/zai-org/GLM-5.3-Flash": "worker.general",
+		"vllm/glm-5.3":               "planner.frontier",
+	}
+	got := map[string]string{}
+	for _, p := range bundle.ModelProfiles("org-1") {
+		if p.Harness != "opencode" || !p.Enabled {
+			continue
+		}
+		got[p.Model] = p.Alias
+		if p.Provider != "vllm" {
+			t.Errorf("%s: provider = %q, want vllm", p.Model, p.Provider)
+		}
+		if p.Billing != "capacity" {
+			t.Errorf("%s: billing = %q, want capacity (local GPU, not per-token)", p.Model, p.Billing)
+		}
+	}
+	for model, alias := range want {
+		if got[model] != alias {
+			t.Errorf("opencode profile %s: alias = %q, want %q (got %v)", model, got[model], alias, got)
+		}
+	}
+}
+
 func TestWorkflowFrontmatterParses(t *testing.T) {
 	bundle, err := Load(repoRoot(t))
 	if err != nil {
