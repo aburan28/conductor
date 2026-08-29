@@ -326,6 +326,8 @@ make e2e
 conductor check --summary "…" --scope dir:internal/api    # before you edit. exit 3 = stop
 conductor task claim --next                               # take work and its territory
 conductor wrap claude                                     # register a session + heartbeat, then launch
+conductor serve qwen                                      # local vLLM for OpenCode (also: flash, glm53)
+conductor wrap opencode --model vllm/qwen3.8-27b
 conductor presence --watch                                # who is live, on what
 conductor conflicts                                       # what is contested and what to do
 conductor task handoff T-42 --to codex --next "write tests"
@@ -650,9 +652,9 @@ Not built, and where the design says it goes:
 - **OIDC** (§25.1). Authentication is bearer tokens hashed at rest; there is no identity
   provider integration.
 - **Merge queue, PR integration, tracker sync, symbol/tree-sitter indexing** (§29, §30 phase 5).
-- **Codex and OpenCode model ids** are declared but disabled in `.conductor/models.yaml`. The
-  design forbids hardcoding provider model names that have not been verified, so an operator
-  fills those in.
+- **Codex model ids** are still empty in `.conductor/models.yaml` until an operator names a
+  verified Codex model. **OpenCode** is wired to local vLLM: Qwen 3.8 27B, GLM-5.3-Flash, and
+  GLM-5.3 (`conductor serve qwen|flash|glm53`, then `conductor wrap opencode --model vllm/…`).
 
 One deliberate deviation from the design document: it recommends TypeScript (§28.1). This is
 Go, at the repository owner's direction. The tradeoff is real — the Claude Agent SDK and

@@ -115,6 +115,21 @@ func TestScopeFlagModeSuffixes(t *testing.T) {
 	}
 }
 
+func TestServeVariantAliasesCoverLocalModels(t *testing.T) {
+	aliases := serveVariantAliases()
+	for _, name := range []string{"flash", "glm53", "qwen", "qwen3.8-27b", "glm-5.3-flash"} {
+		if aliases[name] == "" {
+			t.Errorf("missing serve alias %q", name)
+		}
+	}
+	if !knownServeArg("flash") || !knownServeArg("status") {
+		t.Error("flash and status should be recognized serve args")
+	}
+	if knownServeArg("llama") {
+		t.Error("unknown models must not be treated as serve args")
+	}
+}
+
 type discard struct{}
 
 func (discard) Write(p []byte) (int, error) { return len(p), nil }
