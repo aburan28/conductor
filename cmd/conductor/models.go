@@ -37,6 +37,7 @@ alias. Run `+"`conductor models discover`"+` to find models installed on this ma
 
   conductor models
   conductor models discover            find local Ollama / LM Studio / vLLM models
+  conductor serve qwen|flash|glm53     launch local vLLM for OpenCode
 
 Flags:
 `)

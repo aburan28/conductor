@@ -233,7 +233,7 @@ func DefaultHarnessConfigs() map[string]HarnessConfig {
 	return map[string]HarnessConfig{
 		"claude":   {Enabled: true, Command: "claude"},
 		"codex":    {Enabled: false, Command: "codex"},
-		"opencode": {Enabled: false, Command: "opencode"},
+		"opencode": {Enabled: true, Command: "opencode"},
 	}
 }
 
