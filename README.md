@@ -229,19 +229,35 @@ the parse boundary before it can reach the store. Three tests assert this mechan
 Requires Go 1.25+, Docker (for Postgres), and git.
 
 ```bash
-make db-up                                  # Postgres on :55432
-make build                                  # bin/conductord, bin/conductor, bin/conductor-mcp
+make up
+```
+
+That is the whole thing: Postgres on `:55432`, the binaries in `bin/`, the control plane
+(API, SSE, dashboard, scheduler) serving `127.0.0.1:8080` in the background — log and
+pidfile under `.conductor/runtime/` — and your CLI login saved at `~/.conductor/credentials`.
+No token to copy, no second terminal.
+
+```bash
+conductor status                             # what is in flight
+conductor dashboard                          # prints a ready-to-open link
+make down                                    # stop the control plane (make db-down also stops Postgres)
+```
+
+### Manual, or on another repository
+
+```bash
+make db-up && make build                     # Postgres + bin/conductord, bin/conductor, bin/conductor-mcp
 
 cd /path/to/your/repo
-conductor init                              # scaffold .conductor/ policy files
+conductor init                               # scaffold .conductor/ policy files
 
 export DATABASE_URL="postgres://conductor:conductor@localhost:55432/conductor?sslmode=disable"
 conductord bootstrap --org acme --project myrepo --principal $USER --repo .
-# prints a token and the exact `conductor login` line to run
+# saves your login at ~/.conductor/credentials — no copy-paste
+# (--no-login skips that; --endpoint saves a different URL than http://localhost:8080)
 
-conductord &                                # API, SSE, dashboard, scheduler on 127.0.0.1:8080
-conductor login --endpoint http://localhost:8080 --token cdt_… --project myrepo
-conductor dashboard                         # prints a ready-to-open link
+conductord &                                 # or: make serve, same thing in the foreground
+conductor dashboard                          # prints a ready-to-open link
 ```
 
 ### Adding your coworkers

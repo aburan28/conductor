@@ -56,10 +56,25 @@ git add -A && git commit -qm "add conductor policy"
 note "$WORK/repo"
 
 step "Bootstrapping the control plane"
-ALICE_TOKEN=$("$BIN/conductord" bootstrap --org "$ORG" --project "$PROJECT" \
+# bootstrap also writes the operator's login file. Alice runs it with a sandboxed HOME so
+# the real login is untouched and the saved credentials can be asserted; Bob opts out.
+ALICE_HOME="$WORK/alice-home"
+mkdir -p "$ALICE_HOME"
+ALICE_TOKEN=$(HOME="$ALICE_HOME" "$BIN/conductord" bootstrap --org "$ORG" --project "$PROJECT" \
   --principal alice --repo "$WORK/repo" | grep -o 'cdt_[A-Za-z0-9_-]*')
-BOB_TOKEN=$("$BIN/conductord" bootstrap --org "$ORG" --project "$PROJECT" \
-  --principal bob --role contributor --repo "$WORK/repo" | grep -o 'cdt_[A-Za-z0-9_-]*')
+ALICE_CREDS="$ALICE_HOME/.conductor/credentials"
+[[ -f "$ALICE_CREDS" ]]            || fail "bootstrap did not save the CLI login"
+grep -q '"handle": *"alice"'       "$ALICE_CREDS" || fail "saved login has the wrong handle"
+grep -q "\"project\": *\"$PROJECT\"" "$ALICE_CREDS" || fail "saved login has the wrong project"
+grep -q "\"token\": *\"$ALICE_TOKEN\"" "$ALICE_CREDS" || fail "saved login does not carry the minted token"
+note "bootstrap logged alice in on this machine (no token copy-paste)"
+
+BOB_HOME="$WORK/bob-home"
+mkdir -p "$BOB_HOME"
+BOB_TOKEN=$(HOME="$BOB_HOME" "$BIN/conductord" bootstrap --org "$ORG" --project "$PROJECT" \
+  --principal bob --role contributor --repo "$WORK/repo" --no-login | grep -o 'cdt_[A-Za-z0-9_-]*')
+[[ ! -e "$BOB_HOME/.conductor/credentials" ]] || fail "--no-login still wrote a login file"
+note "--no-login leaves the machine alone (bob authenticates via env vars)"
 
 "$BIN/conductord" --addr "127.0.0.1:$PORT" >"$WORK/conductord.log" 2>&1 &
 SERVER_PID=$!

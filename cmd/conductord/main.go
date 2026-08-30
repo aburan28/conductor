@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/adamburan/conductor/internal/api"
+	"github.com/adamburan/conductor/internal/client"
 	"github.com/adamburan/conductor/internal/config"
 	"github.com/adamburan/conductor/internal/coord"
 	"github.com/adamburan/conductor/internal/db"
@@ -222,6 +223,10 @@ func displayHost(addr string) string {
 // It is a separate subcommand rather than an API endpoint on purpose: the very first
 // credential in a system cannot be authenticated by that system, so it is issued by someone
 // with database access, once.
+//
+// Because the single-host deployment (DESIGN.md §28.1) runs the CLI next to the database it
+// just bootstrapped, the minted token is also written straight into the operator's login
+// file — the copy-paste `conductor login` round trip only remains for other machines.
 func bootstrap(args []string) error {
 	fs := flag.NewFlagSet("bootstrap", flag.ExitOnError)
 	dsn := fs.String("dsn", envOr("DATABASE_URL", ""), "PostgreSQL connection string")
@@ -230,6 +235,9 @@ func bootstrap(args []string) error {
 	handle := fs.String("principal", envOr("USER", "operator"), "principal handle")
 	repo := fs.String("repo", ".", "path to the repository this project coordinates")
 	role := fs.String("role", string(domain.RoleProjectAdmin), "role to grant the principal")
+	endpoint := fs.String("endpoint", envOr("CONDUCTOR_PUBLIC_URL", "http://localhost:8080"),
+		"control plane URL saved into this machine's login")
+	noLogin := fs.Bool("no-login", false, "do not write this machine's login file; print the token only")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -323,19 +331,45 @@ func bootstrap(args []string) error {
 		return fmt.Errorf("token: %w", err)
 	}
 
+	loginSaved := false
+	if !*noLogin {
+		creds := client.Credentials{
+			Endpoint: *endpoint,
+			Token:    token,
+			Project:  project.Slug,
+			Handle:   principal.Handle,
+		}
+		if err := client.SaveCredentials(creds); err != nil {
+			// The tenant exists and the token was minted; losing the convenience of a
+			// saved login must not fail the bootstrap. The printed login line still works.
+			fmt.Fprintf(os.Stderr, "bootstrap: could not save login: %v\n", err)
+		} else {
+			loginSaved = true
+		}
+	}
+
 	fmt.Printf(`Conductor is bootstrapped.
 
   organization  %s
   project       %s  (%s)
   principal     %s  (%s)
   repository    %s
+`, org.Slug, project.Slug, project.ID, principal.Handle, *role, repoPath)
 
-Save your credentials:
+	if loginSaved {
+		path, _ := client.CredentialsPath()
+		fmt.Printf("\nLogged in as %s — credentials saved to %s (mode 0600).\n", principal.Handle, path)
+	} else {
+		fmt.Println("\nThis machine was not logged in (--no-login).")
+	}
 
-  conductor login --endpoint http://localhost:8080 --token %s --project %s
+	fmt.Printf(`
+To log in on another machine, or again on this one:
 
-This token is shown once and is stored only as a hash. Keep it out of shared logs.
-`, org.Slug, project.Slug, project.ID, principal.Handle, *role, repoPath, token, project.Slug)
+  conductor login --endpoint %s --token %s --project %s
+
+The token is shown once and is stored only as a hash. Keep it out of shared logs.
+`, *endpoint, token, project.Slug)
 	return nil
 }
 
