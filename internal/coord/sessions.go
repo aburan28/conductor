@@ -8,6 +8,68 @@ import (
 	"github.com/adamburan/conductor/internal/privacy"
 )
 
+// SessionSnapshot is one session's durable record: the projected session, its capability
+// record, and its inbox — what the dashboard's save and export persist in one file.
+type SessionSnapshot struct {
+	Session     privacy.SessionView           `json:"session"`
+	Capability  privacy.SessionCapabilityView `json:"capability"`
+	Assignments []domain.Assignment           `json:"assignments"`
+}
+
+// SessionSnapshot gathers one session the way Sessions projects the whole project: the
+// caller sees exactly what an export would show them. The inbox is included only when the
+// caller may read it — the session's own principal or a maintainer, the same floor the
+// assignments endpoint enforces — because an assignment names a task, and a task's
+// existence is itself disclosure under §12.3.
+func (s *Service) SessionSnapshot(ctx context.Context, c Caller, sessionID domain.ID) (SessionSnapshot, error) {
+	session, err := s.Store.GetSession(ctx, sessionID)
+	if err != nil {
+		return SessionSnapshot{}, err
+	}
+	project, err := s.Store.GetProject(ctx, session.ProjectID)
+	if err != nil {
+		return SessionSnapshot{}, err
+	}
+	principal, err := s.Store.GetPrincipal(ctx, session.PrincipalID)
+	if err != nil {
+		return SessionSnapshot{}, err
+	}
+	policy := privacy.AttemptPolicy{
+		PublishModelIdentity:   project.Config.PublishModelIdentity,
+		PublishHarnessIdentity: project.Config.PublishHarnessIdentity,
+	}
+
+	var ref string
+	if session.ActiveTaskID != "" {
+		task, err := s.Store.GetTask(ctx, session.ActiveTaskID)
+		switch {
+		case err == nil:
+			ref = task.Ref
+		case errors.Is(err, domain.ErrNotFound):
+			// The task was deleted after the session pointed at it; the session is
+			// still worth snapshotting.
+		default:
+			return SessionSnapshot{}, err
+		}
+	}
+
+	out := SessionSnapshot{
+		Session:     privacy.ProjectSession(c.Viewer(), session, principal, ref, policy),
+		Capability:  privacy.ProjectSessionCapability(c.Viewer(), session, principal, policy),
+		Assignments: []domain.Assignment{},
+	}
+	if session.PrincipalID == c.Principal.ID || c.Role.Can(domain.RoleMaintainer) {
+		assignments, err := s.Store.SessionInbox(ctx, session.ID, true)
+		if err != nil {
+			return SessionSnapshot{}, err
+		}
+		if assignments != nil {
+			out.Assignments = assignments
+		}
+	}
+	return out, nil
+}
+
 // Sessions returns a project's complete session history, projected for the caller.
 //
 // This is the read behind `conductor sessions save all`. Presence is a live projection and

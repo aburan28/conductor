@@ -264,6 +264,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .log .ev.open .payload { white-space: pre-wrap; }
 .log .ev.new { animation: flash 1.2s ease-out; }
 @keyframes flash { from { background: var(--accent-soft); } to { background: transparent; } }
+.log-stream { font-family: var(--mono); font-size: 12px; line-height: 1.5; margin: 0; padding: 10px 12px; max-height: 340px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
 
 /* ---------- detail ---------- */
 .detail-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }

@@ -1,10 +1,13 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/adamburan/conductor/internal/config"
@@ -39,6 +42,8 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /v1/sessions/{session}/close", auth(s.closeSession))
 	m.HandleFunc("POST /v1/sessions/{session}/pause", auth(s.pauseSession))
 	m.HandleFunc("POST /v1/sessions/{session}/resume", auth(s.resumeSession))
+	m.HandleFunc("POST /v1/sessions/{session}/save", auth(s.saveSession))
+	m.HandleFunc("GET /v1/sessions/{session}/export", auth(s.exportSession))
 	m.HandleFunc("POST /v1/sessions/{session}/capabilities", auth(s.setSessionCapabilities))
 	m.HandleFunc("GET /v1/sessions/{session}/assignments", auth(s.sessionAssignments))
 	m.HandleFunc("POST /v1/assignments/{assignment}/respond", auth(s.respondToAssignment))
@@ -54,6 +59,7 @@ func (s *Server) routes() {
 	m.HandleFunc("PATCH /v1/tasks/{task}", auth(s.patchTask))
 	m.HandleFunc("GET /v1/tasks/{task}/card", auth(s.getTaskCard))
 	m.HandleFunc("GET /v1/tasks/{task}/attempts", auth(s.listAttempts))
+	m.HandleFunc("GET /v1/tasks/{task}/logs", auth(s.taskLogs))
 	m.HandleFunc("POST /v1/tasks/{task}/claim", auth(s.claimTask))
 	m.HandleFunc("POST /v1/tasks/{task}/release", auth(s.releaseTask))
 	m.HandleFunc("POST /v1/tasks/{task}/transition", auth(s.transitionTask))
@@ -1525,6 +1531,174 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request, p domain.P
 			}
 		}
 	}
+}
+
+// logTailBytes caps the history a log stream opens with, so a long-running attempt does not
+// dump its whole past on connect.
+const logTailBytes = 256 << 10
+
+// logReadMax bounds one poll's read, so a fast-growing file cannot make one frame huge.
+const logReadMax = 256 << 10
+
+// taskLogs streams the current attempt's activity log over SSE: existing content first,
+// then appends as the runner writes them, then a final frame once the attempt is terminal.
+//
+// The log is the sanitized record internal/runner keeps beside the attempt's worktree (at
+// .conductor/runtime/attempt.log) — lifecycle transitions, tool names, turns, checks; never
+// harness output, which is owner-private (DESIGN.md §26.3). It is readable where the control
+// plane shares a machine with the runner (§28.1); elsewhere the stream says no log is
+// available and closes when the attempt ends.
+func (s *Server) taskLogs(w http.ResponseWriter, r *http.Request, p domain.Principal) {
+	task, _, err := s.taskFor(r, p, domain.RoleObserver)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		s.fail(w, r, errors.New("streaming unsupported"))
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	send := func(payload any) {
+		body, err := json.Marshal(payload)
+		if err != nil {
+			return
+		}
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", body)
+		flusher.Flush()
+	}
+
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	keepalive := time.NewTicker(20 * time.Second)
+	defer keepalive.Stop()
+
+	// The attempt is resolved once and then followed by id, so a stream opened while an
+	// attempt runs keeps following it through its terminal transition rather than
+	// silently jumping to whichever attempt is live next.
+	var (
+		attemptID domain.ID
+		offset    int64
+		waiting   string // last waiting reason sent; "" once frames are flowing
+	)
+	setWaiting := func(reason string) {
+		if waiting != reason {
+			waiting = reason
+			send(map[string]any{"type": "waiting", "reason": reason})
+		}
+	}
+	sendEnd := func(state string) {
+		send(map[string]any{"type": "end", "state": state})
+	}
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+
+		case <-keepalive.C:
+			// Comment frames keep intermediaries from closing an idle connection.
+			_, _ = fmt.Fprint(w, ": keepalive\n\n")
+			flusher.Flush()
+
+		case <-ticker.C:
+			var attempt domain.Attempt
+			switch {
+			case attemptID != "":
+				a, err := s.store.GetAttempt(r.Context(), attemptID)
+				if err != nil {
+					return
+				}
+				attempt = a
+			default:
+				// Prefer the live write attempt; fall back to the most recent one, so
+				// a stream opened after the run still plays the log back.
+				a, err := s.store.ActiveAttempt(r.Context(), task.ID)
+				if err != nil {
+					list, lerr := s.store.ListAttempts(r.Context(), task.ID)
+					if lerr != nil || len(list) == 0 {
+						if fresh, terr := s.store.GetTask(r.Context(), task.ID); terr == nil && fresh.Status.IsTerminal() {
+							sendEnd(string(fresh.Status))
+							return
+						}
+						setWaiting("no attempt yet")
+						continue
+					}
+					a = list[len(list)-1]
+				}
+				attempt, attemptID = a, a.ID
+			}
+
+			if attempt.WorktreePath == "" {
+				if attempt.State.IsTerminal() {
+					sendEnd(string(attempt.State))
+					return
+				}
+				setWaiting("attempt is " + string(attempt.State) + "; no workspace yet")
+				continue
+			}
+
+			info, err := os.Stat(attemptLogPath(attempt))
+			if err != nil {
+				if attempt.State.IsTerminal() {
+					sendEnd(string(attempt.State))
+					return
+				}
+				setWaiting("no log yet")
+				continue
+			}
+			waiting = ""
+			if info.Size() < offset {
+				// Truncated or rotated: start over rather than miss the new run.
+				offset = 0
+			}
+			if info.Size() > offset {
+				if offset == 0 && info.Size() > logTailBytes {
+					offset = info.Size() - logTailBytes
+					send(map[string]any{"type": "log", "text": "… earlier output truncated …\n"})
+				}
+				remaining := info.Size() - offset
+				if remaining > logReadMax {
+					remaining = logReadMax
+				}
+				buf := make([]byte, remaining)
+				n, _ := attemptLogReadAt(attempt, buf, offset)
+				// Only whole lines are sent: a chunk ending mid-rune would be corrupted
+				// by the JSON encoding.
+				if i := bytes.LastIndexByte(buf[:n], '\n'); i >= 0 {
+					send(map[string]any{"type": "log", "text": string(buf[:i+1])})
+					offset += int64(i) + 1
+				}
+			}
+			if attempt.State.IsTerminal() {
+				sendEnd(string(attempt.State))
+				return
+			}
+		}
+	}
+}
+
+// attemptLogPath is where the runner writes an attempt's activity log, inside the worktree
+// the attempt runs in.
+func attemptLogPath(a domain.Attempt) string {
+	return filepath.Join(a.WorktreePath, ".conductor", "runtime", "attempt.log")
+}
+
+func attemptLogReadAt(a domain.Attempt, buf []byte, offset int64) (int, error) {
+	f, err := os.Open(attemptLogPath(a))
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	return f.ReadAt(buf, offset)
 }
 
 // ---------------------------------------------------------------------------

@@ -5,6 +5,7 @@ import { pill, chip, chips, riskChip, tierChip } from '../components/pill.js';
 import { table } from '../components/table.js';
 import { relTime, fmtDate, fmtTokens, fmtUSD, fmtDuration, durationBetween } from '../lib/format.js';
 import { claimTask, releaseTask, assignTask, transitionTask, handoffTask, dispatchTask, cancelTask } from '../lib/actions.js';
+import { connectStream } from '../lib/sse.js';
 
 // Task detail renders inside a drawer over the board on wide screens and as a full-width
 // panel on narrow ones (the CSS decides). It is a route (/tasks/T-42), so it deep-links.
@@ -20,18 +21,22 @@ export function openTaskDrawer(ref, ctx, { onClose } = {}) {
     body);
   let alive = true;
   const onKey = ev => { if (ev.key === 'Escape') close(); };
+  // Live log streams outlive a render; they are closed here and re-created per refresh.
+  const disposers = [];
   document.addEventListener('keydown', onKey);
   document.body.append(scrim, drawer);
 
   function close() {
     if (!alive) return;
     alive = false;
+    disposers.splice(0).forEach(d => d());
     scrim.remove(); drawer.remove();
     document.removeEventListener('keydown', onKey);
     if (onClose) onClose();
   }
 
   async function refresh() {
+    disposers.splice(0).forEach(d => d());
     const p = ctx.project;
     const t = suffix => ctx.api.task(p, ref, suffix);
     const [task, attempts, validation, decisions, handoff, cardText, caps, explain] = await settle([
@@ -49,6 +54,58 @@ export function openTaskDrawer(ref, ctx, { onClose } = {}) {
     replace(body, render({ task, attempts: (attempts && attempts.attempts) || [], validation: (validation && validation.results) || task.validation || [],
       decisions: (decisions && decisions.decisions) || [], handoff: handoff && handoff.bundle ? handoff.bundle : handoff && handoff.task_ref ? handoff : null,
       cardText: typeof cardText === 'string' ? cardText : '', sessions: (caps && caps.sessions) || [], explain }));
+  }
+
+  // The live attempt log: subscribe over SSE, append into a monospace pane, follow the
+  // bottom unless the user scrolled up. Stopped on drawer close, on re-render, and by the
+  // button.
+  function attemptLogs(ref) {
+    const pane = h('pre', { class: 'log-stream', 'aria-live': 'polite' });
+    const stateEl = h('span', { class: 'muted', style: { fontSize: '12px' } }, 'connecting…');
+    let stop = null;
+    let follow = true;
+
+    pane.addEventListener('scroll', () => {
+      follow = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 24;
+    });
+    const append = text => {
+      pane.append(document.createTextNode(text));
+      if (follow) pane.scrollTop = pane.scrollHeight;
+    };
+
+    const btn = h('button', { class: 'btn sm' }, 'Stop');
+    function halt() {
+      if (!stop) return;
+      stop();
+      stop = null;
+      btn.textContent = 'Start';
+    }
+    function start() {
+      if (stop) return;
+      btn.textContent = 'Stop';
+      stateEl.textContent = 'connecting…';
+      const url = `/v1/tasks/${encodeURIComponent(ref)}/logs?project=${encodeURIComponent(ctx.project)}&token=${encodeURIComponent(ctx.api.token)}`;
+      stop = connectStream(url, {
+        onEvent: ev => {
+          if (ev.type === 'log') { append(ev.text || ''); stateEl.textContent = ''; }
+          else if (ev.type === 'waiting') stateEl.textContent = ev.reason || 'waiting…';
+          else if (ev.type === 'end') { stateEl.textContent = ev.state ? 'attempt ' + ev.state : 'ended'; halt(); }
+        },
+        onState: st => { if (st !== 'live' && stop) stateEl.textContent = st + '…'; },
+      });
+    }
+    btn.addEventListener('click', () => (stop ? halt() : start()));
+    disposers.push(halt);
+    // Demo mode has no server to stream from; the fixture API cannot carry SSE.
+    if (ctx.store.get().demo) stateEl.textContent = 'demo mode — no live stream';
+    else start();
+
+    return card({
+      title: 'Attempt log', flush: true,
+      actions: h('div', { class: 'btn-row' }, stateEl, btn),
+      body: pane,
+      footer: 'Metadata only — lifecycle, tools, turns, checks. Harness output is owner-private and never reaches the control plane.',
+    });
   }
 
   function render({ task, attempts, validation, decisions, handoff, cardText, sessions, explain }) {
@@ -146,10 +203,12 @@ export function openTaskDrawer(ref, ctx, { onClose } = {}) {
 
     const cardEl = cardText ? card({ title: 'Task card', body: markdown(cardText), footer: 'Rendered from the same Markdown the CLI exports with `conductor task export`.' }) : null;
 
+    const logsCard = ['claimed', 'running'].includes(task.status) ? attemptLogs(ref) : null;
+
     return h('div', { class: 'stack', style: { gap: '16px' } },
       head, actions,
       h('div', { class: 'detail-grid' },
-        h('div', { class: 'stack', style: { gap: '16px' } }, overview, route, attemptsCard, validationCard, decisionsCard, handoffCard, cardEl),
+        h('div', { class: 'stack', style: { gap: '16px' } }, overview, route, logsCard, attemptsCard, validationCard, decisionsCard, handoffCard, cardEl),
         h('div', { class: 'stack', style: { gap: '16px' } }, facts)));
   }
 
