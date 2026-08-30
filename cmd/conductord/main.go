@@ -228,6 +228,8 @@ func bootstrap(args []string) error {
 	orgSlug := fs.String("org", "default", "organization slug")
 	projectSlug := fs.String("project", "", "project slug (defaults to the repository directory name)")
 	handle := fs.String("principal", envOr("USER", "operator"), "principal handle")
+	password := fs.String("password", envOr("CONDUCTOR_BOOTSTRAP_PASSWORD", ""),
+		"dashboard password for the bootstrap principal (minimum 8 characters)")
 	repo := fs.String("repo", ".", "path to the repository this project coordinates")
 	role := fs.String("role", string(domain.RoleProjectAdmin), "role to grant the principal")
 	if err := fs.Parse(args); err != nil {
@@ -273,6 +275,14 @@ func bootstrap(args []string) error {
 	}
 	if err != nil {
 		return fmt.Errorf("principal: %w", err)
+	}
+
+	// A password here is what makes the dashboard usable without pasting a token into a
+	// browser by hand. Everything else can be done later from the dashboard itself.
+	if *password != "" {
+		if err := store.SetPassword(ctx, principal.ID, *password); err != nil {
+			return fmt.Errorf("password: %w", err)
+		}
 	}
 
 	// Load repository policy if the repo has a .conductor directory.
@@ -335,8 +345,17 @@ Save your credentials:
   conductor login --endpoint http://localhost:8080 --token %s --project %s
 
 This token is shown once and is stored only as a hash. Keep it out of shared logs.
-`, org.Slug, project.Slug, project.ID, principal.Handle, *role, repoPath, token, project.Slug)
+%s`, org.Slug, project.Slug, project.ID, principal.Handle, *role, repoPath, token, project.Slug, passwordNote(*password))
 	return nil
+}
+
+// passwordNote tells the operator how the dashboard password they just set is used, or how
+// to set one later if they skipped it.
+func passwordNote(password string) string {
+	if password != "" {
+		return "\nThe dashboard at / accepts this principal's handle and password for sign-in.\n"
+	}
+	return "\nNo --password was given: dashboard sign-in needs a token until you set one\n(from the dashboard's Settings page, or by re-running bootstrap with --password).\n"
 }
 
 func envOr(name, fallback string) string {

@@ -21,6 +21,8 @@ func (s *Server) routes() {
 
 	m.HandleFunc("GET /v1/health", s.health)
 	m.HandleFunc("GET /v1/whoami", auth(s.whoami))
+	m.HandleFunc("POST /v1/login", s.login)
+	m.HandleFunc("POST /v1/password", auth(s.setPassword))
 
 	m.HandleFunc("GET /v1/projects", auth(s.listProjects))
 	m.HandleFunc("GET /v1/projects/{project}", auth(s.getProject))
@@ -117,22 +119,12 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) whoami(w http.ResponseWriter, r *http.Request, p domain.Principal) {
-	projects, err := s.store.ListProjectsFor(r.Context(), p.ID)
+	projects, _, err := s.identityPayload(r, p)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	type projectRef struct {
-		ID   domain.ID   `json:"id"`
-		Slug string      `json:"slug"`
-		Role domain.Role `json:"role"`
-	}
-	refs := make([]projectRef, 0, len(projects))
-	for _, pr := range projects {
-		role, _ := s.store.RoleIn(r.Context(), pr.ID, p.ID)
-		refs = append(refs, projectRef{ID: pr.ID, Slug: pr.Slug, Role: role})
-	}
-	s.ok(w, r, http.StatusOK, map[string]any{"principal": p, "projects": refs})
+	s.ok(w, r, http.StatusOK, map[string]any{"principal": p, "projects": projects})
 }
 
 func (s *Server) listProjects(w http.ResponseWriter, r *http.Request, p domain.Principal) {

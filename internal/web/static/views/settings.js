@@ -32,6 +32,26 @@ export default defineView({
       h('div', { class: 'toolbar' }, h('span', {}, 'Density'), segmented([{ value: 'comfortable', label: 'Comfortable' }, { value: 'compact', label: 'Compact' }], prefs.get('density', 'comfortable'), v => { prefs.set('density', v); document.documentElement.dataset.density = v; })),
       h('div', { class: 'hint' }, 'Press ? anywhere for keyboard shortcuts.')) });
 
+    // A password is the credential a human can remember; tokens are what agents use. Set it
+    // here once, and the connect screen's username/password form works from then on.
+    const passwordCard = card({ title: 'Password', body: (() => {
+      const pw = h('input', { type: 'password', placeholder: 'at least 8 characters', autocomplete: 'new-password' });
+      const pw2 = h('input', { type: 'password', placeholder: 'repeat it', autocomplete: 'new-password' });
+      const save = async () => {
+        if (pw.value.length < 8) { toast('Use at least 8 characters', { kind: 'warn' }); pw.focus(); return; }
+        if (pw.value !== pw2.value) { toast('The two passwords do not match', { kind: 'warn' }); pw2.focus(); return; }
+        try { await ctx.api.post('/v1/password', { password: pw.value }); toast('Password saved — it works on the sign-in screen'); pw.value = pw2.value = ''; }
+        catch (err) { toastError(err, 'Could not save password'); }
+      };
+      pw.addEventListener('keydown', ev => { if (ev.key === 'Enter') { ev.preventDefault(); save(); } });
+      pw2.addEventListener('keydown', ev => { if (ev.key === 'Enter') { ev.preventDefault(); save(); } });
+      return h('div', { class: 'stack' },
+        h('label', { class: 'field' }, 'New password', pw),
+        h('label', { class: 'field' }, 'Repeat', pw2),
+        h('div', { class: 'btn-row' }, h('button', { class: 'btn primary', onclick: save }, 'Save password')),
+        h('div', { class: 'hint' }, 'Sign in on the dashboard with your handle and this password.'));
+    })() });
+
     const invite = () => {
       const handle = h('input', { type: 'text', placeholder: 'rachel', required: true });
       const role = h('select', {}, ['contributor', 'maintainer', 'reviewer', 'observer', 'project_admin'].map(r => h('option', { value: r }, r)));
@@ -105,6 +125,6 @@ export default defineView({
         h('li', {}, 'Duplicate detection compares HMAC\'d token sets under a per-tenant key; the server never sees either sentence.'),
         h('li', {}, 'This dashboard makes no external requests of any kind; a test enforces it.'))) });
 
-    return h('div', { class: 'stack', style: { gap: '20px' } }, h('div', { class: 'grid-2' }, connection, appearance), membersCard, tokensCard, policyCard, privacy);
+    return h('div', { class: 'stack', style: { gap: '20px' } }, h('div', { class: 'grid-2' }, connection, appearance, passwordCard), membersCard, tokensCard, policyCard, privacy);
   },
 });
