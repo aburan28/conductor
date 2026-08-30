@@ -2086,6 +2086,27 @@ Recommended properties:
 
 Stateless API replicas are safe when all claim operations are transactional in PostgreSQL. Scheduler replicas use leader election or `SKIP LOCKED`. Runner dispatch uses a durable queue/outbox. Presence is a projection and can tolerate eventual consistency; claims cannot.
 
+### 28.4 Daemon-to-daemon peering
+
+Multiple control planes may form a **mesh**: each daemon holds a certificate signed by a
+shared mesh CA and is configured with the addresses of the peers it should reach. A peer
+link is mutual TLS — the daemon serves its mesh certificate and verifies the peer's
+against the mesh CA, which is the only root trusted for that role. The certificate is the
+daemon's mesh identity (DNS SAN or common name), so a link proves both reachability and
+who answered.
+
+The mesh carries **connectivity and identity only**. Each daemon probes its peers
+(`GET /v1/peer/info`, authenticated by client certificate, never by bearer token) and
+records an in-memory link table — state, round-trip time, failure reason, and the remote
+identity — exposed to project members via `GET /v1/peers` and `conductor peers`. Link
+state is a projection, like presence: recomputed on every probe, never a source of truth.
+
+Deliberately not replicated across the link: tasks, scopes, reservations, events, or any
+project data. A mesh certificate names a daemon, not a principal, so peer endpoints are a
+separate authentication channel from membership, and no peer handler may read project
+data without a resolved member. Cross-daemon coordination (federated conflict detection,
+work hand-off between meshes) is a future extension with this layer as its foundation.
+
 ---
 
 ## 29. Proposed repository layout

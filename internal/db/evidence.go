@@ -72,7 +72,7 @@ func (s *Store) SubmitEvidence(ctx context.Context, m domain.EvidenceManifest, r
 			UPDATE attempts
 			   SET commit_sha = COALESCE(NULLIF($2, ''), commit_sha),
 			       base_commit_sha = COALESCE(NULLIF($3, ''), base_commit_sha),
-			       changed_paths = CASE WHEN cardinality($4::text[]) = 0
+			       changed_paths = CASE WHEN $4::text[] IS NULL OR cardinality($4::text[]) = 0
 			                            THEN changed_paths ELSE $4::text[] END,
 			       last_event_at = now()
 			 WHERE id = $1::uuid`,

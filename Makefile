@@ -10,7 +10,7 @@ TOKEN_FILE := .conductor/.bootstrap-token
 
 export DATABASE_URL
 
-.PHONY: all build test unit vet fmt db-up db-down db-wait bootstrap setup run serve login mcp wrap claude codex opencode clean e2e install uninstall
+.PHONY: all build test unit vet fmt db-up db-down db-wait bootstrap setup run serve login up down mcp wrap claude codex opencode clean e2e install uninstall
 
 all: vet build test
 
@@ -62,7 +62,8 @@ db-down:
 # Bootstrap the database and first tenant/project/principal/token. The DSN
 # comes from DATABASE_URL (exported above); pass extra bootstrap flags via
 # BOOTSTRAP_FLAGS, e.g. make bootstrap BOOTSTRAP_FLAGS="--org acme --project myrepo".
-# The freshly minted token is captured into $(TOKEN_FILE) so `make login` can use it
+# Bootstrap also writes this machine's CLI login directly (see --no-login), and the
+# freshly minted token is captured into $(TOKEN_FILE) so `make login` can re-use it
 # without you copy-pasting from the terminal.
 bootstrap: build db-up
 	@$(BIN)/conductord bootstrap $(BOOTSTRAP_FLAGS) | tee >(grep -o 'cdt_[A-Za-z0-9_-]*' > $(TOKEN_FILE))
@@ -76,6 +77,17 @@ setup: bootstrap
 # ADDR=0.0.0.0:8080 (requires --insecure or TLS, which conductord enforces).
 serve run: build db-up
 	$(BIN)/conductord $(if $(ADDR),--addr $(ADDR))
+
+# One command from a cold checkout to a running, logged-in control plane:
+# Postgres, the binaries, conductord in the background (pidfile + log under
+# .conductor/runtime/), and a saved CLI login — bootstrap writes it directly,
+# so there is no token to copy. `make down` stops the server.
+up:
+	./scripts/up.sh
+
+# Stop the background control plane started by `make up`. Postgres keeps running.
+down:
+	./scripts/down.sh
 
 # Save the bootstrap token (or one you pass with TOKEN=…) as the conductor CLI's
 # default credentials. Requires `conductord` to already be reachable at ENDPOINT.

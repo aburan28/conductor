@@ -95,6 +95,13 @@ func (s *Server) routes() {
 	s.mcpRoutes(m)
 	s.queueRoutes(m)
 
+	// The mesh surface. /v1/peer/* is authenticated by the peer's mesh certificate (not a
+	// bearer token); /v1/peers is the same link table shown to project members.
+	if s.peerName != "" {
+		m.HandleFunc("GET /v1/peer/info", s.peerAuth(s.peerInfo))
+	}
+	m.HandleFunc("GET /v1/peers", auth(s.listPeers))
+
 	// The SPA owns every path the API does not. Go's mux prefers the more specific pattern,
 	// so /v1/... always wins and everything else — "/", "/tasks/T-42", "/static/app.js" —
 	// is the dashboard's to route client-side.
