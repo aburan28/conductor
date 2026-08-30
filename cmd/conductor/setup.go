@@ -311,7 +311,7 @@ repository:
 
 coordination:
   defaultVisibility: team_summary
-  claimMode: cooperative          # advisory | cooperative | strict
+  claimMode: cooperative          # advisory | cooperative | strict_harness (alias: strict)
   leaseTtlSeconds: 90
   heartbeatSeconds: 20
   offlineGraceSeconds: 45
@@ -366,7 +366,7 @@ conflict:
   write_write: block_conflict
   read_write: allow_with_warning
   protected_any: block_conflict
-  enforcement_level: cooperative
+  enforcement_level: cooperative  # advisory | cooperative | strict_harness (alias: strict); overrides claimMode
 
 budget:
   defaults:

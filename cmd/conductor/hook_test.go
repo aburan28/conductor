@@ -98,6 +98,39 @@ func TestJudgePreTool(t *testing.T) {
 		t.Fatalf("verdict = %+v", v)
 	}
 
+	// A cooperative project downgraded the decision to a warning even though the raw
+	// conflict is blocking-class: the hook follows the decision, not the matrix, and the
+	// server's advice (how to request the territory) is what the model reads.
+	v = judgePreTool(coord.IntentDecision{
+		Outcome:     domain.OutcomeAllowWithWarning,
+		Enforcement: domain.EnforceCooperative,
+		Conflicts:   []db.ScopeConflict{conflict("alice", domain.OutcomeBlockConflict)},
+		Advice:      "alice holds path:internal/api/api.go for T-7. Request the territory with coord_expand_scope.",
+	}, "bob")
+	if v.Block || !strings.Contains(v.Warning, "coord_expand_scope") {
+		t.Fatalf("cooperative downgrade must warn with the expansion advice: %+v", v)
+	}
+
+	// A strict project blocks on the same shape.
+	v = judgePreTool(coord.IntentDecision{
+		Outcome:     domain.OutcomeBlockConflict,
+		Enforcement: domain.EnforceStrictHarness,
+		Conflicts:   []db.ScopeConflict{conflict("alice", domain.OutcomeBlockConflict)},
+	}, "bob")
+	if !v.Block || !strings.Contains(v.Message, "alice") {
+		t.Fatalf("strict must block: %+v", v)
+	}
+
+	// A block for a non-conflict reason (an exact duplicate) uses the server's advice.
+	v = judgePreTool(coord.IntentDecision{
+		Outcome:   domain.OutcomeBlockDuplicate,
+		Conflicts: []db.ScopeConflict{conflict("alice", domain.OutcomeBlockConflict)},
+		Advice:    "T-3 (owner alice) is already this exact work. Attach to it.",
+	}, "bob")
+	if !v.Block || !strings.Contains(v.Message, "T-3") {
+		t.Fatalf("duplicate block should carry the server's advice: %+v", v)
+	}
+
 	// Nothing in flight: silence.
 	if v := judgePreTool(coord.IntentDecision{Outcome: domain.OutcomeAllow}, "bob"); v.Block || v.Warning != "" {
 		t.Fatalf("clean allow must be silent: %+v", v)

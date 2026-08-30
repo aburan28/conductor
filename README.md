@@ -20,6 +20,22 @@ what is actually built.
 
 ## What it does
 
+The default project is `cooperative`: a collision is a warning that names the holder and the
+obligation — request the territory (level 2 of the enforcement ladder below).
+
+```
+$ conductor check --summary "add retry-aware model routing" --scope dir:internal/router
+
+Proceed with care: scope conflict on dir:internal/router
+
+  alice holds dir:internal/router for T-1 (write_exclusive).
+  Request the territory with coord_expand_scope (or `conductor scope add`) before you
+  build on it, or wait, split your scope, or join their task.
+```
+
+A `strict_harness` project (set `claimMode: strict_harness` in `project.yaml`) answers the
+same question the hard way:
+
 ```
 $ conductor check --summary "add retry-aware model routing" --scope dir:internal/router
 
@@ -419,9 +435,10 @@ Eleven tools: `conductor_check_conflicts`, `coord_start_work`, `coord_get_work`,
 `coord_handoff`, `coord_delegate`, `coord_capabilities`, `coord_project_status`. Heartbeats are
 deliberately *not* an MCP tool — a model should never spend tokens telling the server it is
 still alive. And where a harness supports pre-edit hooks, `conductor integrate` installs
-`conductor hook pre-tool`, which calls the same conflict check before every edit and blocks the
-tool call (exit 2, with the holder named) when someone else holds the file — enforcement, not
-just advice.
+`conductor hook pre-tool`, which calls the same conflict check before every edit and follows
+the project's enforcement level: `strict_harness` blocks the tool call (exit 2, with the
+holder named), `cooperative` lets it through with the expansion instruction, `advisory`
+warns — enforcement, not just advice.
 
 ### Token usage across harnesses
 

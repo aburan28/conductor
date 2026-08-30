@@ -285,6 +285,14 @@ func TestEventStreamCarriesNoPromptFields(t *testing.T) {
 func TestScopeConflictIsA409WithTheHolder(t *testing.T) {
 	h := newHarness(t)
 
+	// A blocking answer is the strict_harness contract (DESIGN.md §11.5 level 3);
+	// cooperative projects warn instead (see the companion test below).
+	cfg := domain.DefaultProjectConfig()
+	cfg.ClaimMode = domain.EnforceStrictHarness
+	if err := h.store.UpdateProjectConfig(context.Background(), h.project.ID, cfg); err != nil {
+		t.Fatalf("strict config: %v", err)
+	}
+
 	code, body := h.do(h.aliceTok, http.MethodPost, h.projectPath("/work/start"), map[string]any{
 		"summary": "rework the router",
 		"scopes":  []map[string]any{{"resource": "dir:internal/router", "mode": "write_exclusive"}},
@@ -316,6 +324,45 @@ func TestScopeConflictIsA409WithTheHolder(t *testing.T) {
 	}
 	if decision.Advice == "" {
 		t.Error("a blocked check should say what to do about it")
+	}
+}
+
+// The same collision in the default cooperative project is a warning that names the holder
+// and the obligation — request the territory (DESIGN.md §11.5 level 2).
+func TestScopeConflictCooperativeWarnsWithExpansionAdvice(t *testing.T) {
+	h := newHarness(t) // default project config: cooperative
+
+	code, body := h.do(h.aliceTok, http.MethodPost, h.projectPath("/work/start"), map[string]any{
+		"summary": "rework the router",
+		"scopes":  []map[string]any{{"resource": "dir:internal/router", "mode": "write_exclusive"}},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("alice start = %d\n%s", code, body)
+	}
+
+	code, body = h.do(h.bobTok, http.MethodPost, h.projectPath("/intents/check"), map[string]any{
+		"summary": "touch the router too",
+		"scopes":  []map[string]any{{"resource": "path:internal/router/policy.go", "mode": "write_exclusive"}},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("check = %d\n%s", code, body)
+	}
+
+	var decision coord.IntentDecision
+	if err := json.Unmarshal(body, &decision); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if decision.Outcome != domain.OutcomeAllowWithWarning {
+		t.Errorf("outcome = %s, want allow_with_warning", decision.Outcome)
+	}
+	if !strings.Contains(decision.Advice, "coord_expand_scope") {
+		t.Errorf("advice should demand expansion: %q", decision.Advice)
+	}
+	if len(decision.Conflicts) == 0 || decision.Conflicts[0].HolderOwner != "alice" {
+		t.Errorf("warning should still name the holder alice: %+v", decision.Conflicts)
+	}
+	if decision.Enforcement != domain.EnforceCooperative {
+		t.Errorf("enforcement = %s, want cooperative", decision.Enforcement)
 	}
 }
 

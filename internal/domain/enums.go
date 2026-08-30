@@ -481,6 +481,12 @@ const (
 	SeverityCritical Severity = "critical"
 )
 
+// AllSeverities is the authoritative severity list, used to validate review submissions at
+// the API boundary.
+var AllSeverities = []Severity{
+	SeverityInfo, SeverityLow, SeverityMedium, SeverityHigh, SeverityCritical,
+}
+
 var severityOrder = map[Severity]int{
 	SeverityInfo: 0, SeverityLow: 1, SeverityMedium: 2, SeverityHigh: 3, SeverityCritical: 4,
 }
@@ -517,6 +523,31 @@ const (
 	EnforceStrictHarness EnforcementLevel = "strict_harness"
 	EnforceStrictFS      EnforcementLevel = "strict_filesystem"
 )
+
+// enforcementOrder ranks §11.5 from softest to hardest, so policy code can compare levels
+// without repeating the ladder.
+var enforcementOrder = map[EnforcementLevel]int{
+	EnforceAdvisory: 0, EnforceCooperative: 1, EnforceStrictHarness: 2, EnforceStrictFS: 3,
+}
+
+// AtLeast reports whether l enforces at least as hard as floor.
+func (l EnforcementLevel) AtLeast(floor EnforcementLevel) bool {
+	return enforcementOrder[l] >= enforcementOrder[floor]
+}
+
+// NormalizeEnforcementLevel maps what a project may carry onto the canonical set: "strict"
+// is the scaffolded shorthand for strict_harness, and anything absent or unrecognized
+// resolves to cooperative, the level every default project config declares.
+func NormalizeEnforcementLevel(l EnforcementLevel) EnforcementLevel {
+	switch l {
+	case EnforceAdvisory, EnforceCooperative, EnforceStrictHarness, EnforceStrictFS:
+		return l
+	case "strict":
+		return EnforceStrictHarness
+	default:
+		return EnforceCooperative
+	}
+}
 
 // Validate returns an error if the enum value is not one this build recognizes. Used at the
 // API boundary so a bad value is a 400 rather than a database constraint violation.

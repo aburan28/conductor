@@ -287,8 +287,11 @@ func (b Bundle) ProjectConfig() domain.ProjectConfig {
 	if v := b.Project.Coordination.DefaultVisibility; v != "" {
 		c.DefaultVisibility = domain.Visibility(v)
 	}
-	if v := b.Project.Coordination.ClaimMode; v != "" {
-		c.ClaimMode = domain.EnforcementLevel(v)
+	if v := b.Policies.Conflict.EnforcementLevel; v != "" {
+		// policies.yaml overrides project.yaml, same as every other conflict knob.
+		c.ClaimMode = domain.NormalizeEnforcementLevel(domain.EnforcementLevel(v))
+	} else if v := b.Project.Coordination.ClaimMode; v != "" {
+		c.ClaimMode = domain.NormalizeEnforcementLevel(domain.EnforcementLevel(v))
 	}
 	setSeconds(&c.LeaseTTL, b.Project.Coordination.LeaseTTLSeconds)
 	setSeconds(&c.HeartbeatInterval, b.Project.Coordination.HeartbeatSeconds)

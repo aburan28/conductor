@@ -799,7 +799,13 @@ Before comparing paths:
 3. **Strict harness enforcement:** plugin/hook blocks the edit tool.
 4. **Strict filesystem enforcement:** sandbox only grants write access to reserved paths.
 
-The MVP should implement levels 1 and 2 universally, plus level 3 where a harness exposes reliable pre-tool hooks. Filesystem-level path enforcement can follow later using Landlock, a FUSE/overlay layer, or container mount design.
+Levels 1-3 are implemented and selected by the project's enforcement level
+(`claimMode` in project.yaml, `conflict.enforcement_level` in policies.yaml — the latter wins):
+`advisory` warns on the dashboard and never pauses an attempt; `cooperative` (the default)
+warns and names the obligation to request expansion, with claims and expansion still gated
+by the conflict matrix; `strict_harness` returns `block_conflict` from the check, which the
+pre-tool hook turns into a blocked edit. Level 4 (filesystem enforcement) can follow later
+using Landlock, a FUSE/overlay layer, or container mount design.
 
 ### 11.6 Merge-risk graph
 

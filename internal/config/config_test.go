@@ -68,6 +68,36 @@ func TestLoadRepositoryPolicy(t *testing.T) {
 	if policy.WriteWrite != domain.OutcomeBlockConflict {
 		t.Errorf("derived scope policy write/write = %s, want block_conflict", policy.WriteWrite)
 	}
+
+	// This repository coordinates on itself, so its own claim mode must resolve.
+	if got := cfg.ClaimMode; got != domain.EnforceCooperative {
+		t.Errorf("claim mode = %s, want cooperative", got)
+	}
+}
+
+// The enforcement level follows the same precedence as every other conflict knob:
+// policies.yaml wins over project.yaml, and the scaffolded "strict" shorthand
+// normalizes to strict_harness (DESIGN.md §11.5).
+func TestProjectConfigEnforcementLevelPrecedence(t *testing.T) {
+	tests := []struct {
+		name                    string
+		policies, project, want string
+	}{
+		{"policies wins", "strict_harness", "advisory", "strict_harness"},
+		{"project used when policies silent", "", "advisory", "advisory"},
+		{"strict alias normalizes", "strict", "", "strict_harness"},
+		{"absent falls back to default", "", "", "cooperative"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var b Bundle
+			b.Policies.Conflict.EnforcementLevel = tt.policies
+			b.Project.Coordination.ClaimMode = tt.project
+			if got := b.ProjectConfig().ClaimMode; string(got) != tt.want {
+				t.Errorf("claim mode = %s, want %s", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestModelProfilesSkipUnconfiguredModels(t *testing.T) {
@@ -97,17 +127,21 @@ func TestOpenCodeLocalVLLMProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	want := map[string]string{
-		"vllm/qwen3.8-27b":           "worker.fast",
-		"vllm/zai-org/GLM-5.3-Flash": "worker.general",
-		"vllm/glm-5.3":               "planner.frontier",
+	// Only one model listens on :8000 at a time, so several aliases can share a model id;
+	// what matters is that every opencode alias resolves to a locally servable model.
+	want := map[string][]string{
+		"vllm/glm-5.3":               {"worker.fast", "planner.frontier", "reviewer.strong"},
+		"vllm/zai-org/GLM-5.3-Flash": {"worker.general"},
 	}
-	got := map[string]string{}
+	got := map[string]map[string]bool{}
 	for _, p := range bundle.ModelProfiles("org-1") {
 		if p.Harness != "opencode" || !p.Enabled {
 			continue
 		}
-		got[p.Model] = p.Alias
+		if got[p.Model] == nil {
+			got[p.Model] = map[string]bool{}
+		}
+		got[p.Model][p.Alias] = true
 		if p.Provider != "vllm" {
 			t.Errorf("%s: provider = %q, want vllm", p.Model, p.Provider)
 		}
@@ -115,9 +149,11 @@ func TestOpenCodeLocalVLLMProfiles(t *testing.T) {
 			t.Errorf("%s: billing = %q, want capacity (local GPU, not per-token)", p.Model, p.Billing)
 		}
 	}
-	for model, alias := range want {
-		if got[model] != alias {
-			t.Errorf("opencode profile %s: alias = %q, want %q (got %v)", model, got[model], alias, got)
+	for model, aliases := range want {
+		for _, alias := range aliases {
+			if !got[model][alias] {
+				t.Errorf("opencode profile %s: alias %q missing (got %v)", model, alias, got[model])
+			}
 		}
 	}
 }

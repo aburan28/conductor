@@ -95,6 +95,9 @@ type IntentDecision struct {
 	// Advice is human-readable guidance matching the outcome, so a CLI or agent can present
 	// something actionable without reimplementing the policy.
 	Advice string `json:"advice,omitempty"`
+	// Enforcement is the project's conflict enforcement level (DESIGN.md §11.5), echoed so a
+	// caller can tell a cooperative warning from a strict block without a second lookup.
+	Enforcement domain.EnforcementLevel `json:"enforcement,omitempty"`
 }
 
 // CheckIntent evaluates duplicates and scope conflicts without changing anything.
@@ -147,8 +150,15 @@ func (s *Service) CheckIntent(ctx context.Context, c Caller, req IntentRequest) 
 // Precedence matters: an exact duplicate outranks a scope conflict, because "this work
 // already exists" is more useful than "this file is busy" — joining the existing task
 // resolves both at once.
+//
+// The project's enforcement level (§11.5) is applied here, where the level lives in
+// config, so every caller — CLI, MCP, hook — sees the same verdict. Below strict_harness a
+// blocking conflict is reported as a warning rather than a block: claims and scope
+// expansion still fail against the same conflict, so the level changes what an agent is
+// told, not what the reservation table can hold.
 func decide(duplicates []db.DuplicateCandidate, conflicts []db.ScopeConflict, cfg domain.ProjectConfig) IntentDecision {
-	d := IntentDecision{Outcome: domain.OutcomeAllow, Duplicates: duplicates, Conflicts: conflicts}
+	level := domain.NormalizeEnforcementLevel(cfg.ClaimMode)
+	d := IntentDecision{Outcome: domain.OutcomeAllow, Duplicates: duplicates, Conflicts: conflicts, Enforcement: level}
 
 	for _, dup := range duplicates {
 		if dup.Exact {
@@ -175,7 +185,6 @@ func decide(duplicates []db.DuplicateCandidate, conflicts []db.ScopeConflict, cf
 	}
 
 	if db.Blocking(conflicts) {
-		d.Outcome = domain.OutcomeBlockConflict
 		blocker := conflicts[0]
 		for _, c := range conflicts {
 			if c.Outcome.Blocks() {
@@ -183,6 +192,24 @@ func decide(duplicates []db.DuplicateCandidate, conflicts []db.ScopeConflict, cf
 				break
 			}
 		}
+		if !level.AtLeast(domain.EnforceStrictHarness) {
+			// §11.5 levels 1-2: the check surface warns instead of blocking. Cooperative
+			// names the obligation (request expansion); advisory names the dashboard.
+			d.Outcome = domain.OutcomeAllowWithWarning
+			d.Reason = "scope conflict on " + blocker.ResourceKey
+			if level == domain.EnforceCooperative {
+				d.Advice = blocker.HolderOwner + " holds " + blocker.ResourceKey + " for " +
+					blocker.HolderTaskRef + " (" + string(blocker.HolderMode) +
+					"). Request the territory with coord_expand_scope (or `conductor scope add`) " +
+					"before you build on it, or wait, split your scope, or join their task."
+			} else {
+				d.Advice = blocker.HolderOwner + " holds " + blocker.ResourceKey + " for " +
+					blocker.HolderTaskRef + ". Advisory mode: the overlap is on the dashboard; " +
+					"coordinate on merge."
+			}
+			return d
+		}
+		d.Outcome = domain.OutcomeBlockConflict
 		d.Reason = "scope conflict on " + blocker.ResourceKey
 		d.Advice = blocker.HolderOwner + " holds " + blocker.ResourceKey +
 			" for " + blocker.HolderTaskRef + " (" + string(blocker.HolderMode) +
@@ -453,6 +480,20 @@ func (s *Service) ExpandScope(ctx context.Context, c Caller, fence domain.Fence,
 	})
 	if err != nil {
 		if errors.Is(err, domain.ErrConflict) {
+			if domain.NormalizeEnforcementLevel(project.Config.ClaimMode) == domain.EnforceAdvisory {
+				// §11.5 level 1: dashboard warning only. Nothing pauses — the refusal is
+				// carried back as a warning and the overlap stays visible on the dashboard.
+				advice := "Advisory mode: expansion not granted, proceeding without it."
+				if len(conflicts) > 0 {
+					advice = conflicts[0].HolderOwner + " holds " + conflicts[0].ResourceKey +
+						" for " + conflicts[0].HolderTaskRef + ". Advisory mode: proceeding without it."
+				}
+				return ExpandScopeResult{
+					Outcome:   domain.OutcomeAllowWithWarning,
+					Conflicts: conflicts,
+					Advice:    advice,
+				}, nil
+			}
 			// Pause the attempt rather than letting it keep editing contested ground.
 			if _, uerr := s.Store.UpdateAttempt(ctx, fence.AttemptID, db.AttemptProgress{
 				State: domain.AttemptPausedConflict,

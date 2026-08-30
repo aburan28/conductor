@@ -154,8 +154,11 @@ type preToolVerdict struct {
 // judgePreTool turns the control plane's answer into the hook's verdict.
 //
 // Holdings by the caller's own tasks are not conflicts: a person editing a file their own
-// claim reserved is the system working, not a collision. Everything else follows the
-// decision — a blocking outcome blocks, an advisory overlap warns.
+// claim reserved is the system working, not a collision. Beyond that the decision itself is
+// the verdict: the server has already applied the project's enforcement level (DESIGN.md
+// §11.5), so a cooperative project warns where a strict one blocks, and the hook never
+// re-derives that from the raw per-conflict outcomes — the level in project.yaml stays the
+// single source of truth.
 func judgePreTool(d coord.IntentDecision, self string) preToolVerdict {
 	var others []db.ScopeConflict
 	for _, c := range d.Conflicts {
@@ -164,21 +167,30 @@ func judgePreTool(d coord.IntentDecision, self string) preToolVerdict {
 		}
 		others = append(others, c)
 	}
-	for _, c := range others {
-		if c.Outcome.Blocks() {
-			return preToolVerdict{Block: true, Message: fmt.Sprintf(
-				"Conductor: %s holds %s for %s (%s). Wait for it, split your scope, or join their task "+
-					"with coord_start_work(attach_to: %q). Run conductor_check_conflicts to see the current holders.",
-				c.HolderOwner, c.ResourceKey, c.HolderTaskRef, c.HolderMode, c.HolderTaskRef)}
+	if len(others) == 0 {
+		return preToolVerdict{}
+	}
+	if d.Outcome.Blocks() {
+		message := fmt.Sprintf(
+			"Conductor: %s holds %s for %s (%s). Wait for it, split your scope, or join their task "+
+				"with coord_start_work(attach_to: %q). Run conductor_check_conflicts to see the current holders.",
+			others[0].HolderOwner, others[0].ResourceKey, others[0].HolderTaskRef, others[0].HolderMode, others[0].HolderTaskRef)
+		if d.Outcome != domain.OutcomeBlockConflict && d.Advice != "" {
+			// A block for another reason (an exact duplicate, say): the server's advice
+			// explains it better than a file-conflict message would.
+			message = d.Advice
 		}
+		return preToolVerdict{Block: true, Message: message}
 	}
-	if len(others) > 0 {
-		c := others[0]
-		return preToolVerdict{Warning: fmt.Sprintf(
-			"Conductor: %s overlaps %s (%s by %s). Proceed, but expect to coordinate on merge.",
-			c.ResourceKey, c.HolderTaskRef, c.HolderMode, c.HolderOwner)}
+	warning := fmt.Sprintf(
+		"Conductor: %s overlaps %s (%s by %s). Proceed, but expect to coordinate on merge.",
+		others[0].ResourceKey, others[0].HolderTaskRef, others[0].HolderMode, others[0].HolderOwner)
+	if d.Advice != "" {
+		// The server's advice carries the level's instruction: cooperative decisions say
+		// how to request the territory, advisory ones say to coordinate on merge.
+		warning = "Conductor: " + d.Advice
 	}
-	return preToolVerdict{}
+	return preToolVerdict{Warning: warning}
 }
 
 func hookPreTool(ctx context.Context, args []string) error {
