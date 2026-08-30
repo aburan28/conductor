@@ -23,6 +23,7 @@ import (
 	"github.com/adamburan/conductor/internal/coord"
 	"github.com/adamburan/conductor/internal/db"
 	"github.com/adamburan/conductor/internal/domain"
+	"github.com/adamburan/conductor/internal/peer"
 )
 
 // Server holds the HTTP handlers.
@@ -42,6 +43,11 @@ type Server struct {
 	tlsEnabled bool
 	// self is Options.SelfEndpoint.
 	self string
+	// peerName is this daemon's mesh identity (from its mesh certificate); empty when
+	// peering is not configured.
+	peerName string
+	// peerStatus snapshots the peer link table; nil when peering is not configured.
+	peerStatus func() []peer.LinkStatus
 }
 
 type Options struct {
@@ -55,6 +61,10 @@ type Options struct {
 	// uses it to call the control plane through the same public API every other client
 	// uses, so the gateway never grows a private path into the store.
 	SelfEndpoint string
+	// PeerName is this daemon's mesh identity. Empty disables the peer surface.
+	PeerName string
+	// PeerStatus returns the current peer link table. Nil disables reporting.
+	PeerStatus func() []peer.LinkStatus
 }
 
 func New(store *db.Store, svc *coord.Service, opts Options) *Server {
@@ -71,6 +81,8 @@ func New(store *db.Store, svc *coord.Service, opts Options) *Server {
 		behindProxy: opts.BehindProxy,
 		tlsEnabled:  opts.TLSEnabled,
 		self:        opts.SelfEndpoint,
+		peerName:    opts.PeerName,
+		peerStatus:  opts.PeerStatus,
 	}
 	s.routes()
 	return s

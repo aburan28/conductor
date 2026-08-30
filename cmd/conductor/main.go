@@ -65,6 +65,7 @@ Dispatch
   conductor route <ref> --explain    show what the dispatch policy would decide, and why
   conductor swarm join|status        contribute this machine's sessions to the team's queue
   conductor queue                    the admission queue: who is waiting for a slot
+  conductor peers                    daemon-to-daemon mesh: link state per peer
 
 Execution
   conductor worker                   run a runner: claim, execute, verify, report
@@ -160,6 +161,8 @@ func main() {
 		err = cmdSwarm(ctx, args)
 	case "queue":
 		err = cmdQueue(ctx, args)
+	case "peers":
+		err = cmdPeers(ctx, args)
 	case "help", "-h", "--help":
 		fmt.Print(usageText)
 		return

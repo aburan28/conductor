@@ -638,6 +638,10 @@ Implemented and exercised by tests:
 - Isolated git worktrees, scope-drift detection, runner-attested validation, evidence manifests,
   handoff bundles, portable Markdown task cards.
 - Member and token administration, TLS, a loopback-by-default bind, and auth throttling.
+- Daemon-to-daemon peering over mutual TLS: a private CA names every control plane in a
+  mesh, each daemon dials its configured peers and keeps a live link table, and
+  `conductor peers` reports it. Connectivity and identity only — no data is replicated
+  across the link.
 - A runner that reaches the control plane over HTTP and holds no database credential
   (§28.2), alongside the in-process backend for single-host use (§28.1).
 - One-link onboarding: `conductor invite <handle>` mints a teammate their own token and prints
@@ -720,6 +724,48 @@ The suite proves the invariants rather than asserting them in prose. Notably:
 | `TestSimilarityIsStableAcrossKeys` | duplicate detection does not miss real collisions across tenant keys |
 | `TestMCPWorkLifecycleAgainstLiveServer` | the MCP gateway works against the real API, not a stub |
 | `TestQueuedAttemptCannotSucceed` | an attempt cannot report success without having run |
+| `TestProbeUntrustedPeer` | a daemon certified by another CA can never pass as a peer |
+| `TestPeerInfoRequiresMeshCertificate` | a bearer token is not a peer credential; only a mesh certificate is |
+
+---
+
+## Peering daemons
+
+A mesh is a set of `conductord` instances that know each other by certificate. One CA is
+generated per mesh; every daemon holds a certificate signed by it and uses that single
+certificate in two roles — served as its TLS certificate, and presented as its client
+certificate when dialing peers. A peer link is therefore mutual TLS: each side proves it
+holds a mesh-issued key, and the mesh CA is the only root either side trusts for it.
+
+Peering carries connectivity and identity, nothing else. Each daemon probes its
+configured peers (`GET /v1/peer/info`) and records state, round-trip time, and the
+identity that answered; project members read that link table with `conductor peers`. No
+tasks, scopes, or events cross the link — the database remains each daemon's own source
+of truth.
+
+```bash
+# once per mesh: a CA, then one certificate per daemon
+scripts/gen-peer-certs.sh laptop desktop
+
+# per daemon (each points at the other)
+conductord --addr 0.0.0.0:8443 \
+  --peer-ca .conductor/certs/ca.pem \
+  --peer-cert .conductor/certs/laptop/cert.pem --peer-key .conductor/certs/laptop/key.pem \
+  --peer desktop=https://desktop.example.com:8443
+
+conductord --addr 0.0.0.0:8443 \
+  --peer-ca .conductor/certs/ca.pem \
+  --peer-cert .conductor/certs/desktop/cert.pem --peer-key .conductor/certs/desktop/key.pem \
+  --peer laptop=https://laptop.example.com:8443
+
+conductor peers   # PEER ADDRESS STATE RTT LAST CHECK
+```
+
+Env equivalents: `CONDUCTOR_PEERS=name=url,…` (comma-separated) plus
+`CONDUCTOR_PEER_CA`, `CONDUCTOR_PEER_CERT`, `CONDUCTOR_PEER_KEY`. Clients verify the
+daemon with `CONDUCTOR_CA_CERT=.conductor/certs/ca.pem`. Peer URLs must be `https` —
+a plaintext peer would put the mesh identity on an unauthenticated wire, and the daemon
+refuses it.
 
 ---
 

@@ -24,8 +24,10 @@ ORG="e2e-$SUFFIX"
 PROJECT="demo-$SUFFIX"
 
 SERVER_PID=""
+MESH_PIDS=""
 cleanup() {
   [[ -n "$SERVER_PID" ]] && kill "$SERVER_PID" 2>/dev/null || true
+  [[ -n "$MESH_PIDS" ]] && kill $MESH_PIDS 2>/dev/null || true
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -323,5 +325,44 @@ note "the admission queue issued a ticket ($STATE) and lists it in conductor que
 step "18. The swarm view rolls up who is contributing capacity"
 alice swarm >/dev/null || fail "swarm view failed"
 note "runners, live sessions, and shareable budget in one view"
+
+step "19. Daemon-to-daemon peering: two control planes, one mesh, mutual TLS"
+# A second and third daemon join a private CA and dial each other. This is the mesh layer:
+# authenticated connectivity between daemons, with no data replicated across the link.
+MESH_PORT=$((PORT + 400))
+MESH_CERTS="$WORK/mesh-certs"
+CONDUCTOR_CERT_DIR="$MESH_CERTS" "$ROOT/scripts/gen-peer-certs.sh" mesh-a mesh-b >/dev/null
+note "generated a mesh CA and two daemon certificates"
+
+"$BIN/conductord" --addr "127.0.0.1:$MESH_PORT" --no-scheduler \
+  --peer-ca "$MESH_CERTS/ca.pem" --peer-cert "$MESH_CERTS/mesh-a/cert.pem" \
+  --peer-key "$MESH_CERTS/mesh-a/key.pem" --peer "mesh-b=https://127.0.0.1:$((MESH_PORT + 1))" \
+  >"$WORK/mesh-a.log" 2>&1 &
+MESH_PIDS="$MESH_PIDS $!"
+"$BIN/conductord" --addr "127.0.0.1:$((MESH_PORT + 1))" --no-scheduler \
+  --peer-ca "$MESH_CERTS/ca.pem" --peer-cert "$MESH_CERTS/mesh-b/cert.pem" \
+  --peer-key "$MESH_CERTS/mesh-b/key.pem" --peer "mesh-a=https://127.0.0.1:$MESH_PORT" \
+  >"$WORK/mesh-b.log" 2>&1 &
+MESH_PIDS="$MESH_PIDS $!"
+sleep 2
+
+MESH_A="https://127.0.0.1:$MESH_PORT"
+# The link table shows mesh-b as up, with the identity its certificate carries.
+PEERS=$(curl -sf --cacert "$MESH_CERTS/ca.pem" -H "Authorization: Bearer $ALICE_TOKEN" "$MESH_A/v1/peers")
+echo "$PEERS" | grep -q '"state": *"up"'     || fail "peer link did not come up: $PEERS"
+echo "$PEERS" | grep -q '"name": *"mesh-b"' || fail "peer did not report its mesh identity: $PEERS"
+
+# Peer endpoints are authenticated by certificate, not by bearer token.
+NO_CERT=$(curl -s -o /dev/null -w '%{http_code}' --cacert "$MESH_CERTS/ca.pem" "$MESH_A/v1/peer/info")
+[[ "$NO_CERT" == "401" ]] || fail "peer endpoint answered without a client certificate ($NO_CERT)"
+INFO=$(curl -sf --cacert "$MESH_CERTS/ca.pem" --cert "$MESH_CERTS/mesh-b/cert.pem" \
+  --key "$MESH_CERTS/mesh-b/key.pem" "$MESH_A/v1/peer/info")
+echo "$INFO" | grep -q '"name": *"mesh-a"' || fail "peer info did not identify the answering daemon: $INFO"
+
+# And the CLI sees the same mesh.
+CLI_PEERS=$(CONDUCTOR_ENDPOINT="$MESH_A" CONDUCTOR_CA_CERT="$MESH_CERTS/ca.pem" \
+  CONDUCTOR_TOKEN="$ALICE_TOKEN" "$BIN/conductor" peers)
+echo "$CLI_PEERS" | grep -q "mesh-b" || fail "conductor peers did not list mesh-b: $CLI_PEERS"
+note "$CLI_PEERS" | grep -m1 mesh-b
 
 printf '\n\033[32mAll end-to-end checks passed.\033[0m\n'
