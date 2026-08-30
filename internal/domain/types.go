@@ -218,6 +218,7 @@ type Session struct {
 	Visibility     Visibility          `json:"visibility"`
 	ActiveTaskID   ID                  `json:"active_task_id,omitempty"`
 	State          SessionState        `json:"state"`
+	PendingControl SessionControl      `json:"pending_control,omitempty"`
 	Capabilities   SessionCapabilities `json:"capabilities"`
 	StartedAt      time.Time           `json:"started_at"`
 	HeartbeatAt    time.Time           `json:"heartbeat_at"`

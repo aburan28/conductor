@@ -14,7 +14,7 @@ import (
 const sessionColumns = `
 	id::text, project_id::text, principal_id::text, COALESCE(runner_id::text, ''),
 	harness, harness_version, machine_id, base_sha, branch, worktree_path,
-	visibility, COALESCE(active_task_id::text, ''), state, capabilities,
+	visibility, COALESCE(active_task_id::text, ''), state, pending_control, capabilities,
 	started_at, heartbeat_at, expires_at, closed_at`
 
 func scanSession(scan func(...any) error) (domain.Session, error) {
@@ -22,7 +22,7 @@ func scanSession(scan func(...any) error) (domain.Session, error) {
 	var caps []byte
 	if err := scan(&s.ID, &s.ProjectID, &s.PrincipalID, &s.RunnerID,
 		&s.Harness, &s.HarnessVersion, &s.MachineID, &s.BaseSHA, &s.Branch, &s.WorktreePath,
-		&s.Visibility, &s.ActiveTaskID, &s.State, &caps,
+		&s.Visibility, &s.ActiveTaskID, &s.State, &s.PendingControl, &caps,
 		&s.StartedAt, &s.HeartbeatAt, &s.ExpiresAt, &s.ClosedAt); err != nil {
 		return domain.Session{}, err
 	}
@@ -99,11 +99,12 @@ func (s *Store) GetSession(ctx context.Context, id domain.ID) (domain.Session, e
 }
 
 type HeartbeatSessionParams struct {
-	SessionID domain.ID
-	State     domain.SessionState
-	Branch    string
-	BaseSHA   string
-	TTL       time.Duration
+	SessionID  domain.ID
+	State      domain.SessionState
+	Branch     string
+	BaseSHA    string
+	ControlAck domain.SessionControl
+	TTL        time.Duration
 }
 
 // HeartbeatSession extends a session's life and updates its presence state.
@@ -111,6 +112,11 @@ type HeartbeatSessionParams struct {
 // This is deliberately not an MCP tool (DESIGN.md §7.2): heartbeats are high frequency, and
 // spending model tokens on them would be absurd. A local adapter or the CLI sidecar calls it
 // directly over HTTP.
+//
+// ControlAck is the sidecar saying what it is currently doing ("pause" while frozen,
+// "resume" while running). A pending control clears the moment the acknowledgement matches
+// it — including when the session was already in that state, so a control that asks for
+// reality needs no action and is simply confirmed.
 func (s *Store) HeartbeatSession(ctx context.Context, p HeartbeatSessionParams) (domain.Session, error) {
 	if p.TTL <= 0 {
 		p.TTL = 90 * time.Second
@@ -121,11 +127,24 @@ func (s *Store) HeartbeatSession(ctx context.Context, p HeartbeatSessionParams) 
 		       expires_at   = now() + $2::interval,
 		       state        = COALESCE(NULLIF($3, '')::text, state),
 		       branch       = COALESCE(NULLIF($4, ''), branch),
-		       base_sha     = COALESCE(NULLIF($5, ''), base_sha)
+		       base_sha     = COALESCE(NULLIF($5, ''), base_sha),
+		       pending_control = CASE WHEN $6 <> '' AND $6 = pending_control
+		                              THEN '' ELSE pending_control END
 		 WHERE id = $1::uuid AND closed_at IS NULL
 		RETURNING `+sessionColumns,
-		p.SessionID, p.TTL.String(), string(p.State), p.Branch, p.BaseSHA,
+		p.SessionID, p.TTL.String(), string(p.State), p.Branch, p.BaseSHA, string(p.ControlAck),
 	).Scan)
+	return sess, noRows(err)
+}
+
+// RequestSessionControl records a pause or resume for the session's sidecar to pick up on
+// its next heartbeat. Idempotent: asking twice leaves one pending control, and asking for
+// the state the session is already in clears on the next acknowledgement.
+func (s *Store) RequestSessionControl(ctx context.Context, id domain.ID, control domain.SessionControl) (domain.Session, error) {
+	sess, err := scanSession(s.pool.QueryRow(ctx, `
+		UPDATE sessions SET pending_control = $2
+		 WHERE id = $1::uuid AND closed_at IS NULL
+		RETURNING `+sessionColumns, id, string(control)).Scan)
 	return sess, noRows(err)
 }
 

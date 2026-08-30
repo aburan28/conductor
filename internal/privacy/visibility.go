@@ -352,6 +352,7 @@ type SessionView struct {
 	BaseSHA        string                  `json:"base_sha,omitempty"`
 	Visibility     domain.Visibility       `json:"visibility"`
 	State          domain.SessionState     `json:"state"`
+	PendingControl domain.SessionControl   `json:"pending_control,omitempty"`
 	ActiveTaskRef  string                  `json:"active_task_ref,omitempty"`
 	Capabilities   SessionCapabilitiesView `json:"capabilities"`
 	StartedAt      time.Time               `json:"started_at"`
@@ -388,18 +389,19 @@ func ProjectSession(
 ) SessionView {
 	caps := s.Capabilities
 	view := SessionView{
-		ID:            s.ID,
-		ProjectID:     s.ProjectID,
-		Principal:     principal.Handle,
-		PrincipalID:   principal.ID,
-		Kind:          principal.Kind,
-		RunnerID:      s.RunnerID,
-		Harness:       s.Harness,
-		Branch:        s.Branch,
-		BaseSHA:       s.BaseSHA,
-		Visibility:    s.Visibility,
-		State:         s.State,
-		ActiveTaskRef: activeTaskRef,
+		ID:             s.ID,
+		ProjectID:      s.ProjectID,
+		Principal:      principal.Handle,
+		PrincipalID:    principal.ID,
+		Kind:           principal.Kind,
+		RunnerID:       s.RunnerID,
+		Harness:        s.Harness,
+		Branch:         s.Branch,
+		BaseSHA:        s.BaseSHA,
+		Visibility:     s.Visibility,
+		State:          s.State,
+		PendingControl: s.PendingControl,
+		ActiveTaskRef:  activeTaskRef,
 		Capabilities: SessionCapabilitiesView{
 			Tier:          caps.Tier,
 			Effort:        caps.Effort,

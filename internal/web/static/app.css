@@ -199,7 +199,7 @@ label.field > input, label.field > select, label.field > textarea { font-weight:
 }
 .pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: .8; }
 .pill.ok, .pill.working, .pill.running, .pill.done, .pill.succeeded, .pill.granted, .pill.online, .pill.online_idle, .pill.accepted, .pill.fulfilled, .pill.resolved { background: var(--accent-soft); color: var(--accent-text); }
-.pill.warn, .pill.stale, .pill.offline_grace, .pill.waiting_for_input, .pill.waiting_for_approval, .pill.review_required, .pill.verifying, .pill.merging, .pill.queued, .pill.proposed, .pill.acknowledged, .pill.draining, .pill.planning { background: var(--warn-soft); color: var(--warn); }
+.pill.warn, .pill.stale, .pill.offline_grace, .pill.waiting_for_input, .pill.waiting_for_approval, .pill.review_required, .pill.verifying, .pill.merging, .pill.queued, .pill.proposed, .pill.acknowledged, .pill.draining, .pill.planning, .pill.paused { background: var(--warn-soft); color: var(--warn); }
 .pill.danger, .pill.blocked, .pill.blocked_conflict, .pill.blocked_dependency, .pill.blocked_input, .pill.failed, .pill.failed_terminal, .pill.failed_retryable, .pill.cancelled, .pill.expired, .pill.offline, .pill.paused_conflict, .pill.high, .pill.critical, .pill.declined { background: var(--danger-soft); color: var(--danger); }
 .pill.info, .pill.ready, .pill.claimed, .pill.offered, .pill.reviewing, .pill.medium { background: var(--info-soft); color: var(--info); }
 .badge { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; font-size: 11px; font-weight: 600; background: var(--chip); color: var(--text-2); }

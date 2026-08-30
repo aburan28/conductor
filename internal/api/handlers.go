@@ -37,6 +37,8 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /v1/projects/{project}/sessions", auth(s.listSessions))
 	m.HandleFunc("POST /v1/sessions/{session}/heartbeat", auth(s.heartbeatSession))
 	m.HandleFunc("POST /v1/sessions/{session}/close", auth(s.closeSession))
+	m.HandleFunc("POST /v1/sessions/{session}/pause", auth(s.pauseSession))
+	m.HandleFunc("POST /v1/sessions/{session}/resume", auth(s.resumeSession))
 	m.HandleFunc("POST /v1/sessions/{session}/capabilities", auth(s.setSessionCapabilities))
 	m.HandleFunc("GET /v1/sessions/{session}/assignments", auth(s.sessionAssignments))
 	m.HandleFunc("POST /v1/assignments/{assignment}/respond", auth(s.respondToAssignment))
@@ -437,9 +439,10 @@ func validEffort(e domain.Effort) bool {
 }
 
 type heartbeatSessionBody struct {
-	State   domain.SessionState `json:"state"`
-	Branch  string              `json:"branch"`
-	BaseSHA string              `json:"base_sha"`
+	State      domain.SessionState   `json:"state"`
+	Branch     string                `json:"branch"`
+	BaseSHA    string                `json:"base_sha"`
+	ControlAck domain.SessionControl `json:"control_ack"`
 }
 
 func (s *Server) heartbeatSession(w http.ResponseWriter, r *http.Request, p domain.Principal) {
@@ -464,12 +467,15 @@ func (s *Server) heartbeatSession(w http.ResponseWriter, r *http.Request, p doma
 	}
 	updated, err := s.store.HeartbeatSession(r.Context(), db.HeartbeatSessionParams{
 		SessionID: session.ID, State: body.State, Branch: body.Branch, BaseSHA: body.BaseSHA,
-		TTL: project.Config.LeaseTTL.OrDefault(90 * time.Second),
+		ControlAck: body.ControlAck,
+		TTL:        project.Config.LeaseTTL.OrDefault(90 * time.Second),
 	})
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
+	// The response is the sidecar's channel to whatever the dashboard has asked of the
+	// session: it carries the pending control the caller should act on and acknowledge.
 	s.ok(w, r, http.StatusOK, updated)
 }
 
@@ -500,6 +506,36 @@ func (s *Server) closeSession(w http.ResponseWriter, r *http.Request, p domain.P
 		return
 	}
 	if err := s.store.CloseSession(r.Context(), session.ID); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.ok(w, r, http.StatusNoContent, nil)
+}
+
+// pauseSession and resumeSession record a lifecycle instruction for the session's sidecar
+// (DESIGN.md §7.3). The dashboard cannot reach into a teammate's terminal; it can only ask
+// the session's own sidecar, which picks the request up on its next heartbeat and
+// acknowledges it. Any project contributor may ask — the same floor that lets a member
+// offer work to a session lets them park one — and the request is idempotent.
+func (s *Server) pauseSession(w http.ResponseWriter, r *http.Request, p domain.Principal) {
+	s.controlSession(w, r, p, domain.ControlPause)
+}
+
+func (s *Server) resumeSession(w http.ResponseWriter, r *http.Request, p domain.Principal) {
+	s.controlSession(w, r, p, domain.ControlResume)
+}
+
+func (s *Server) controlSession(w http.ResponseWriter, r *http.Request, p domain.Principal, control domain.SessionControl) {
+	session, err := s.store.GetSession(r.Context(), r.PathValue("session"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if _, err := s.svc.Authorize(r.Context(), p, session.ProjectID, domain.RoleContributor); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if _, err := s.store.RequestSessionControl(r.Context(), session.ID, control); err != nil {
 		s.fail(w, r, err)
 		return
 	}

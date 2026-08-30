@@ -37,13 +37,15 @@ D.sessions = [
   mkSession('s2', 'rachel', 'codex', 'working', { model: 'gpt-5-codex', tier: 'T2', effort: 'medium', max: 'medium', task: 'T-2', machine: 'rachel-desktop', resolved: true }),
   mkSession('s3', 'you', 'claude', 'online_idle', { model: 'claude-sonnet-5', tier: 'T2', effort: 'medium', max: 'high', machine: 'your-mbp', resolved: true }),
   mkSession('s4', 'you', 'opencode', 'online_idle', { model: 'ollama/qwen3:27b', machine: 'your-mbp', resolved: false }),
+  mkSession('s5', 'rachel', 'codex', 'paused', { model: 'gpt-5-codex', tier: 'T2', effort: 'medium', max: 'medium', machine: 'rachel-desktop', resolved: true }),
+  mkSession('s6', 'alice', 'claude', 'paused', { model: 'claude-opus-5', tier: 'T4', effort: 'high', max: 'xhigh', machine: 'alice-mbp', resolved: true, pending: 'resume' }),
 ];
 
 function mkSession(id, principal, harness, state, o) {
   return {
     id, project_id: 'p-demo', principal, principal_id: 'pr-' + principal, kind: 'human', harness,
     harness_version: harness === 'claude' ? '2.1.0' : '', machine_id: o.machine || '', branch: o.branch || '',
-    visibility: 'team_summary', state, active_task_ref: o.task || '',
+    visibility: 'team_summary', state, pending_control: o.pending || '', active_task_ref: o.task || '',
     capabilities: { model: o.model, tier: o.tier, reasoning_effort: o.effort, max_reasoning_effort: o.max, resolved: !!o.resolved, roles: [] },
     started_at: iso(now - 3 * hour), last_heartbeat: iso(now - (id === 's2' ? 8 : 15) * 1000), expires_at: iso(now + min),
   };

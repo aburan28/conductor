@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/adamburan/conductor/internal/domain"
 	"github.com/adamburan/conductor/internal/localstate"
 )
 
@@ -24,6 +25,10 @@ import (
 // survived and reopens a terminal where it did not, using each harness's own
 // conversation-resume invocation. The transcript never passes through Conductor: every
 // harness reopens its own conversation from its own local state.
+//
+// The dashboard can do the same to a wrapped session from afar: it records a pause or resume
+// on the session, and the sidecar picks it up from its heartbeat response (see cmdWrap),
+// so a teammate can park an agent without a terminal on its machine.
 
 // pauseAction is one session's outcome, shared by both commands' --json output.
 type pauseAction struct {
@@ -42,7 +47,7 @@ func cmdPause(ctx context.Context, args []string) error {
 Finds every interactive Claude Code, Codex, and OpenCode session on this machine — launched
 through `+"`conductor wrap`"+` or bare — saves how to revive each one, and stops it with
 SIGSTOP. The terminals stay open, frozen mid-thought. Wrapped sessions keep heartbeating as
-waiting_for_input, so teammates see a parked session rather than a vanished one.
+paused, so teammates see a parked session rather than a vanished one.
 
 `+"`conductor resume`"+` wakes everything; terminals that were closed meanwhile are reopened.
 
@@ -378,6 +383,30 @@ func resumePlan(rec localstate.Record, wrapLive, harnessLive bool) string {
 	default:
 		return planReopen
 	}
+}
+
+// controlAction decides what a wrap sidecar should do with a control the server is holding
+// for it: apply it, or nothing when local reality already matches — an unmatched control is
+// confirmed rather than acted on, because the heartbeat's control_ack reports current
+// reality and clears the request. Kept pure for the same reason as the plans above.
+func controlAction(pending domain.SessionControl, paused bool) domain.SessionControl {
+	switch {
+	case pending == domain.ControlPause && !paused:
+		return domain.ControlPause
+	case pending == domain.ControlResume && paused:
+		return domain.ControlResume
+	default:
+		return ""
+	}
+}
+
+// controlAck is what the sidecar tells the server it is currently doing, so a pending
+// control clears as soon as local reality matches it.
+func controlAck(paused bool) domain.SessionControl {
+	if paused {
+		return domain.ControlPause
+	}
+	return domain.ControlResume
 }
 
 // relaunchArgv builds the command that revives a session whose terminal is gone. Wrapped

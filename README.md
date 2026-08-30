@@ -550,9 +550,14 @@ non-destructive:
    how to reopen a session, never a transcript. `CONDUCTOR_BACKUP=off` disables it.
 
 Wrapped sessions stay honest with the team while paused: the sidecar keeps heartbeating as
-`waiting_for_input`, so presence shows a parked session that is not offered work, rather than
-a mystery that stopped moving. A relaunched wrap registers a fresh session with the same
+`paused`, so presence shows a parked session that is not offered work, rather than a mystery
+that stopped moving. A relaunched wrap registers a fresh session with the same
 capability flags it was started with.
+
+The dashboard's Pause and Resume buttons reach a wrapped session through the same channel:
+the request rides the session's next heartbeat, the sidecar freezes or wakes its harness
+exactly as `conductor pause` would, and its acknowledgement clears the request — so a
+teammate can park an agent without a terminal on its machine.
 
 **VS Code:** integrated terminals are ordinary ptys, so pausing and in-place resume already
 work there. Reopening a *closed* session into VS Code needs the companion extension in

@@ -284,11 +284,19 @@ Presence states:
 - `planning`
 - `working`
 - `waiting_for_input`
+- `paused`
 - `blocked`
 - `reviewing`
 - `offline_grace`
 - `stale`
 - `closed`
+
+A session can be paused and resumed from the dashboard as well as from its own machine: the
+control plane records the request on the session, the session's sidecar picks it up from its
+heartbeat response, freezes or wakes its harness exactly as `conductor pause` would, and
+acknowledges on its next heartbeat, which clears the request. Until then the request is
+visible as pending, and a paused session keeps heartbeating so presence shows a parked
+session rather than a vanished one.
 
 The team view shows session metadata and work state, never raw conversation content.
 

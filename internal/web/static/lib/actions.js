@@ -194,3 +194,22 @@ export async function respondToOffer(ctx, assignment, accept) {
     return true;
   } catch (err) { toastError(err, 'Could not respond'); return false; }
 }
+
+// Pause/resume a session from the dashboard. The request rides the session's next
+// heartbeat, so it takes effect within ~20s; the pending state shows in the sessions
+// view until the sidecar acknowledges it.
+export async function pauseSession(ctx, session) {
+  return sessionControl(ctx, session, 'pause');
+}
+
+export async function resumeSession(ctx, session) {
+  return sessionControl(ctx, session, 'resume');
+}
+
+async function sessionControl(ctx, session, control) {
+  try {
+    await ctx.api.post(`/v1/sessions/${encodeURIComponent(session.id)}/${control}`, {});
+    toast(`${control === 'pause' ? 'Pause' : 'Resume'} requested for ${session.principal}'s ${session.harness}`, { detail: 'Picked up on the session\u2019s next heartbeat.' });
+    return true;
+  } catch (err) { toastError(err, `Could not ${control} session`); return false; }
+}

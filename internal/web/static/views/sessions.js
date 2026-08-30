@@ -4,7 +4,7 @@ import { card, empty, segmented } from '../components/ui.js';
 import { pill, chip, tierChip, effortChip } from '../components/pill.js';
 import { table } from '../components/table.js';
 import { relTime, fmtDate } from '../lib/format.js';
-import { assignTask, respondToOffer } from '../lib/actions.js';
+import { assignTask, pauseSession, respondToOffer, resumeSession } from '../lib/actions.js';
 import { openModal } from '../components/modal.js';
 
 export default defineView({
@@ -65,6 +65,9 @@ export default defineView({
         { key: 'last_heartbeat', label: 'Heartbeat', render: s => relTime(s.last_heartbeat), sort: s => new Date(s.last_heartbeat) },
         { key: 'started_at', label: 'Started', render: s => fmtDate(s.started_at), sort: s => new Date(s.started_at) },
         { key: 'actions', label: '', sortable: false, render: s => live(s) ? h('div', { class: 'btn-row' },
+          s.pending_control
+            ? h('button', { class: 'btn sm', disabled: true, title: 'Waiting for the session to pick it up on its next heartbeat' }, s.pending_control === 'pause' ? 'Pausing…' : 'Resuming…')
+            : h('button', { class: 'btn sm', onclick: async ev => { ev.stopPropagation(); if (await (s.state === 'paused' ? resumeSession(ctx, s) : pauseSession(ctx, s))) refresh(); } }, s.state === 'paused' ? 'Resume' : 'Pause'),
           h('button', { class: 'btn sm', onclick: ev => { ev.stopPropagation(); inbox(s); } }, 'Inbox', capOf(s.id).queued_offers ? h('span', { class: 'badge warn' }, capOf(s.id).queued_offers) : null),
           h('button', { class: 'btn sm', onclick: ev => { ev.stopPropagation(); offer(s); } }, 'Offer task')) : '' },
       ],
@@ -76,7 +79,7 @@ export default defineView({
       h('div', { class: 'toolbar' },
         segmented([{ value: 'live', label: 'Live' }, { value: 'closed', label: 'Closed' }, { value: 'all', label: 'All' }], state.filter, v => { state.filter = v; refresh(); }),
         h('div', { class: 'spacer' }), h('span', { class: 'muted' }, `${sessions.filter(live).length} live · ${sessions.length} total`)),
-      card({ flush: true, body: tbl, footer: 'A session advertises what it runs; the catalog decides what that is worth. A model the catalog does not know is still usable, just never offered tier-gated work.' }));
+      card({ flush: true, body: tbl, footer: 'A session advertises what it runs; the catalog decides what that is worth. A model the catalog does not know is still usable, just never offered tier-gated work. Pause and resume reach the session through its sidecar, on its next heartbeat.' }));
   },
 });
 

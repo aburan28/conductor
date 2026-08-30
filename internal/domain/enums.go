@@ -104,6 +104,7 @@ const (
 	SessionPlanning        SessionState = "planning"
 	SessionWorking         SessionState = "working"
 	SessionWaitingForInput SessionState = "waiting_for_input"
+	SessionPaused          SessionState = "paused"
 	SessionBlocked         SessionState = "blocked"
 	SessionReviewing       SessionState = "reviewing"
 	SessionOfflineGrace    SessionState = "offline_grace"
@@ -113,7 +114,8 @@ const (
 
 var AllSessionStates = []SessionState{
 	SessionOnlineIdle, SessionPlanning, SessionWorking, SessionWaitingForInput,
-	SessionBlocked, SessionReviewing, SessionOfflineGrace, SessionStale, SessionClosed,
+	SessionPaused, SessionBlocked, SessionReviewing, SessionOfflineGrace, SessionStale,
+	SessionClosed,
 }
 
 // Accepting reports whether a session in this state can be offered new work. A session that
@@ -127,6 +129,16 @@ func (s SessionState) Accepting() bool {
 		return false
 	}
 }
+
+// SessionControl is a lifecycle instruction held for a session's sidecar: pause freezes the
+// harness in place, resume wakes it. The dashboard records it; the sidecar picks it up on
+// its next heartbeat, acts, and acknowledges, at which point it clears.
+type SessionControl string
+
+const (
+	ControlPause  SessionControl = "pause"
+	ControlResume SessionControl = "resume"
+)
 
 // AssignmentState is the lifecycle of an offer of work to a specific session (DESIGN.md §7.7).
 //

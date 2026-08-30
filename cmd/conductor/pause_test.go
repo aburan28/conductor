@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/adamburan/conductor/internal/domain"
 	"github.com/adamburan/conductor/internal/localstate"
 )
 
@@ -59,5 +60,37 @@ func TestRelaunchArgv(t *testing.T) {
 				t.Errorf("fresh = %v, want %v", fresh, tc.wantFresh)
 			}
 		})
+	}
+}
+
+func TestControlAction(t *testing.T) {
+	cases := []struct {
+		name    string
+		pending domain.SessionControl
+		paused  bool
+		want    domain.SessionControl
+	}{
+		{"pause a running session", domain.ControlPause, false, domain.ControlPause},
+		{"resume a paused session", domain.ControlResume, true, domain.ControlResume},
+		{"pause already paused", domain.ControlPause, true, ""},
+		{"resume already running", domain.ControlResume, false, ""},
+		{"nothing pending", "", true, ""},
+		{"nothing pending at all", "", false, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := controlAction(tc.pending, tc.paused); got != tc.want {
+				t.Errorf("controlAction(%q, %v) = %q, want %q", tc.pending, tc.paused, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestControlAck(t *testing.T) {
+	if got := controlAck(true); got != domain.ControlPause {
+		t.Errorf("controlAck(true) = %q, want pause", got)
+	}
+	if got := controlAck(false); got != domain.ControlResume {
+		t.Errorf("controlAck(false) = %q, want resume", got)
 	}
 }
