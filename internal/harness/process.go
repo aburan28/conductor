@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -109,15 +110,22 @@ func (d *ProcessDriver) Start(ctx context.Context, spec RunSpec) (Handle, error)
 		cancel()
 		return nil, err
 	}
-	// stderr is drained but never stored. Harness stderr routinely contains prompt text and
-	// stack traces; it is owner-private by design (DESIGN.md §26.3).
+	// stderr is drained into the attempt log, never into events: the log lives inside the
+	// attempt's worktree and is removed with it, while events cross the privacy boundary
+	// to the control plane (DESIGN.md §26.3).
 	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	logFile, err := openAttemptLog(spec.Cwd)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
 
 	if err := cmd.Start(); err != nil {
+		logFile.Close()
 		cancel()
 		return nil, fmt.Errorf("start %s: %w", d.Command, err)
 	}
@@ -126,12 +134,26 @@ func (d *ProcessDriver) Start(ctx context.Context, spec RunSpec) (Handle, error)
 		cmd:     cmd,
 		cancel:  cancel,
 		events:  make(chan Event, 128),
+		log:     logFile,
 		started: time.Now(),
 	}
 
-	go drain(stderr)
+	go func() {
+		_, _ = io.Copy(logFile, stderr)
+	}()
 	go h.pump(stdout, d.Adapt)
 	return h, nil
+}
+
+// openAttemptLog creates <worktree>/.conductor/attempt.log, the combined harness output
+// the dashboard tails while the attempt runs. Append-only, so a replacement attempt that
+// adopts a recovered worktree keeps the earlier output.
+func openAttemptLog(worktree string) (*os.File, error) {
+	dir := filepath.Join(worktree, ".conductor")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	return os.OpenFile(filepath.Join(dir, "attempt.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 }
 
 // buildEnv assembles a minimal environment for the harness process.
@@ -169,21 +191,11 @@ func buildEnv(spec RunSpec) []string {
 	return append(env, spec.Env...)
 }
 
-// drain reads and discards a pipe. Not draining it would eventually block the child process
-// on a full pipe buffer; storing it would violate the privacy boundary.
-func drain(r io.Reader) {
-	buf := make([]byte, 4096)
-	for {
-		if _, err := r.Read(buf); err != nil {
-			return
-		}
-	}
-}
-
 type processHandle struct {
 	cmd     *exec.Cmd
 	cancel  context.CancelFunc
 	events  chan Event
+	log     *os.File
 	started time.Time
 
 	mu      sync.Mutex
@@ -196,9 +208,11 @@ type processHandle struct {
 
 func (h *processHandle) Events() <-chan Event { return h.events }
 
-// pump reads the harness's stream, accumulating measurements.
+// pump reads the harness's stream, mirroring every line into the attempt log and
+// accumulating measurements from the adapted events.
 func (h *processHandle) pump(stdout io.Reader, adapt Adapter) {
 	defer close(h.events)
+	defer h.log.Close()
 
 	scanner := bufio.NewScanner(stdout)
 	// Harness JSON events can be large (a single message with many content blocks). The
@@ -210,6 +224,7 @@ func (h *processHandle) pump(stdout io.Reader, adapt Adapter) {
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
+		_, _ = fmt.Fprintf(h.log, "%s\n", line)
 		if len(line) == 0 || adapt == nil {
 			continue
 		}

@@ -16,9 +16,10 @@ import (
 	"github.com/adamburan/conductor/internal/domain"
 )
 
-// The live task log stream (DESIGN.md §26.3's sanitized summaries, not harness output):
-// existing content first, then appends as they are written, then a final frame once the
-// attempt is terminal. Without an attempt, the stream says so instead of hanging silently.
+// The live task log stream: the harness's combined output, mirrored by the pump into the
+// attempt's worktree — existing content first, then appends as they are written, then a
+// final done frame once the attempt is terminal. Without an attempt, the stream says so
+// instead of hanging silently.
 
 // streamTaskLogs opens the SSE endpoint and returns its decoded frames.
 func streamTaskLogs(t *testing.T, h *harness, token, taskID string) (<-chan map[string]any, func()) {
@@ -88,14 +89,14 @@ func TestTaskLogsStreamAndEnd(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 
-	// Give the attempt a worktree with a log in it, the way the runner does, and walk the
+	// Give the attempt a worktree with a log in it, the way the pump does, and walk the
 	// attempt to running — the state at which its log is live.
 	worktree := t.TempDir()
-	runtimeDir := filepath.Join(worktree, ".conductor", "runtime")
-	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+	conductorDir := filepath.Join(worktree, ".conductor")
+	if err := os.MkdirAll(conductorDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	logPath := filepath.Join(runtimeDir, "attempt.log")
+	logPath := filepath.Join(conductorDir, "attempt.log")
 	if err := os.WriteFile(logPath, []byte("line one\nline two\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -145,16 +146,16 @@ func TestTaskLogsStreamAndEnd(t *testing.T) {
 		}
 	}
 
-	// A terminal attempt ends the stream with a final frame.
+	// A terminal attempt ends the stream with a final done frame.
 	if _, err := h.store.UpdateAttempt(context.Background(), started.AttemptID,
 		db.AttemptProgress{State: domain.AttemptSucceeded}); err != nil {
 		t.Fatalf("finish attempt: %v", err)
 	}
 	for {
 		frame := nextFrame(t, frames)
-		if frame["type"] == "end" {
+		if frame["type"] == "done" {
 			if frame["state"] != string(domain.AttemptSucceeded) {
-				t.Errorf("end state = %v, want succeeded", frame["state"])
+				t.Errorf("done state = %v, want succeeded", frame["state"])
 			}
 			break
 		}

@@ -37,7 +37,7 @@ export function table({ columns, rows, rowKey, onRow, empty, initialSort, footer
       body.append(h('tr', {}, h('td', { colspan: columns.length }, empty || h('div', { class: 'empty' }, 'Nothing here.'))));
     }
     for (const row of list) {
-      const tr = h('tr', { class: onRow ? 'clickable' : '', dataset: rowKey ? { key: rowKey(row) } : null, onclick: onRow ? () => onRow(row) : null },
+      const tr = h('tr', { class: onRow ? 'clickable' : '', dataset: rowKey ? { key: rowKey(row) } : null, onclick: onRow ? ev => onRow(row, ev) : null },
         columns.map(c => h('td', { class: (c.num ? 'num ' : '') + (c.mono ? 'mono' : '') }, c.render ? c.render(row) : row[c.key])));
       body.append(tr);
     }

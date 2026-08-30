@@ -18,7 +18,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/adamburan/conductor/internal/coord"
@@ -240,17 +239,6 @@ func (r *Runner) execute(ctx context.Context, snap coord.RunnerSnapshot, claim d
 		return err
 	}
 
-	// The activity log the dashboard's live stream tails. Opened after the route is
-	// recorded, because until then the control plane has no worktree path to find it at.
-	log, err := openAttemptLog(ws.Path)
-	if err != nil {
-		return fmt.Errorf("open attempt log: %w", err)
-	}
-	defer log.close()
-	log.event("workspace ready: branch=%s base=%s", ws.Branch, ws.BaseSHA)
-	log.event("routed: model=%s harness=%s effort=%s tier=%s",
-		decision.Model, decision.Harness, decision.Effort, decision.Tier)
-
 	keepTree := r.opts.KeepFailedWorktrees
 	defer func() {
 		if err := r.trees.Remove(context.WithoutCancel(ctx), ws.Path, keepTree); err != nil {
@@ -277,7 +265,6 @@ func (r *Runner) execute(ctx context.Context, snap coord.RunnerSnapshot, claim d
 		domain.AttemptStartingHarness, "", "", false); err != nil {
 		return err
 	}
-	log.event("launching harness")
 
 	spec := harness.RunSpec{
 		TaskRef: task.Ref, TaskCardPath: cardPath, Instruction: brief.Instruction,
@@ -300,14 +287,13 @@ func (r *Runner) execute(ctx context.Context, snap coord.RunnerSnapshot, claim d
 		domain.AttemptRunning, ws.Branch, ws.Path, true); err != nil {
 		return err
 	}
-	log.event("attempt running")
 
 	// --- Supervise ----------------------------------------------------------
 	// The supervision loop is bound to its own context so it stops when the harness exits.
 	// Without that it would sit on its ticker forever and the runner would never finish the
 	// attempt it is waiting on.
 	superviseCtx, stopSupervision := context.WithCancel(ctx)
-	supervision := r.supervise(superviseCtx, project, task, claim, ws, handle, log)
+	supervision := r.supervise(superviseCtx, project, task, claim, ws, handle)
 
 	result, waitErr := handle.Wait(ctx)
 	stopSupervision()
@@ -337,7 +323,7 @@ func (r *Runner) execute(ctx context.Context, snap coord.RunnerSnapshot, claim d
 		}
 	}
 
-	validation := r.runChecks(ctx, ws.Path, project.Config.RequiredChecks, log)
+	validation := r.runChecks(ctx, ws.Path, project.Config.RequiredChecks)
 
 	outcome := "succeeded"
 	failureClass := result.FailureClass
@@ -355,7 +341,6 @@ func (r *Runner) execute(ctx context.Context, snap coord.RunnerSnapshot, claim d
 	if outcome != "succeeded" {
 		keepTree = true
 	}
-	log.event("attempt finished: outcome=%s changed_files=%d", outcome, len(changed))
 
 	manifest := domain.EvidenceManifest{
 		BaseSHA: ws.BaseSHA, CommitSHA: commitSHA,
@@ -391,7 +376,6 @@ func (r *Runner) supervise(
 	claim db.ClaimResult,
 	ws worktree.Workspace,
 	handle harness.Handle,
-	log *attemptLog,
 ) <-chan struct{} {
 	done := make(chan struct{})
 
@@ -428,7 +412,6 @@ func (r *Runner) supervise(
 				if ev.Turns > turns {
 					turns = ev.Turns
 				}
-				log.harnessEvent(ev)
 
 			case <-ticker.C:
 				changed, _, err := r.trees.Status(ctx, ws.Path, ws.BaseSHA)
@@ -654,65 +637,6 @@ func writeCard(worktreePath, taskRef, rendered string) (string, error) {
 	return path, nil
 }
 
-// attemptLog is the sanitized activity log a running attempt appends to in its worktree, at
-// .conductor/runtime/attempt.log — the file the dashboard's live log stream tails.
-//
-// It records the same metadata the control plane already sees: lifecycle transitions, the
-// routed model, tool names, turn counts, check exit codes. It must never record harness
-// output, which is owner-private by design (DESIGN.md §26.3); the events that reach it come
-// through the harness adapters, which have no text field to leak.
-type attemptLog struct {
-	mu   sync.Mutex
-	file *os.File
-}
-
-func openAttemptLog(worktreePath string) (*attemptLog, error) {
-	dir := filepath.Join(worktreePath, ".conductor", "runtime")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, err
-	}
-	f, err := os.OpenFile(filepath.Join(dir, "attempt.log"),
-		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return nil, err
-	}
-	return &attemptLog{file: f}, nil
-}
-
-// event appends one timestamped line. A write failure is dropped, not fatal: the log is
-// diagnostic, and failing an attempt over it would trade real work for a transcript.
-func (l *attemptLog) event(format string, args ...any) {
-	if l == nil {
-		return
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	_, _ = fmt.Fprintf(l.file, time.Now().UTC().Format(time.RFC3339)+" "+format+"\n", args...)
-}
-
-// harnessEvent records one sanitized harness event, where there is one worth a line.
-func (l *attemptLog) harnessEvent(ev harness.Event) {
-	switch ev.Kind {
-	case harness.EventToolUse:
-		l.event("tool: %s", ev.Tool)
-	case harness.EventTurn:
-		l.event("turn %d (%d in / %d out tokens)", ev.Turns, ev.TokensIn, ev.TokensOut)
-	case harness.EventError:
-		l.event("harness error: %s", ev.Note)
-	case harness.EventFinished:
-		l.event("harness finished (%d turns)", ev.Turns)
-	}
-}
-
-func (l *attemptLog) close() {
-	if l == nil {
-		return
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	_ = l.file.Close()
-}
-
 // writeMCPConfig drops an MCP server config into the worktree so the agent can call the
 // coordination tools from inside its own session.
 //
@@ -759,7 +683,7 @@ func (r *Runner) writeMCPConfig(dir string, project domain.Project, fence domain
 // The runner runs them, not the agent. That is the difference between evidence and a claim:
 // a model saying "tests pass" is not accepted without a runner-observed exit code
 // (DESIGN.md §25.5).
-func (r *Runner) runChecks(ctx context.Context, dir string, checks []string, log *attemptLog) []domain.ValidationResult {
+func (r *Runner) runChecks(ctx context.Context, dir string, checks []string) []domain.ValidationResult {
 	var out []domain.ValidationResult
 	for i, check := range checks {
 		start := time.Now()
@@ -778,8 +702,6 @@ func (r *Runner) runChecks(ctx context.Context, dir string, checks []string, log
 				exitCode = exitErr.ExitCode()
 			}
 		}
-		log.event("check %q exited %d in %s", check, exitCode,
-			time.Since(start).Round(time.Millisecond).String())
 		out = append(out, domain.ValidationResult{
 			CommandID:  fmt.Sprintf("check-%d", i),
 			Command:    check,

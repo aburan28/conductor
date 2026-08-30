@@ -77,8 +77,7 @@ export default defineView({
 
       const exportTab = () => h('div', { class: 'stack' },
         h('p', { class: 'muted' }, 'Downloads the same snapshot as JSON in the browser — nothing is written on the server.'),
-        h('a', { class: 'btn primary', href: `/v1/sessions/${id}/export${ctx.api.query({ token: ctx.api.token })}`,
-          download: `session-${s.id}.json` }, 'Download JSON'));
+        h('button', { class: 'btn primary', onclick: () => downloadSession(ctx, s) }, 'Download JSON'));
 
       const resumeTab = () => h('div', { class: 'stack' },
         h('div', { class: 'chips' }, pill(s.state),
@@ -131,6 +130,7 @@ export default defineView({
           h('button', { class: 'btn sm', onclick: ev => { ev.stopPropagation(); manage(s); } }, 'Manage')) },
       ],
       rows: list, initialSort: { key: 'last_heartbeat', dir: 'desc' },
+      onRow: (s, ev) => { if (ev.target.closest('a, button')) return; manage(s); },
       empty: empty(state.filter === 'live' ? 'No live sessions.' : 'No sessions match.', 'conductor wrap claude --model claude-opus-5 --effort high'),
     });
 
@@ -152,6 +152,26 @@ async function assignTaskDirect(ctx, ref, sessionID) {
     const { toastError } = await import('../components/toast.js');
     toastError(err, 'Offer failed');
     return null;
+  }
+}
+
+// The export tab's download: fetch with the same bearer header every api.js call uses,
+// then hand the blob to a throwaway anchor. The token never rides the query string.
+async function downloadSession(ctx, session) {
+  try {
+    const res = await fetch(`/v1/sessions/${encodeURIComponent(session.id)}/export`, {
+      headers: { Authorization: 'Bearer ' + ctx.api.token, Accept: 'application/json' },
+    });
+    if (!res.ok) throw new Error(`export failed: ${res.status}`);
+    const url = URL.createObjectURL(await res.blob());
+    const a = h('a', { href: url, download: `session-${session.id}.json` });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast(`Snapshot downloaded for ${session.principal}`);
+  } catch (err) {
+    toastError(err, 'Download failed');
   }
 }
 

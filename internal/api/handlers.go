@@ -1540,14 +1540,16 @@ const logTailBytes = 256 << 10
 // logReadMax bounds one poll's read, so a fast-growing file cannot make one frame huge.
 const logReadMax = 256 << 10
 
-// taskLogs streams the current attempt's activity log over SSE: existing content first,
-// then appends as the runner writes them, then a final frame once the attempt is terminal.
+// taskLogs streams the current attempt's log over SSE: existing content first, then
+// appends as the harness writes them, then a final done frame once the attempt is
+// terminal.
 //
-// The log is the sanitized record internal/runner keeps beside the attempt's worktree (at
-// .conductor/runtime/attempt.log) — lifecycle transitions, tool names, turns, checks; never
-// harness output, which is owner-private (DESIGN.md §26.3). It is readable where the control
-// plane shares a machine with the runner (§28.1); elsewhere the stream says no log is
-// available and closes when the attempt ends.
+// The log is the harness subprocess's combined output, mirrored by the pump into the
+// attempt's worktree (.conductor/attempt.log). It is readable where the control plane
+// shares a machine with the runner (DESIGN.md §28.1); elsewhere the stream says no log
+// is available and closes when the attempt ends. The file lives and dies with the
+// worktree — removed on success, kept with the tree on failure (§27.2) — which is its
+// retention policy.
 func (s *Server) taskLogs(w http.ResponseWriter, r *http.Request, p domain.Principal) {
 	task, _, err := s.taskFor(r, p, domain.RoleObserver)
 	if err != nil {
@@ -1595,8 +1597,8 @@ func (s *Server) taskLogs(w http.ResponseWriter, r *http.Request, p domain.Princ
 			send(map[string]any{"type": "waiting", "reason": reason})
 		}
 	}
-	sendEnd := func(state string) {
-		send(map[string]any{"type": "end", "state": state})
+	sendDone := func(state string) {
+		send(map[string]any{"type": "done", "state": state})
 	}
 
 	for {
@@ -1626,7 +1628,7 @@ func (s *Server) taskLogs(w http.ResponseWriter, r *http.Request, p domain.Princ
 					list, lerr := s.store.ListAttempts(r.Context(), task.ID)
 					if lerr != nil || len(list) == 0 {
 						if fresh, terr := s.store.GetTask(r.Context(), task.ID); terr == nil && fresh.Status.IsTerminal() {
-							sendEnd(string(fresh.Status))
+							sendDone(string(fresh.Status))
 							return
 						}
 						setWaiting("no attempt yet")
@@ -1639,7 +1641,7 @@ func (s *Server) taskLogs(w http.ResponseWriter, r *http.Request, p domain.Princ
 
 			if attempt.WorktreePath == "" {
 				if attempt.State.IsTerminal() {
-					sendEnd(string(attempt.State))
+					sendDone(string(attempt.State))
 					return
 				}
 				setWaiting("attempt is " + string(attempt.State) + "; no workspace yet")
@@ -1649,7 +1651,7 @@ func (s *Server) taskLogs(w http.ResponseWriter, r *http.Request, p domain.Princ
 			info, err := os.Stat(attemptLogPath(attempt))
 			if err != nil {
 				if attempt.State.IsTerminal() {
-					sendEnd(string(attempt.State))
+					sendDone(string(attempt.State))
 					return
 				}
 				setWaiting("no log yet")
@@ -1679,17 +1681,17 @@ func (s *Server) taskLogs(w http.ResponseWriter, r *http.Request, p domain.Princ
 				}
 			}
 			if attempt.State.IsTerminal() {
-				sendEnd(string(attempt.State))
+				sendDone(string(attempt.State))
 				return
 			}
 		}
 	}
 }
 
-// attemptLogPath is where the runner writes an attempt's activity log, inside the worktree
-// the attempt runs in.
+// attemptLogPath is where the harness pump writes an attempt's combined output,
+// inside the worktree the attempt runs in.
 func attemptLogPath(a domain.Attempt) string {
-	return filepath.Join(a.WorktreePath, ".conductor", "runtime", "attempt.log")
+	return filepath.Join(a.WorktreePath, ".conductor", "attempt.log")
 }
 
 func attemptLogReadAt(a domain.Attempt, buf []byte, offset int64) (int, error) {

@@ -8,6 +8,7 @@
 .conductor/runtime/
 .conductor/generated/
 .conductor/snapshots/
+.conductor/attempt.log
 .conductor/.bootstrap-token
 /.claude/worktrees/
 

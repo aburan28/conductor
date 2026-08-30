@@ -89,7 +89,7 @@ export function openTaskDrawer(ref, ctx, { onClose } = {}) {
         onEvent: ev => {
           if (ev.type === 'log') { append(ev.text || ''); stateEl.textContent = ''; }
           else if (ev.type === 'waiting') stateEl.textContent = ev.reason || 'waiting…';
-          else if (ev.type === 'end') { stateEl.textContent = ev.state ? 'attempt ' + ev.state : 'ended'; halt(); }
+          else if (ev.type === 'done') { stateEl.textContent = ev.state ? 'attempt ' + ev.state : 'ended'; halt(); }
         },
         onState: st => { if (st !== 'live' && stop) stateEl.textContent = st + '…'; },
       });
@@ -104,7 +104,7 @@ export function openTaskDrawer(ref, ctx, { onClose } = {}) {
       title: 'Attempt log', flush: true,
       actions: h('div', { class: 'btn-row' }, stateEl, btn),
       body: pane,
-      footer: 'Metadata only — lifecycle, tools, turns, checks. Harness output is owner-private and never reaches the control plane.',
+      footer: 'Raw harness output, tailed from the attempt worktree (.conductor/attempt.log) while the attempt runs. The tree — and the log with it — is removed when the attempt succeeds.',
     });
   }
 

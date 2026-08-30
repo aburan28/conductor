@@ -26,10 +26,14 @@ type savedSession struct {
 
 // sessionSnapshotFor resolves the session by id and gathers its snapshot for the caller.
 // Reading is the Observer floor, the same one the sessions export reads at: a snapshot is
-// that export for one session, not a way around its switches.
+// that export for one session, not a way around its switches. A non-UUID id is a lookup
+// miss, not a server fault — the same convention taskFor applies.
 func (s *Server) sessionSnapshotFor(r *http.Request, p domain.Principal) (domain.Session, coord.SessionSnapshot, error) {
 	session, err := s.store.GetSession(r.Context(), r.PathValue("session"))
 	if err != nil {
+		if isBadUUID(err) {
+			err = domain.ErrNotFound
+		}
 		return domain.Session{}, coord.SessionSnapshot{}, err
 	}
 	caller, err := s.svc.Authorize(r.Context(), p, session.ProjectID, domain.RoleObserver)

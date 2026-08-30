@@ -153,3 +153,17 @@ func TestSessionExportHeadersAndBody(t *testing.T) {
 		t.Error("export omits the assignments key entirely")
 	}
 }
+
+// An unknown session id is a miss, not a fault — and certainly not a 500 from a failed
+// UUID cast or a missing file.
+func TestSessionSnapshotUnknownIDIs404(t *testing.T) {
+	h := newHarness(t)
+	for _, id := range []string{"not-a-uuid", "00000000-0000-0000-0000-000000000000"} {
+		if code, body := h.do(h.aliceTok, http.MethodPost, "/v1/sessions/"+id+"/save", nil); code != http.StatusNotFound {
+			t.Errorf("save %s = %d, want 404\n%s", id, code, body)
+		}
+		if code, body := h.do(h.aliceTok, http.MethodGet, "/v1/sessions/"+id+"/export", nil); code != http.StatusNotFound {
+			t.Errorf("export %s = %d, want 404\n%s", id, code, body)
+		}
+	}
+}
