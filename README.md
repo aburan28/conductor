@@ -644,8 +644,9 @@ Implemented and exercised by tests:
   handoff bundles, portable Markdown task cards.
 - Member and token administration, TLS, a loopback-by-default bind, and auth throttling.
 - Daemon-to-daemon peering over mutual TLS: a private CA names every control plane in a
-  mesh, each daemon dials its configured peers and keeps a live link table, and
-  `conductor peers` reports it. Connectivity and identity only — no data is replicated
+  mesh, each daemon dials its configured peers, discovers the rest from mesh
+  advertisements, and keeps a live link table, and `conductor peers` reports it.
+  Connectivity and identity only — no data is replicated
   across the link.
 - A runner that reaches the control plane over HTTP and holds no database credential
   (§28.2), alongside the in-process backend for single-host use (§28.1).
@@ -748,6 +749,17 @@ identity that answered; project members read that link table with `conductor pee
 tasks, scopes, or events cross the link — the database remains each daemon's own source
 of truth.
 
+**Auto-discovery.** Every probe response also advertises everything the answering daemon
+can dial — itself and its known peers — and a daemon with discovery on (the default,
+`--peer-discovery=false` to opt out) merges those addresses into its probe set. So a mesh
+converges from a single seed: configure one peer and learn the rest. An advertisement is
+only an address hint — membership is still gated by the mesh CA at handshake, so a
+discovered address that cannot present a CA-signed certificate stays a down link, and a
+discovered peer adopts the name its certificate proves. Discovery is capped (128 adopted
+addresses) so a compromised member cannot turn the mesh into a dialer of arbitrary
+hosts, and `conductor peers` shows the source of every link: `config` or
+`discovered via <peer>`.
+
 ```bash
 # once per mesh: a CA, then one certificate per daemon
 scripts/gen-peer-certs.sh laptop desktop
@@ -763,7 +775,7 @@ conductord --addr 0.0.0.0:8443 \
   --peer-cert .conductor/certs/desktop/cert.pem --peer-key .conductor/certs/desktop/key.pem \
   --peer laptop=https://laptop.example.com:8443
 
-conductor peers   # PEER ADDRESS STATE RTT LAST CHECK
+conductor peers   # PEER ADDRESS STATE RTT SOURCE LAST CHECK
 ```
 
 Env equivalents: `CONDUCTOR_PEERS=name=url,…` (comma-separated) plus

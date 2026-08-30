@@ -161,6 +161,19 @@ func TestPeerInfoRequiresMeshCertificate(t *testing.T) {
 	if info.Name != "alpha" {
 		t.Fatalf("expected the answering daemon's name (alpha), got %q", info.Name)
 	}
+
+	// The same answer carries the daemon's mesh advertisement: itself and everyone it
+	// knows how to dial, so a discovery-enabled peer can learn members from it.
+	if len(info.Mesh) != 2 {
+		t.Fatalf("expected the advertisement to carry self + beta, got %+v", info.Mesh)
+	}
+	byName := map[string]string{}
+	for _, p := range info.Mesh {
+		byName[p.Name] = p.URL
+	}
+	if byName["alpha"] != "https://127.0.0.1:1" || byName["beta"] != "https://127.0.0.1:18444" {
+		t.Fatalf("advertisement should name self and beta with their URLs, got %+v", info.Mesh)
+	}
 }
 
 func TestListPeersReportsLinkTable(t *testing.T) {

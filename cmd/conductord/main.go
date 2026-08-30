@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -71,6 +72,8 @@ func serve(args []string) error {
 		"this daemon's mesh certificate (PEM), presented to peers and served as the TLS certificate when --tls-cert is absent")
 	peerKey := fs.String("peer-key", envOr("CONDUCTOR_PEER_KEY", ""),
 		"this daemon's mesh private key")
+	peerDiscovery := fs.Bool("peer-discovery", envBool("CONDUCTOR_PEER_DISCOVERY", true),
+		"learn mesh members from peer advertisements over the mTLS links (membership is still gated by the mesh CA; --peer-discovery=false restores a static roster)")
 	verbose := fs.Bool("v", false, "verbose logging")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, `conductord — Conductor control plane
@@ -192,7 +195,7 @@ Binding 127.0.0.1 needs none of these.`, *addr)
 			mgr, err := peer.New(peer.Options{
 				Peers: meshPeers, SelfURL: selfEndpoint,
 				CAPath: *peerCA, CertPath: *peerCert, KeyPath: *peerKey,
-				Logger: logger,
+				Logger: logger, Discovery: *peerDiscovery,
 			})
 			if err != nil {
 				return err
@@ -464,6 +467,19 @@ func envOr(name, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// envBool reads a boolean environment variable, falling back when unset or unparseable.
+func envBool(name string, fallback bool) bool {
+	v := os.Getenv(name)
+	if v == "" {
+		return fallback
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return fallback
+	}
+	return b
 }
 
 // peerFlags collects repeated --peer name=url flags.

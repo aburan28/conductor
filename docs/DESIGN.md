@@ -2112,8 +2112,19 @@ state is a projection, like presence: recomputed on every probe, never a source 
 Deliberately not replicated across the link: tasks, scopes, reservations, events, or any
 project data. A mesh certificate names a daemon, not a principal, so peer endpoints are a
 separate authentication channel from membership, and no peer handler may read project
-data without a resolved member. Cross-daemon coordination (federated conflict detection,
-work hand-off between meshes) is a future extension with this layer as its foundation.
+data without a resolved member.
+
+The mesh **discovers its own members**: a probe response advertises everything the
+answering daemon can dial (itself and its known peers), and a daemon with discovery
+enabled merges advertised addresses into its probe set, so a mesh converges from a
+single configured seed. Discovery widens dialing only — an advertisement is an address
+hint, never an instruction. Membership is still gated by the mesh CA at handshake (a
+discovered address without a CA-signed certificate is a down link, never a member), a
+discovered link adopts the name its certificate proves, adoption is capped so a
+compromised member cannot make the mesh dial arbitrary hosts, and every link records
+whether it came from configuration or discovery. Cross-daemon coordination (federated
+conflict detection, work hand-off between meshes) remains a future extension with this
+layer as its foundation.
 
 ---
 

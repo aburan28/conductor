@@ -36,11 +36,28 @@ func (s *Server) peerAuth(next func(http.ResponseWriter, *http.Request, string))
 	}
 }
 
-// peerInfo answers GET /v1/peer/info: who this daemon is. The caller's name is not echoed
-// back — a peer asking "who are you" wants this daemon's mesh identity, not its own.
-// It is what a peer link's probe consumes, so it stays cheap and side-effect free.
+// peerInfo answers GET /v1/peer/info: who this daemon is, and everything it can dial in
+// the mesh — itself and its known peers — so a peer running discovery can learn members
+// it was not configured with. The caller's name is not echoed back — a peer asking "who
+// are you" wants this daemon's mesh identity, not its own. It is what a peer link's probe
+// consumes, so it stays cheap and side-effect free, and it never carries more than
+// member names and addresses.
 func (s *Server) peerInfo(w http.ResponseWriter, r *http.Request, _ string) {
-	s.ok(w, r, http.StatusOK, peer.Info{Name: s.peerName, Time: time.Now()})
+	info := peer.Info{Name: s.peerName, Time: time.Now()}
+	if s.peerStatus != nil {
+		mesh := make([]peer.Peer, 0, 4)
+		if s.self != "" {
+			mesh = append(mesh, peer.Peer{Name: s.peerName, URL: s.self})
+		}
+		for _, l := range s.peerStatus() {
+			if s.self != "" && l.URL == s.self {
+				continue // already advertised as ourselves, above
+			}
+			mesh = append(mesh, peer.Peer{Name: l.Name, URL: l.URL})
+		}
+		info.Mesh = mesh
+	}
+	s.ok(w, r, http.StatusOK, info)
 }
 
 // listPeers answers GET /v1/peers for project members: the mesh link table.

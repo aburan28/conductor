@@ -7,6 +7,13 @@
 // projection, like presence: in-memory, recomputed on every probe, and never a source of
 // truth. Nothing is replicated across the link; this package is connectivity and
 // identity, and leaves coordination data where it lives (DESIGN.md §28).
+//
+// With discovery enabled, a daemon also learns peers it was not configured with: every
+// probe of /v1/peer/info carries the responder's view of the mesh, and advertised
+// addresses join the probe set. An advertisement is only an address hint — a discovered
+// daemon must still present a certificate chained to the mesh CA before its link counts
+// as up, and a discovered link adopts the name its certificate proves. Discovery widens
+// dialing; the CA still gates membership.
 package peer
 
 import (
@@ -32,12 +39,17 @@ type Peer struct {
 }
 
 // Info is what a daemon reports about itself over the peer link (GET /v1/peer/info).
-// It is deliberately just identity: a mesh certificate names a daemon, not a project
+// It is deliberately identity-shaped: a mesh certificate names a daemon, not a project
 // member, and no handler may read project data without a resolved membership. Peering is
 // connectivity and identity, not a side door past that rule.
 type Info struct {
 	Name string    `json:"name"`
 	Time time.Time `json:"time"`
+	// Mesh is everything this daemon can dial in the mesh — its configured and discovered
+	// peers, plus its own endpoint — so a probing peer can discover members it was not
+	// configured with. Names and addresses only; a discovered address still has to pass
+	// the mesh CA at handshake before it is anything but a down link.
+	Mesh []Peer `json:"mesh,omitempty"`
 }
 
 // LinkState is the reachability of one configured peer.
@@ -49,6 +61,18 @@ const (
 	StateSelf LinkState = "self" // this daemon's own endpoint, listed for completeness
 )
 
+// How a link became known. A configured link came from the operator's --peer list; a
+// discovered link was advertised by another peer over the mesh.
+const (
+	SourceConfig     = "config"
+	SourceDiscovered = "discovered"
+)
+
+// maxDiscoveredPeers bounds how many advertised addresses a daemon adopts. The mesh CA
+// bounds who can join the mesh; this bounds how much a compromised member can make the
+// mesh dial.
+const maxDiscoveredPeers = 128
+
 // LinkStatus is one peer's current link state, safe to serialize to a project member.
 type LinkStatus struct {
 	Name      string    `json:"name"`
@@ -58,6 +82,11 @@ type LinkStatus struct {
 	LastCheck time.Time `json:"last_check"`
 	LastError string    `json:"last_error,omitempty"`
 	Remote    *Info     `json:"remote,omitempty"`
+	// Source is how this link became known: "config" or "discovered" (empty for links
+	// recorded before the field existed).
+	Source string `json:"source,omitempty"`
+	// Via names the peer that advertised a discovered link.
+	Via string `json:"via,omitempty"`
 }
 
 // Options configures a Manager.
@@ -70,6 +99,11 @@ type Options struct {
 	Tick     time.Duration // probe interval; defaults to 10s
 	Timeout  time.Duration // per-probe timeout; defaults to 5s
 	Logger   *slog.Logger
+	// Discovery enables learning peers from /v1/peer/info advertisements: what a daemon
+	// can see becomes the union of what its links advertise. Discovery only adds
+	// candidate addresses — membership is still gated by the mesh CA at handshake, and a
+	// discovered link that cannot present a CA-signed certificate stays down.
+	Discovery bool
 }
 
 // Manager dials the configured peers on a ticker and records link state.
@@ -160,7 +194,7 @@ func New(opts Options) (*Manager, error) {
 			// certificate's identity on an unauthenticated wire.
 			return nil, fmt.Errorf("peer %s: URL must be https://host:port, got %q", p.Name, p.URL)
 		}
-		links = append(links, LinkStatus{Name: p.Name, URL: strings.TrimRight(p.URL, "/"), State: StateDown})
+		links = append(links, LinkStatus{Name: p.Name, URL: strings.TrimRight(p.URL, "/"), State: StateDown, Source: SourceConfig})
 	}
 
 	return &Manager{
@@ -197,12 +231,22 @@ func (m *Manager) Run(ctx context.Context) error {
 	}
 }
 
-// Probe checks every configured peer concurrently and records the result. A peer whose
-// URL is this daemon's own endpoint is marked self without dialing.
+// advertisement is one peer's view of the mesh, as told to us over its link.
+type advertisement struct {
+	via  string // the peer that advertised it, by its certified name
+	mesh []Peer
+}
+
+// Probe checks every known peer concurrently and records the result; when discovery is
+// on, the members those peers advertised are merged afterwards, so the next probe dials
+// them too. A peer whose URL is this daemon's own endpoint is marked self without
+// dialing.
 func (m *Manager) Probe(ctx context.Context) {
 	var wg sync.WaitGroup
-	results := make([]LinkStatus, len(m.links))
-	for i, l := range m.snapshotLocked() {
+	links := m.snapshotLocked()
+	results := make([]LinkStatus, len(links))
+	ads := make([]advertisement, len(links))
+	for i, l := range links {
 		results[i] = l
 		if m.selfURL != "" && strings.TrimRight(l.URL, "/") == m.selfURL {
 			results[i].State = StateSelf
@@ -214,14 +258,19 @@ func (m *Manager) Probe(ctx context.Context) {
 		wg.Add(1)
 		go func(i int, l LinkStatus) {
 			defer wg.Done()
-			results[i] = m.probeOne(ctx, l)
+			results[i], ads[i] = m.probeOne(ctx, l)
 		}(i, l)
 	}
 	wg.Wait()
 
+	// Replace, then merge: merging into the pre-probe snapshot would race the writeback.
 	m.mu.Lock()
 	m.links = results
 	m.mu.Unlock()
+
+	for _, ad := range ads {
+		m.mergeDiscovered(ad)
+	}
 }
 
 // Snapshot returns a copy of the current link states, in configured order.
@@ -246,7 +295,7 @@ func (m *Manager) snapshotLocked() []LinkStatus {
 	return out
 }
 
-func (m *Manager) probeOne(ctx context.Context, l LinkStatus) LinkStatus {
+func (m *Manager) probeOne(ctx context.Context, l LinkStatus) (LinkStatus, advertisement) {
 	l.LastCheck = time.Now()
 	l.State = StateDown
 	l.Remote = nil
@@ -255,31 +304,83 @@ func (m *Manager) probeOne(ctx context.Context, l LinkStatus) LinkStatus {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, l.URL+"/v1/peer/info", nil)
 	if err != nil {
 		l.LastError = err.Error()
-		return l
+		return l, advertisement{}
 	}
 	start := time.Now()
 	resp, err := m.client.Do(req)
 	l.RTTMillis = time.Since(start).Milliseconds()
 	if err != nil {
 		l.LastError = err.Error()
-		return l
+		return l, advertisement{}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		l.LastError = fmt.Sprintf("peer answered %s for /v1/peer/info", resp.Status)
-		return l
+		return l, advertisement{}
 	}
 	var info Info
 	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
 		l.LastError = fmt.Sprintf("unintelligible peer info: %v", err)
-		return l
+		return l, advertisement{}
 	}
 	// The certificate answered, but under a different name than the operator configured.
 	// Report it under the configured name and surface the mismatch rather than hide it.
+	// A discovered link has no operator to contradict — the certificate IS the identity
+	// there — so it adopts the name the daemon proved.
 	if info.Name != "" && info.Name != l.Name {
-		l.LastError = fmt.Sprintf("peer answered as %q, configured as %q", info.Name, l.Name)
+		if l.Source == SourceDiscovered {
+			l.Name = info.Name
+		} else {
+			l.LastError = fmt.Sprintf("peer answered as %q, configured as %q", info.Name, l.Name)
+		}
 	}
 	l.State = StateUp
 	l.Remote = &info
-	return l
+	var ad advertisement
+	if m.opts.Discovery {
+		ad = advertisement{via: l.Name, mesh: info.Mesh}
+	}
+	return l, ad
+}
+
+// mergeDiscovered adopts advertised mesh members as candidate links. An advertisement is
+// an address hint, never an instruction: nameless entries, non-https URLs, URLs already
+// known, and our own endpoint are ignored, and the operator's configuration always wins
+// on a collision (dedup is by URL). The cap keeps a compromised member from turning the
+// mesh into a dialer of arbitrary addresses.
+func (m *Manager) mergeDiscovered(ad advertisement) {
+	if len(ad.mesh) == 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	known := make(map[string]bool, len(m.links))
+	discovered := 0
+	for _, l := range m.links {
+		known[l.URL] = true
+		if l.Source == SourceDiscovered {
+			discovered++
+		}
+	}
+	for _, p := range ad.mesh {
+		u := strings.TrimRight(p.URL, "/")
+		if p.Name == "" || u == "" || known[u] || u == m.selfURL {
+			continue
+		}
+		if pu, err := url.Parse(u); err != nil || pu.Scheme != "https" || pu.Host == "" {
+			continue
+		}
+		if discovered >= maxDiscoveredPeers {
+			m.opts.Logger.Warn("peer discovery cap reached; ignoring advertised peer",
+				"url", u, "via", ad.via)
+			continue
+		}
+		known[u] = true
+		discovered++
+		m.links = append(m.links, LinkStatus{
+			Name: p.Name, URL: u, State: StateDown,
+			Source: SourceDiscovered, Via: ad.via,
+		})
+	}
 }

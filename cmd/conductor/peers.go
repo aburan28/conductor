@@ -37,20 +37,28 @@ func cmdPeers(ctx context.Context, args []string) error {
 		fmt.Println("--peer-key to join the mesh (see scripts/gen-peer-certs.sh).")
 		return nil
 	}
-	fmt.Printf("%-14s %-32s %-5s %6s  %s\n", "PEER", "ADDRESS", "STATE", "RTT", "LAST CHECK")
+	fmt.Printf("%-14s %-32s %-5s %6s %-10s  %s\n", "PEER", "ADDRESS", "STATE", "RTT", "SOURCE", "LAST CHECK")
 	for _, p := range body.Peers {
 		rtt := "-"
 		if p.State == peer.StateUp {
 			rtt = fmt.Sprintf("%dms", p.RTTMillis)
 		}
-		fmt.Printf("%-14s %-32s %-5s %6s  %s\n",
-			p.Name, p.URL, p.State, rtt, shortAgo(p.LastCheck))
+		source := p.Source
+		if source == "" {
+			source = peer.SourceConfig
+		}
+		if p.Via != "" {
+			source += " via " + p.Via
+		}
+		fmt.Printf("%-14s %-32s %-5s %6s %-10s  %s\n",
+			p.Name, p.URL, p.State, rtt, source, shortAgo(p.LastCheck))
 		if p.LastError != "" {
 			fmt.Printf("  └─ %s\n", p.LastError)
 		}
 	}
 	fmt.Println()
 	fmt.Println("Link state recomputes on every probe; down peers are retried, not dropped.")
+	fmt.Println("Peers marked discovered were learned from mesh advertisements; the mesh CA still gates membership.")
 	return nil
 }
 
