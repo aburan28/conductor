@@ -92,10 +92,13 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
-		// The dashboard is entirely self-contained, so the strictest useful policy applies:
-		// no external anything, and no framing.
+		// The dashboard is entirely self-contained — its script and stylesheet are served
+		// from this origin and it styles through the CSSOM, not inline attributes — so the
+		// strictest useful policy applies: same-origin assets only, no inline anything,
+		// no framing. 'unsafe-inline' here would instead *forbid* /static/app.js, which
+		// is exactly the bug this line once shipped.
 		h.Set("Content-Security-Policy",
-			"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "+
+			"default-src 'none'; script-src 'self'; style-src 'self'; "+
 				"connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'")
 		// The dashboard link carries a token in the query string. Without this it would leak
 		// to any site the user navigates to next.
