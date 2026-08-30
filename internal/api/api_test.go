@@ -394,13 +394,41 @@ func TestSecurityHeadersArePresent(t *testing.T) {
 			t.Errorf("%s = %q, want %q", header, got, want)
 		}
 	}
-	if resp.Header.Get("Content-Security-Policy") == "" {
-		t.Error("no Content-Security-Policy header")
+	csp := resp.Header.Get("Content-Security-Policy")
+	if csp == "" {
+		t.Fatal("no Content-Security-Policy header")
+	}
+	// The dashboard's script and stylesheet are same-origin files under /static/. A policy
+	// that omits 'self' from script-src/style-src forbids them, and the page dies on its
+	// boot placeholder — a header that is present but wrong passes an existence check.
+	for _, directive := range []string{"script-src", "style-src"} {
+		value := directiveValue(csp, directive)
+		if value == "" {
+			t.Errorf("CSP has no %s directive: %q", directive, csp)
+			continue
+		}
+		if !strings.Contains(value, "'self'") {
+			t.Errorf("CSP %s = %q, must allow 'self' or the dashboard cannot load /static/*", directive, value)
+		}
+		if strings.Contains(value, "unsafe-inline") {
+			t.Errorf("CSP %s = %q, the dashboard uses no inline script or style", directive, value)
+		}
 	}
 	// HSTS over plaintext would be useless at best and lock out a local developer at worst.
 	if got := resp.Header.Get("Strict-Transport-Security"); got != "" {
 		t.Errorf("HSTS sent over plaintext: %q", got)
 	}
+}
+
+// directiveValue returns the token list of one CSP directive, or "" when absent.
+func directiveValue(csp, directive string) string {
+	for _, part := range strings.Split(csp, ";") {
+		fields := strings.Fields(part)
+		if len(fields) > 0 && fields[0] == directive {
+			return strings.Join(fields[1:], " ")
+		}
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------
