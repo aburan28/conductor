@@ -6,6 +6,7 @@ import { table } from '../components/table.js';
 import { relTime, fmtDate } from '../lib/format.js';
 import { assignTask, pauseSession, respondToOffer, resumeSession } from '../lib/actions.js';
 import { openModal } from '../components/modal.js';
+import { connectStream } from '../lib/sse.js';
 import { toast, toastError } from '../components/toast.js';
 
 export default defineView({
@@ -53,6 +54,61 @@ export default defineView({
             h('button', { class: 'btn sm', onclick: async () => { if (await respondToOffer(ctx, a, false)) refresh(); } }, 'Decline')) : null))) : empty('Nothing offered to this session.', `conductor task assign T-42 --require-tier ${capOf(s.id).tier || 'T3'}`),
         actions: [{ label: 'Close' }],
       });
+    };
+
+    // Live harness log stream for a running session: the sidecar tees the wrapped
+    // harness's output into its localstate directory, and the control plane tails it
+    // (GET /v1/sessions/{id}/logs). Headless wraps always tee; terminal wraps opt in
+    // with CONDUCTOR_HARNESS_LOG=1 — otherwise the stream says no log is available.
+    const streamLogs = s => {
+      const pane = h('pre', { class: 'log-stream', 'aria-live': 'polite' });
+      const stateEl = h('span', { class: 'muted', style: { fontSize: '12px' } }, 'connecting…');
+      const btn = h('button', { class: 'btn sm' }, 'Stop');
+      let stop = null;
+      let follow = true;
+
+      pane.addEventListener('scroll', () => {
+        follow = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 24;
+      });
+      const append = text => {
+        pane.append(document.createTextNode(text));
+        if (follow) pane.scrollTop = pane.scrollHeight;
+      };
+      const halt = () => {
+        if (!stop) return;
+        stop();
+        stop = null;
+        btn.textContent = 'Start';
+      };
+      const start = () => {
+        if (stop) return;
+        btn.textContent = 'Stop';
+        stateEl.textContent = 'connecting…';
+        const url = `/v1/sessions/${encodeURIComponent(s.id)}/logs?token=${encodeURIComponent(ctx.api.token)}`;
+        stop = connectStream(url, {
+          onEvent: ev => {
+            if (ev.type === 'log') { append(ev.text || ''); stateEl.textContent = ''; }
+            else if (ev.type === 'waiting') stateEl.textContent = ev.reason || 'waiting…';
+            else if (ev.type === 'done') { stateEl.textContent = 'session ended'; halt(); }
+          },
+          onState: st => { if (st !== 'live' && stop) stateEl.textContent = st + '…'; },
+        });
+      };
+      btn.addEventListener('click', () => (stop ? halt() : start()));
+
+      const modal = openModal({
+        title: `Harness log — ${s.principal} on ${s.harness}`,
+        body: h('div', { class: 'stack' },
+          h('div', { class: 'btn-row', style: { justifyContent: 'space-between' } }, stateEl, btn),
+          pane),
+        actions: [{ label: 'Close' }],
+        onClose: halt,
+      });
+      pane.style.minHeight = '320px';
+      pane.style.maxHeight = '60vh';
+      pane.style.overflowY = 'auto';
+      if (ctx.store.get().demo) stateEl.textContent = 'demo mode — no live stream';
+      else start();
     };
 
     const manage = s => {
@@ -126,6 +182,7 @@ export default defineView({
               ? h('button', { class: 'btn sm', disabled: true, title: 'Waiting for the session to pick it up on its next heartbeat' }, s.pending_control === 'pause' ? 'Pausing…' : 'Resuming…')
               : h('button', { class: 'btn sm', onclick: async ev => { ev.stopPropagation(); if (await (s.state === 'paused' ? resumeSession(ctx, s) : pauseSession(ctx, s))) refresh(); } }, s.state === 'paused' ? 'Resume' : 'Pause'),
             h('button', { class: 'btn sm', onclick: ev => { ev.stopPropagation(); inbox(s); } }, 'Inbox', capOf(s.id).queued_offers ? h('span', { class: 'badge warn' }, capOf(s.id).queued_offers) : null),
+          h('button', { class: 'btn sm', onclick: ev => { ev.stopPropagation(); streamLogs(s); } }, 'Logs'),
             h('button', { class: 'btn sm', onclick: ev => { ev.stopPropagation(); offer(s); } }, 'Offer task')) : null,
           h('button', { class: 'btn sm', onclick: ev => { ev.stopPropagation(); manage(s); } }, 'Manage')) },
       ],

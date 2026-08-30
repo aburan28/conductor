@@ -44,6 +44,7 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /v1/sessions/{session}/resume", auth(s.resumeSession))
 	m.HandleFunc("POST /v1/sessions/{session}/save", auth(s.saveSession))
 	m.HandleFunc("GET /v1/sessions/{session}/export", auth(s.exportSession))
+	m.HandleFunc("GET /v1/sessions/{id}/logs", auth(s.sessionLogs))
 	m.HandleFunc("POST /v1/sessions/{session}/capabilities", auth(s.setSessionCapabilities))
 	m.HandleFunc("GET /v1/sessions/{session}/assignments", auth(s.sessionAssignments))
 	m.HandleFunc("POST /v1/assignments/{assignment}/respond", auth(s.respondToAssignment))

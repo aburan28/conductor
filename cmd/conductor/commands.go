@@ -5,9 +5,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -909,6 +911,18 @@ func cmdWrap(ctx context.Context, args []string) error {
 		"CONDUCTOR_PROJECT="+ref,
 	)
 
+	// Harness log tee: mirror the harness's combined output into the localstate
+	// sessions directory so the dashboard can stream it (GET /v1/sessions/{id}/logs).
+	// Headless wraps (piped stdout, the way scripts and the runner drive wrap) always
+	// tee; an interactive wrap opts in with CONDUCTOR_HARNESS_LOG=1 — teeing there
+	// hands the child a pipe instead of the terminal, which would downgrade the
+	// interactive harness's rendering, so the default for terminals is no capture.
+	if capture, _ := harnessLogTee(session.ID); capture != nil {
+		defer capture.Close()
+		cmd.Stdout = io.MultiWriter(os.Stdout, capture)
+		cmd.Stderr = io.MultiWriter(os.Stderr, capture)
+	}
+
 	// Token usage. The harness writes its own usage log as it runs; this sidecar reads that
 	// log — numbers, model, timestamp, nothing else — and reports hourly buckets, so the
 	// team's usage is one report rather than three tools' private counters. Off with
@@ -1113,4 +1127,31 @@ func killedBySignal(runErr error) bool {
 	}
 	ws, ok := exitErr.Sys().(syscall.WaitStatus)
 	return ok && ws.Signaled()
+}
+
+// harnessLogTee opens the session's harness log for appending and reports whether the
+// wrap should capture: always when stdout is not a terminal (headless), and for a
+// terminal only when CONDUCTOR_HARNESS_LOG=1 opts in — capture replaces the child's
+// stdio with pipes, which an interactive harness would notice.
+func harnessLogTee(sessionID string) (*os.File, string) {
+	if v := strings.TrimSpace(os.Getenv("CONDUCTOR_HARNESS_LOG")); v != "1" {
+		if fi, err := os.Stdout.Stat(); err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+			// Headless: fall through to capture below.
+		} else {
+			return nil, ""
+		}
+	}
+	dir, err := localstate.Dir()
+	if err != nil {
+		return nil, ""
+	}
+	path := filepath.Join(dir, sessionID, "harness.log")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, ""
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, ""
+	}
+	return f, path
 }
