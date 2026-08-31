@@ -2114,17 +2114,21 @@ project data. A mesh certificate names a daemon, not a principal, so peer endpoi
 separate authentication channel from membership, and no peer handler may read project
 data without a resolved member.
 
-The mesh **discovers its own members**: a probe response advertises everything the
-answering daemon can dial (itself and its known peers), and a daemon with discovery
-enabled merges advertised addresses into its probe set, so a mesh converges from a
-single configured seed. Discovery widens dialing only — an advertisement is an address
-hint, never an instruction. Membership is still gated by the mesh CA at handshake (a
-discovered address without a CA-signed certificate is a down link, never a member), a
-discovered link adopts the name its certificate proves, adoption is capped so a
-compromised member cannot make the mesh dial arbitrary hosts, and every link records
-whether it came from configuration or discovery. Cross-daemon coordination (federated
-conflict detection, work hand-off between meshes) remains a future extension with this
-layer as its foundation.
+The mesh **discovers its own members**, in both directions. Outbound: a probe response
+advertises everything the answering daemon can dial (itself and its known peers), and a
+daemon with discovery enabled merges advertised addresses into its probe set. Inbound: a
+discovery-enabled prober announces where it can be reached (`?from=<url>` on the probe),
+and the daemon it knocks on records the pair — the name always from the verified mesh
+certificate, the URL a hint. A mesh therefore converges from a single configured seed,
+and a new daemon pointing at any member becomes visible to the whole mesh. Discovery
+widens dialing only — an advertisement or a knock is an address hint, never an
+instruction. Membership is still gated by the mesh CA at handshake (a discovered
+address without a CA-signed certificate is a down link, never a member), a discovered
+link adopts the name its certificate proves, adoption is capped so a compromised member
+cannot make the mesh dial arbitrary hosts, and every link records whether it came from
+configuration or discovery. Cross-daemon coordination (federated conflict detection,
+work hand-off between meshes) remains a future extension with this layer as its
+foundation.
 
 ---
 

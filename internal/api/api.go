@@ -48,6 +48,9 @@ type Server struct {
 	peerName string
 	// peerStatus snapshots the peer link table; nil when peering is not configured.
 	peerStatus func() []peer.LinkStatus
+	// peerObserve records an inbound knock (caller cert name + announced URL); nil when
+	// peering or discovery is off.
+	peerObserve func(name, url string)
 }
 
 type Options struct {
@@ -65,6 +68,11 @@ type Options struct {
 	PeerName string
 	// PeerStatus returns the current peer link table. Nil disables reporting.
 	PeerStatus func() []peer.LinkStatus
+	// PeerObserve records a peer that knocked on /v1/peer/info announcing where it can
+	// be reached (the inbound half of discovery). The name arrives from the verified
+	// mesh certificate; the URL is a hint the implementation must validate. Nil ignores
+	// knocks.
+	PeerObserve func(name, url string)
 }
 
 func New(store *db.Store, svc *coord.Service, opts Options) *Server {
@@ -83,6 +91,7 @@ func New(store *db.Store, svc *coord.Service, opts Options) *Server {
 		self:        opts.SelfEndpoint,
 		peerName:    opts.PeerName,
 		peerStatus:  opts.PeerStatus,
+		peerObserve: opts.PeerObserve,
 	}
 	s.routes()
 	return s

@@ -38,11 +38,14 @@ func (s *Server) peerAuth(next func(http.ResponseWriter, *http.Request, string))
 
 // peerInfo answers GET /v1/peer/info: who this daemon is, and everything it can dial in
 // the mesh — itself and its known peers — so a peer running discovery can learn members
-// it was not configured with. The caller's name is not echoed back — a peer asking "who
-// are you" wants this daemon's mesh identity, not its own. It is what a peer link's probe
-// consumes, so it stays cheap and side-effect free, and it never carries more than
-// member names and addresses.
-func (s *Server) peerInfo(w http.ResponseWriter, r *http.Request, _ string) {
+// it was not configured with. A discovery-enabled caller may also announce where it can
+// be reached (?from=<url>): the name always comes from its verified mesh certificate,
+// the URL is a hint, and the pair is recorded through PeerObserve as the inbound half of
+// discovery. The caller's name is not echoed back — a peer asking "who are you" wants
+// this daemon's mesh identity, not its own. This handler stays cheap and side-effect
+// free apart from that observation, and never carries more than member names and
+// addresses.
+func (s *Server) peerInfo(w http.ResponseWriter, r *http.Request, name string) {
 	info := peer.Info{Name: s.peerName, Time: time.Now()}
 	if s.peerStatus != nil {
 		mesh := make([]peer.Peer, 0, 4)
@@ -56,6 +59,11 @@ func (s *Server) peerInfo(w http.ResponseWriter, r *http.Request, _ string) {
 			mesh = append(mesh, peer.Peer{Name: l.Name, URL: l.URL})
 		}
 		info.Mesh = mesh
+	}
+	if s.peerObserve != nil {
+		if from := r.URL.Query().Get("from"); from != "" {
+			s.peerObserve(name, from)
+		}
 	}
 	s.ok(w, r, http.StatusOK, info)
 }

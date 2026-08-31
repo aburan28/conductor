@@ -170,9 +170,10 @@ Binding 127.0.0.1 needs none of these.`, *addr)
 	// Mesh identity and, when peers are configured, the link keeper that dials them.
 	// Link state is a projection, so it lives in memory and disappears with the process.
 	var (
-		meshName   string
-		meshPool   *x509.CertPool
-		peerStatus func() []peer.LinkStatus
+		meshName    string
+		meshPool    *x509.CertPool
+		peerStatus  func() []peer.LinkStatus
+		peerObserve func(name, url string)
 	)
 	if meshOn {
 		meshPool, err = peer.LoadCA(*peerCA)
@@ -206,6 +207,7 @@ Binding 127.0.0.1 needs none of these.`, *addr)
 				}
 			}()
 			peerStatus = mgr.Snapshot
+			peerObserve = mgr.ObserveFrom
 		}
 	}
 
@@ -218,6 +220,7 @@ Binding 127.0.0.1 needs none of these.`, *addr)
 		SelfEndpoint: selfEndpoint,
 		PeerName:     meshName,
 		PeerStatus:   peerStatus,
+		PeerObserve:  peerObserve,
 	})
 
 	if !*noScheduler {

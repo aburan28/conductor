@@ -479,3 +479,31 @@ func TestDiscoveredPeerAdoptsCertificateName(t *testing.T) {
 		t.Fatalf("a discovered link should not flag a name mismatch, got %q", gamma.LastError)
 	}
 }
+
+// The inbound half: a peer that knocks on /v1/peer/info announcing where it can be
+// reached becomes a candidate link, with the same validation as an advertisement.
+func TestObserveFrom(t *testing.T) {
+	ca := genCA(t)
+
+	m := newDiscoveryManager(t, ca, true, peer.Peer{Name: "ghost", URL: "https://127.0.0.1:1"})
+	m.ObserveFrom("beta", "https://127.0.0.1:18443")
+	m.ObserveFrom("gamma", "http://127.0.0.1:9")      // plaintext hint: ignored
+	m.ObserveFrom("", "https://127.0.0.1:10")         // nameless: ignored
+	m.ObserveFrom("beta", "https://127.0.0.1:18443/") // trailing slash: same URL, deduped
+
+	links := m.Snapshot()
+	if len(links) != 2 {
+		t.Fatalf("expected ghost + beta only, got %+v", links)
+	}
+	beta := findLink(t, links, "beta")
+	if beta.Source != peer.SourceDiscovered || beta.URL != "https://127.0.0.1:18443" {
+		t.Fatalf("expected beta discovered with the announced URL, got %+v", beta)
+	}
+
+	// Discovery off: knocks are ignored, the roster stays what the operator set.
+	static := newDiscoveryManager(t, ca, false, peer.Peer{Name: "ghost", URL: "https://127.0.0.1:1"})
+	static.ObserveFrom("beta", "https://127.0.0.1:18443")
+	if links := static.Snapshot(); len(links) != 1 {
+		t.Fatalf("discovery off must ignore knocks, got %+v", links)
+	}
+}

@@ -751,14 +751,17 @@ of truth.
 
 **Auto-discovery.** Every probe response also advertises everything the answering daemon
 can dial — itself and its known peers — and a daemon with discovery on (the default,
-`--peer-discovery=false` to opt out) merges those addresses into its probe set. So a mesh
-converges from a single seed: configure one peer and learn the rest. An advertisement is
-only an address hint — membership is still gated by the mesh CA at handshake, so a
-discovered address that cannot present a CA-signed certificate stays a down link, and a
-discovered peer adopts the name its certificate proves. Discovery is capped (128 adopted
-addresses) so a compromised member cannot turn the mesh into a dialer of arbitrary
-hosts, and `conductor peers` shows the source of every link: `config` or
-`discovered via <peer>`.
+`--peer-discovery=false` to opt out) merges those addresses into its probe set. The
+probe itself announces the prober: a discovery-enabled caller passes `?from=<its own
+URL>` so the daemon it knocks on records it too. Together the two halves make a mesh
+converge from a single configured seed **in both directions** — point a new daemon at
+any one member and the whole mesh learns it, not just the other way around. An
+advertisement or a knock is only an address hint — membership is still gated by the mesh
+CA at handshake, so a discovered address that cannot present a CA-signed certificate
+stays a down link, and a discovered peer adopts the name its certificate proves.
+Discovery is capped (128 adopted addresses) so a compromised member cannot turn the mesh
+into a dialer of arbitrary hosts, and `conductor peers` shows the source of every link:
+`config` or `discovered via <peer>`.
 
 ```bash
 # once per mesh: a CA, then one certificate per daemon

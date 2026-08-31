@@ -15,6 +15,8 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -58,6 +60,17 @@ func genTestCA(t *testing.T) testCA {
 
 func genTestCert(t *testing.T, ca testCA, name string) tls.Certificate {
 	t.Helper()
+	certPEM, keyPEM := genTestCertPEM(t, ca, name)
+	pair, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pair
+}
+
+// genTestCertPEM is genTestCert in the on-disk shape peer.Options expects.
+func genTestCertPEM(t *testing.T, ca testCA, name string) (certPEM, keyPEM []byte) {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -80,13 +93,8 @@ func genTestCert(t *testing.T, ca testCA, name string) tls.Certificate {
 	if err != nil {
 		t.Fatal(err)
 	}
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	pair, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return pair
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 }
 
 // newPeerTLSServer serves the api handler behind mutual-TLS verification.
@@ -174,6 +182,89 @@ func TestPeerInfoRequiresMeshCertificate(t *testing.T) {
 	if byName["alpha"] != "https://127.0.0.1:1" || byName["beta"] != "https://127.0.0.1:18444" {
 		t.Fatalf("advertisement should name self and beta with their URLs, got %+v", info.Mesh)
 	}
+}
+
+// The full loop, one machine: a discovery-enabled Manager (beta) knocks on a real api
+// server (alpha) announcing its own endpoint. Alpha's wired receiver records beta as a
+// discovered link — the inbound half of discovery that makes a new daemon visible to the
+// mesh it points at.
+func TestKnockTeachesTheReceiver(t *testing.T) {
+	newHarness(t) // brings up the store the server is built on
+	ca := genTestCA(t)
+
+	// Alpha: a real Manager wired to the server both as link table and knock observer.
+	// Its one configured peer is a dead address so it must learn beta purely inbound.
+	dir := t.TempDir()
+	alphaCert, alphaKey := genTestCertPEM(t, ca, "alpha")
+	caPath := filepath.Join(dir, "ca.pem")
+	alphaCertPath := filepath.Join(dir, "alpha-cert.pem")
+	alphaKeyPath := filepath.Join(dir, "alpha-key.pem")
+	for path, body := range map[string][]byte{
+		caPath:        pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.cert.Raw}),
+		alphaCertPath: alphaCert,
+		alphaKeyPath:  alphaKey,
+	} {
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	receiver, err := peer.New(peer.Options{
+		Peers:  []peer.Peer{{Name: "dead", URL: "https://127.0.0.1:1"}},
+		CAPath: caPath, CertPath: alphaCertPath, KeyPath: alphaKeyPath,
+		Discovery: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := New(sharedStore, coord.New(sharedStore), Options{
+		PeerName:     "alpha",
+		PeerStatus:   receiver.Snapshot,
+		PeerObserve:  receiver.ObserveFrom,
+		SelfEndpoint: "https://127.0.0.1:1",
+	})
+	alphaURL, _ := newPeerTLSServer(t, srv.Handler(), ca, "alpha")
+
+	// Beta: a discovery-enabled Manager whose configured roster is alpha alone and whose
+	// self URL points at a live stand-in of its own control plane.
+	betaSrv := New(sharedStore, coord.New(sharedStore), Options{PeerName: "beta"})
+	betaURL, _ := newPeerTLSServer(t, betaSrv.Handler(), ca, "beta")
+	betaCert, betaKey := genTestCertPEM(t, ca, "beta")
+	betaCertPath := filepath.Join(dir, "beta-cert.pem")
+	betaKeyPath := filepath.Join(dir, "beta-key.pem")
+	if err := os.WriteFile(betaCertPath, betaCert, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(betaKeyPath, betaKey, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	knocker, err := peer.New(peer.Options{
+		Peers:   []peer.Peer{{Name: "alpha", URL: alphaURL}},
+		SelfURL: betaURL,
+		CAPath:  caPath, CertPath: betaCertPath, KeyPath: betaKeyPath,
+		Discovery: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	knocker.Probe(context.Background())
+
+	beta := findLinkByURL(t, receiver.Snapshot(), betaURL)
+	if beta.Name != "beta" || beta.Source != peer.SourceDiscovered || beta.Via != "beta" {
+		t.Fatalf("expected beta recorded as discovered from its knock, got %+v", beta)
+	}
+}
+
+func findLinkByURL(t *testing.T, links []peer.LinkStatus, url string) peer.LinkStatus {
+	t.Helper()
+	for _, l := range links {
+		if l.URL == url {
+			return l
+		}
+	}
+	t.Fatalf("no link for %q in %+v", url, links)
+	return peer.LinkStatus{}
 }
 
 func TestListPeersReportsLinkTable(t *testing.T) {

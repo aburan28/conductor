@@ -263,9 +263,23 @@ func (m *Manager) Probe(ctx context.Context) {
 	}
 	wg.Wait()
 
-	// Replace, then merge: merging into the pre-probe snapshot would race the writeback.
+	// Merge by URL rather than replace: an inbound observation (a peer knocking on our
+	// /v1/peer/info) can append a link while probes are in flight, and a plain replace
+	// built from the pre-probe snapshot would drop it.
 	m.mu.Lock()
-	m.links = results
+	for _, r := range results {
+		matched := false
+		for j := range m.links {
+			if m.links[j].URL == r.URL {
+				m.links[j] = r
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			m.links = append(m.links, r)
+		}
+	}
 	m.mu.Unlock()
 
 	for _, ad := range ads {
@@ -301,7 +315,14 @@ func (m *Manager) probeOne(ctx context.Context, l LinkStatus) (LinkStatus, adver
 	l.Remote = nil
 	l.RTTMillis = 0
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, l.URL+"/v1/peer/info", nil)
+	// A probing peer that runs discovery announces where it can be reached, so the daemon
+	// it knocks on learns it too: without this, a new daemon pointing at the mesh is
+	// invisible to members it never dials.
+	target := l.URL + "/v1/peer/info"
+	if m.opts.Discovery && m.selfURL != "" {
+		target += "?from=" + url.QueryEscape(m.selfURL)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		l.LastError = err.Error()
 		return l, advertisement{}
@@ -343,6 +364,49 @@ func (m *Manager) probeOne(ctx context.Context, l LinkStatus) (LinkStatus, adver
 	return l, ad
 }
 
+// adoption carries the per-merge view of the link table. The caller holds mu while
+// building and spending it.
+type adoption struct {
+	known      map[string]bool
+	discovered int
+}
+
+func (m *Manager) newAdoption() adoption {
+	known := make(map[string]bool, len(m.links))
+	discovered := 0
+	for _, l := range m.links {
+		known[l.URL] = true
+		if l.Source == SourceDiscovered {
+			discovered++
+		}
+	}
+	return adoption{known: known, discovered: discovered}
+}
+
+// adopt validates and appends one advertised peer as a candidate link. It returns false
+// for anything that is not worth dialing. Caller holds mu.
+func (m *Manager) adopt(a *adoption, p Peer, via string) bool {
+	u := strings.TrimRight(p.URL, "/")
+	if p.Name == "" || u == "" || a.known[u] || u == m.selfURL {
+		return false
+	}
+	if pu, err := url.Parse(u); err != nil || pu.Scheme != "https" || pu.Host == "" {
+		return false
+	}
+	if a.discovered >= maxDiscoveredPeers {
+		m.opts.Logger.Warn("peer discovery cap reached; ignoring advertised peer",
+			"url", u, "via", via)
+		return false
+	}
+	a.known[u] = true
+	a.discovered++
+	m.links = append(m.links, LinkStatus{
+		Name: p.Name, URL: u, State: StateDown,
+		Source: SourceDiscovered, Via: via,
+	})
+	return true
+}
+
 // mergeDiscovered adopts advertised mesh members as candidate links. An advertisement is
 // an address hint, never an instruction: nameless entries, non-https URLs, URLs already
 // known, and our own endpoint are ignored, and the operator's configuration always wins
@@ -355,32 +419,23 @@ func (m *Manager) mergeDiscovered(ad advertisement) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	known := make(map[string]bool, len(m.links))
-	discovered := 0
-	for _, l := range m.links {
-		known[l.URL] = true
-		if l.Source == SourceDiscovered {
-			discovered++
-		}
-	}
+	a := m.newAdoption()
 	for _, p := range ad.mesh {
-		u := strings.TrimRight(p.URL, "/")
-		if p.Name == "" || u == "" || known[u] || u == m.selfURL {
-			continue
-		}
-		if pu, err := url.Parse(u); err != nil || pu.Scheme != "https" || pu.Host == "" {
-			continue
-		}
-		if discovered >= maxDiscoveredPeers {
-			m.opts.Logger.Warn("peer discovery cap reached; ignoring advertised peer",
-				"url", u, "via", ad.via)
-			continue
-		}
-		known[u] = true
-		discovered++
-		m.links = append(m.links, LinkStatus{
-			Name: p.Name, URL: u, State: StateDown,
-			Source: SourceDiscovered, Via: ad.via,
-		})
+		m.adopt(&a, p, ad.via)
 	}
+}
+
+// ObserveFrom records a peer that knocked: it probed us over mTLS with a verified mesh
+// certificate (the name) and told us where it can be reached (the URL, a hint validated
+// like any advertisement). This is the inbound half of discovery — without it, a daemon
+// that points at the mesh is invisible to the members it never dials.
+func (m *Manager) ObserveFrom(name, url string) {
+	if !m.opts.Discovery || name == "" || url == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	a := m.newAdoption()
+	m.adopt(&a, Peer{Name: name, URL: url}, name)
 }
