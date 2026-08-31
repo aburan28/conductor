@@ -34,7 +34,8 @@ func cmdPeers(ctx context.Context, args []string) error {
 
 	if len(body.Peers) == 0 {
 		fmt.Println("No peers configured. Run conductord with --peer-ca, --peer-cert and")
-		fmt.Println("--peer-key to join the mesh (see scripts/gen-peer-certs.sh).")
+		fmt.Println("--peer-key, plus either --peer name=url or --peer-discover-dns, to join")
+		fmt.Println("the mesh (see scripts/gen-peer-certs.sh).")
 		return nil
 	}
 	fmt.Printf("%-14s %-32s %-5s %6s  %s\n", "PEER", "ADDRESS", "STATE", "RTT", "LAST CHECK")
@@ -43,8 +44,12 @@ func cmdPeers(ctx context.Context, args []string) error {
 		if p.State == peer.StateUp {
 			rtt = fmt.Sprintf("%dms", p.RTTMillis)
 		}
+		name := p.Name
+		if p.Discovered {
+			name += " (dns)"
+		}
 		fmt.Printf("%-14s %-32s %-5s %6s  %s\n",
-			p.Name, p.URL, p.State, rtt, shortAgo(p.LastCheck))
+			name, p.URL, p.State, rtt, shortAgo(p.LastCheck))
 		if p.LastError != "" {
 			fmt.Printf("  └─ %s\n", p.LastError)
 		}

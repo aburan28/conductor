@@ -639,9 +639,10 @@ Implemented and exercised by tests:
   handoff bundles, portable Markdown task cards.
 - Member and token administration, TLS, a loopback-by-default bind, and auth throttling.
 - Daemon-to-daemon peering over mutual TLS: a private CA names every control plane in a
-  mesh, each daemon dials its configured peers and keeps a live link table, and
-  `conductor peers` reports it. Connectivity and identity only — no data is replicated
-  across the link.
+  mesh, each daemon dials its configured or DNS-discovered peers and keeps a live link
+  table, and `conductor peers` reports it. Connectivity and identity only — no data is
+  replicated across the link. `--peer-discover-dns` finds peers via a DNS SRV record so a
+  mesh can grow without an operator hand-listing every daemon's address.
 - A runner that reaches the control plane over HTTP and holds no database credential
   (§28.2), alongside the in-process backend for single-host use (§28.1).
 - One-link onboarding: `conductor invite <handle>` mints a teammate their own token and prints
@@ -725,6 +726,7 @@ The suite proves the invariants rather than asserting them in prose. Notably:
 | `TestMCPWorkLifecycleAgainstLiveServer` | the MCP gateway works against the real API, not a stub |
 | `TestQueuedAttemptCannotSucceed` | an attempt cannot report success without having run |
 | `TestProbeUntrustedPeer` | a daemon certified by another CA can never pass as a peer |
+| `TestDiscoverAddsPeersFromSRV` | a daemon joins the mesh via DNS alone, no `--peer` list required |
 | `TestPeerInfoRequiresMeshCertificate` | a bearer token is not a peer credential; only a mesh certificate is |
 
 ---
@@ -766,6 +768,35 @@ Env equivalents: `CONDUCTOR_PEERS=name=url,…` (comma-separated) plus
 daemon with `CONDUCTOR_CA_CERT=.conductor/certs/ca.pem`. Peer URLs must be `https` —
 a plaintext peer would put the mesh identity on an unauthenticated wire, and the daemon
 refuses it.
+
+### Joining a mesh without seed nodes
+
+`--peer name=url` does not scale past a couple of daemons — every one needs every other
+one's address by hand. `--peer-discover-dns` replaces that with one shared DNS SRV record
+(RFC 2782): every daemon resolves it on each probe tick and treats each target as a peer
+to dial, the same join-by-DNS pattern a Kubernetes headless service or Consul uses.
+
+```bash
+# publish an SRV record once, e.g. _conductor-mesh._tcp.mesh.internal pointing at every
+# daemon's host:port — DNS round-robin, a headless Service, or a Consul/etc service catalog
+
+conductord --addr 0.0.0.0:8443 \
+  --peer-ca .conductor/certs/ca.pem \
+  --peer-cert .conductor/certs/laptop/cert.pem --peer-key .conductor/certs/laptop/key.pem \
+  --peer-discover-dns _conductor-mesh._tcp.mesh.internal
+
+conductord --addr 0.0.0.0:8443 \
+  --peer-ca .conductor/certs/ca.pem \
+  --peer-cert .conductor/certs/desktop/cert.pem --peer-key .conductor/certs/desktop/key.pem \
+  --peer-discover-dns _conductor-mesh._tcp.mesh.internal
+```
+
+No daemon names another by hand: a discovered address is dialed, and once it answers with
+a certificate the mesh CA vouches for, it's identified by whatever name its own
+`/v1/peer/info` reports — DNS only proposes where to look, never who to trust. `--peer` and
+`--peer-discover-dns` compose freely (`conductor peers` marks a discovered link `(dns)`),
+and a resolver hiccup only pauses discovery of *new* peers — it never drops one already
+linked. Env equivalent: `CONDUCTOR_PEER_DISCOVER_DNS`.
 
 ---
 

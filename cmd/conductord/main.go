@@ -71,6 +71,8 @@ func serve(args []string) error {
 		"this daemon's mesh certificate (PEM), presented to peers and served as the TLS certificate when --tls-cert is absent")
 	peerKey := fs.String("peer-key", envOr("CONDUCTOR_PEER_KEY", ""),
 		"this daemon's mesh private key")
+	peerDiscoverDNS := fs.String("peer-discover-dns", envOr("CONDUCTOR_PEER_DISCOVER_DNS", ""),
+		"DNS SRV record resolved on every tick to find mesh peers automatically, instead of a hand-maintained --peer per daemon (e.g. _conductor-mesh._tcp.mesh.internal)")
 	verbose := fs.Bool("v", false, "verbose logging")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, `conductord — Conductor control plane
@@ -102,7 +104,7 @@ Flags:
 	// certificate when dialing peers, and served as this daemon's TLS certificate. A peer
 	// verifying the server against the mesh CA is what makes the link mutual, so a
 	// separate non-mesh --tls-cert cannot coexist with peering.
-	meshOn := *peerCA != "" || *peerCert != "" || *peerKey != "" || len(meshPeers) > 0
+	meshOn := *peerCA != "" || *peerCert != "" || *peerKey != "" || len(meshPeers) > 0 || *peerDiscoverDNS != ""
 	if (*peerCert == "") != (*peerKey == "") {
 		return errors.New("--peer-cert and --peer-key must be given together")
 	}
@@ -188,11 +190,12 @@ Binding 127.0.0.1 needs none of these.`, *addr)
 		if meshName == "" {
 			return errors.New("mesh certificate carries no name (no DNS SAN, no common name)")
 		}
-		if len(meshPeers) > 0 {
+		if len(meshPeers) > 0 || *peerDiscoverDNS != "" {
 			mgr, err := peer.New(peer.Options{
 				Peers: meshPeers, SelfURL: selfEndpoint,
 				CAPath: *peerCA, CertPath: *peerCert, KeyPath: *peerKey,
-				Logger: logger,
+				DiscoverDNS: *peerDiscoverDNS,
+				Logger:      logger,
 			})
 			if err != nil {
 				return err

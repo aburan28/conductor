@@ -2107,6 +2107,18 @@ separate authentication channel from membership, and no peer handler may read pr
 data without a resolved member. Cross-daemon coordination (federated conflict detection,
 work hand-off between meshes) is a future extension with this layer as its foundation.
 
+Peers may be discovered instead of hand-listed. `--peer-discover-dns <name>` resolves a
+DNS SRV record (RFC 2782) on every probe tick and treats each target as a peer candidate —
+the same bootstrap pattern a Kubernetes headless service or Consul's DNS interface uses for
+cluster join, so an operator publishes one shared record instead of teaching every daemon
+every other daemon's address. A discovered peer starts under a provisional name (its DNS
+target) and, on its first successful probe, adopts whatever identity its own certificate
+and `/v1/peer/info` report — the mesh CA is still the only source of trust, DNS only
+proposes an address to dial. `--peer` and `--peer-discover-dns` compose: discovery only
+adds entries, never removes or renames a hand-listed peer, so the two can be mixed and a
+transient resolver failure never drops an otherwise-reachable link. At least one of the two
+is required — the mesh still needs somewhere to start.
+
 ---
 
 ## 29. Proposed repository layout

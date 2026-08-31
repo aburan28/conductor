@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -51,13 +52,20 @@ const (
 
 // LinkStatus is one peer's current link state, safe to serialize to a project member.
 type LinkStatus struct {
-	Name      string    `json:"name"`
-	URL       string    `json:"url"`
-	State     LinkState `json:"state"`
-	RTTMillis int64     `json:"rtt_ms,omitempty"`
-	LastCheck time.Time `json:"last_check"`
-	LastError string    `json:"last_error,omitempty"`
-	Remote    *Info     `json:"remote,omitempty"`
+	Name       string    `json:"name"`
+	URL        string    `json:"url"`
+	State      LinkState `json:"state"`
+	RTTMillis  int64     `json:"rtt_ms,omitempty"`
+	LastCheck  time.Time `json:"last_check"`
+	LastError  string    `json:"last_error,omitempty"`
+	Remote     *Info     `json:"remote,omitempty"`
+	Discovered bool      `json:"discovered,omitempty"` // found via DiscoverDNS, not --peer
+}
+
+// SRVResolver resolves a DNS SRV record set. *net.Resolver satisfies it with its usual
+// method signature, so a test can substitute a fake without touching real DNS.
+type SRVResolver interface {
+	LookupSRV(ctx context.Context, service, proto, name string) (cname string, addrs []*net.SRV, err error)
 }
 
 // Options configures a Manager.
@@ -70,6 +78,16 @@ type Options struct {
 	Tick     time.Duration // probe interval; defaults to 10s
 	Timeout  time.Duration // per-probe timeout; defaults to 5s
 	Logger   *slog.Logger
+
+	// DiscoverDNS, when set, is a DNS SRV record name (RFC 2782, e.g.
+	// "_conductor-mesh._tcp.mesh.internal") resolved on every tick to find mesh peers
+	// automatically. It composes with Peers rather than replacing it: discovery only adds
+	// links, so it lets a mesh grow without an operator hand-listing every daemon's
+	// address, while a hand-listed peer is never displaced by a DNS hiccup. At least one
+	// of Peers or DiscoverDNS is required — peering needs somewhere to start.
+	DiscoverDNS string
+	// Resolver performs the DiscoverDNS lookup. Defaults to net.DefaultResolver.
+	Resolver SRVResolver
 }
 
 // Manager dials the configured peers on a ticker and records link state.
@@ -117,8 +135,8 @@ func CertName(cert *x509.Certificate) string {
 
 // New validates the peer list and loads the mesh TLS material.
 func New(opts Options) (*Manager, error) {
-	if len(opts.Peers) == 0 {
-		return nil, fmt.Errorf("no peers configured")
+	if len(opts.Peers) == 0 && opts.DiscoverDNS == "" {
+		return nil, fmt.Errorf("no peers configured (pass Peers or DiscoverDNS)")
 	}
 	if opts.CAPath == "" {
 		return nil, fmt.Errorf("peering requires --peer-ca (the mesh CA bundle)")
@@ -142,6 +160,9 @@ func New(opts Options) (*Manager, error) {
 	}
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
+	}
+	if opts.Resolver == nil {
+		opts.Resolver = net.DefaultResolver
 	}
 
 	seen := make(map[string]bool, len(opts.Peers))
@@ -182,8 +203,10 @@ func New(opts Options) (*Manager, error) {
 	}, nil
 }
 
-// Run probes every peer once immediately, then on every tick, until ctx is cancelled.
+// Run discovers and probes every peer once immediately, then on every tick, until ctx is
+// cancelled.
 func (m *Manager) Run(ctx context.Context) error {
+	m.Discover(ctx)
 	m.Probe(ctx)
 	ticker := time.NewTicker(m.opts.Tick)
 	defer ticker.Stop()
@@ -192,8 +215,40 @@ func (m *Manager) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
+			m.Discover(ctx)
 			m.Probe(ctx)
 		}
+	}
+}
+
+// Discover resolves DiscoverDNS, if configured, and merges any newly found peers into the
+// link table. It only adds: a target that drops out of DNS keeps whatever link state it
+// last had, so a transient resolver hiccup never drops a peer that is otherwise reachable.
+// A discovered peer starts under a provisional name (its DNS target) — see probeOne for
+// how it adopts its real identity.
+func (m *Manager) Discover(ctx context.Context) {
+	if m.opts.DiscoverDNS == "" {
+		return
+	}
+	found, err := ResolveSRV(ctx, m.opts.Resolver, m.opts.DiscoverDNS)
+	if err != nil {
+		m.opts.Logger.Warn("peer discovery failed", "source", m.opts.DiscoverDNS, "error", err)
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	known := make(map[string]bool, len(m.links))
+	for _, l := range m.links {
+		known[strings.TrimRight(l.URL, "/")] = true
+	}
+	for _, p := range found {
+		url := strings.TrimRight(p.URL, "/")
+		if known[url] || url == m.selfURL {
+			continue
+		}
+		known[url] = true
+		m.links = append(m.links, LinkStatus{Name: p.Name, URL: url, State: StateDown, Discovered: true})
 	}
 }
 
@@ -274,10 +329,19 @@ func (m *Manager) probeOne(ctx context.Context, l LinkStatus) LinkStatus {
 		l.LastError = fmt.Sprintf("unintelligible peer info: %v", err)
 		return l
 	}
-	// The certificate answered, but under a different name than the operator configured.
-	// Report it under the configured name and surface the mismatch rather than hide it.
 	if info.Name != "" && info.Name != l.Name {
-		l.LastError = fmt.Sprintf("peer answered as %q, configured as %q", info.Name, l.Name)
+		if l.Discovered {
+			// A discovered peer has no operator-configured name to compare against —
+			// only the DNS target it was found under. Its certificate and info report
+			// are the actual source of identity here, same as the rest of this package;
+			// adopt it rather than reporting a "mismatch" against a placeholder.
+			l.Name = info.Name
+		} else {
+			// The certificate answered, but under a different name than the operator
+			// configured. Report it under the configured name and surface the mismatch
+			// rather than hide it.
+			l.LastError = fmt.Sprintf("peer answered as %q, configured as %q", info.Name, l.Name)
+		}
 	}
 	l.State = StateUp
 	l.Remote = &info
