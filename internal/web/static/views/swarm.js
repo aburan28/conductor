@@ -75,11 +75,12 @@ export default defineView({
       h('p', {}, 'A teammate with headroom points their machine at this project. Their sessions and runner show up here, take ready tasks by capability, and spend their own budget doing it.'),
       snippet([
         `conductor login --endpoint ${origin} --token cdt_… --project ${ctx.project}`,
-        `conductor swarm join --endpoint ${origin} --project ${ctx.project} --concurrency 2`,
+        `conductor swarm join --endpoint ${origin} --project ${ctx.project}`,
+        `conductor worker --concurrency 2   # this machine takes ready tasks`,
         `# or keep an interactive session open to offers:`,
         `conductor wrap --model claude-opus-5 --max-effort xhigh claude`,
       ].join('\n'), { language: 'bash' }),
-      h('div', { class: 'hint' }, 'Tokens are issued by a maintainer with `conductor member add <handle>` and shown once.')) });
+      h('div', { class: 'hint' }, 'Tokens are issued by a maintainer with `conductor member add <handle>` and shown once. The address above is the daemon\u2019s declared endpoint — set --public-url on conductord if it is wrong.')) });
 
     return h('div', { class: 'stack', style: { gap: '20px' } }, kpis, contributorsCard, h('div', { class: 'grid-2' }, budgetCard, join), grantsCard);
   },

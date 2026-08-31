@@ -169,6 +169,38 @@ func TestUnauthenticatedRequestsAreRejected(t *testing.T) {
 	}
 }
 
+// The dashboard builds shareable join commands from the daemon's declared endpoint, not
+// from the address the current viewer happens to browse through.
+func TestWhoamiReportsServerEndpoint(t *testing.T) {
+	h := newHarness(t)
+	srv := New(sharedStore, coord.New(sharedStore), Options{SelfEndpoint: "http://10.1.2.3:8080"})
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/v1/whoami", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+h.aliceTok)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("whoami = %d", resp.StatusCode)
+	}
+	var body struct {
+		Endpoint string `json:"endpoint"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Endpoint != "http://10.1.2.3:8080" {
+		t.Fatalf("endpoint = %q, want the daemon's declared endpoint", body.Endpoint)
+	}
+}
+
 func TestHealthNeedsNoToken(t *testing.T) {
 	h := newHarness(t)
 	if code, _ := h.do("", http.MethodGet, "/v1/health", nil); code != http.StatusOK {

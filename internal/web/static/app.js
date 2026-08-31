@@ -91,7 +91,7 @@ async function boot() {
     const who = await api.get('/v1/whoami');
     const projects = who.projects || [];
     const mine = projects.find(p => p.slug === s.project || p.id === s.project);
-    store.set({ handle: who.principal.handle, role: mine ? mine.role : '', projects });
+    store.set({ handle: who.principal.handle, role: mine ? mine.role : '', projects, endpoint: who.endpoint || '' });
     prefs.set('handle', who.principal.handle);
     prefs.set('projects', projects);
     if (mine) prefs.set('role', mine.role);
@@ -124,12 +124,22 @@ function signOut() {
   showConnect();
 }
 
+// A loopback endpoint is what a daemon derives when it binds a wildcard address without
+// --public-url; it is only reachable from the machine itself, so it must never replace the
+// address the viewer is actually browsing through.
+function isLoopbackOrigin(u) {
+  try {
+    const host = new URL(u).hostname;
+    return host === 'localhost' || host === '::1' || host.startsWith('127.');
+  } catch { return true; }
+}
+
 function ctx(extraParams = {}) {
   const s = store.get();
   return {
     api, store,
     project: s.project, handle: s.handle, role: s.role, token: s.token,
-    origin: location.origin,
+    origin: s.endpoint && !isLoopbackOrigin(s.endpoint) ? s.endpoint : location.origin,
     params: extraParams,
     navigate: p => router.navigate(p),
     openTask: ref => router.navigate('/tasks/' + encodeURIComponent(ref)),

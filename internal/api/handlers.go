@@ -147,7 +147,11 @@ func (s *Server) whoami(w http.ResponseWriter, r *http.Request, p domain.Princip
 		role, _ := s.store.RoleIn(r.Context(), pr.ID, p.ID)
 		refs = append(refs, projectRef{ID: pr.ID, Slug: pr.Slug, Role: role})
 	}
-	s.ok(w, r, http.StatusOK, map[string]any{"principal": p, "projects": refs})
+	// endpoint is the address this daemon declares reachable at (--public-url, or derived
+	// from its bind). The dashboard surfaces it in shareable join commands so a teammate
+	// gets the control plane's address, not whatever proxy the current viewer browsed
+	// through.
+	s.ok(w, r, http.StatusOK, map[string]any{"principal": p, "projects": refs, "endpoint": s.self})
 }
 
 func (s *Server) listProjects(w http.ResponseWriter, r *http.Request, p domain.Principal) {
