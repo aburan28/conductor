@@ -10,7 +10,7 @@ TOKEN_FILE := .conductor/.bootstrap-token
 
 export DATABASE_URL
 
-.PHONY: all build test unit vet fmt db-up db-down db-wait bootstrap setup run serve login mcp wrap claude codex opencode clean e2e install uninstall
+.PHONY: all build test unit vet fmt db-up db-down db-wait pull-images bootstrap setup run serve login mcp wrap claude codex opencode clean e2e install uninstall
 
 all: vet build test
 
@@ -58,6 +58,16 @@ db-wait:
 
 db-down:
 	docker compose down -v
+
+# Pre-pull every image the systemd units need (postgres + vLLM) so a first
+# enable or an offline reboot never races a download against a start timeout.
+# VLLM=flash|glm53|qwen|all selects vLLM images (default: none, db only).
+pull-images: build
+	@if [ -n "$(VLLM)" ]; then \
+	  $(BIN)/conductor systemd pull-images --with-vllm "$(VLLM)"; \
+	else \
+	  $(BIN)/conductor systemd pull-images; \
+	fi
 
 # Bootstrap the database and first tenant/project/principal/token. The DSN
 # comes from DATABASE_URL (exported above); pass extra bootstrap flags via

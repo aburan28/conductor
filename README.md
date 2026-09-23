@@ -342,6 +342,7 @@ conductor sessions save all                               # keep every session r
 conductor usage --by day,harness                          # tokens and cost over time, across claude/codex/opencode
 conductor sessions export                                 # the project's session history, as JSON
 conductor sessions install-hook                          # capture every session at shutdown (systemd/launchd)
+conductor systemd install --with-vllm qwen               # user units for postgres + conductord (+ vLLM), images pre-pulled
 conductor backup push | pull | status                    # copy this machine's resume records to/from S3
 conductor integrate cursor                                # wire a coding tool to this project (MCP + hooks)
 conductor route T-42                                      # what would this route to, and why — before spending a token

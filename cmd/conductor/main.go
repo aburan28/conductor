@@ -72,6 +72,9 @@ Execution
   conductor serve <flash|glm53|qwen> start local vLLM for OpenCode (GLM-5.3 / Qwen 3.8)
   conductor pause | resume           freeze every agent terminal on this machine, and wake them
   conductor sessions save all        keep every agent session resumable past a closed terminal or reboot
+  conductor systemd install          user units for postgres + conductord (+ vLLM) with image pre-pulls
+  conductor systemd pull-images      pre-pull every image the units need
+  conductor systemd status           which unit images are cached locally
   conductor sessions list            saved, paused, and running sessions on this machine
   conductor sessions export          the project's whole session history, as JSON
   conductor backup push|pull|status  copy this machine's resume records to/from S3
@@ -118,6 +121,8 @@ func main() {
 		err = cmdCapabilities(ctx, args)
 	case "sessions":
 		err = cmdSessions(ctx, args)
+	case "systemd":
+		err = cmdSystemd(args)
 	case "backup":
 		err = cmdBackup(ctx, args)
 	case "inbox":

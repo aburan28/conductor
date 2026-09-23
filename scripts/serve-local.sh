@@ -30,7 +30,7 @@ Serve a local OpenAI-compatible vLLM endpoint for Conductor / OpenCode.
 
 Usage:
   serve-local.sh <flash|glm53|qwen> [start|stop|status|smoke|pull]
-  serve-local.sh status|stop
+  serve-local.sh status|stop|pull-all
 
 Env:
   PORT  HOST  TP  VLLM_IMAGE  WEIGHTS  REGISTRY
@@ -291,6 +291,13 @@ fi
 
 case "$1" in
   -h|--help) usage; exit 0 ;;
+  pull-all)
+    wait_for_docker
+    for v in flash glm53 qwen; do
+      docker pull "${VLLM_IMAGE:-$(default_image "$v")}"
+    done
+    exit 0
+    ;;
   status)
     if [[ -n "${2:-}" ]]; then
       VARIANT="$(normalize_variant "$2")"
