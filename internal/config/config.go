@@ -46,6 +46,41 @@ type DispatchFile struct {
 	domain.DispatchPolicy `yaml:",inline"`
 }
 
+// HarnessSpec mirrors one entry of project.yaml's `harnesses:` map.
+//
+// It is a copy of harness.HarnessConfig's YAML shape rather than that type itself, so that
+// the config package keeps parsing YAML and the harness package keeps driving processes,
+// with neither importing the other. cmd/conductor holds both and converts between them.
+//
+// ArgTemplate, when set, fully replaces the driver's built-in argument vector. The
+// placeholders harness.expandTemplate substitutes are {model} {effort} {max_turns} {cwd}
+// {branch} {mcp_config} {task_card} {permission_mode} {task_ref} {instruction}.
+type HarnessSpec struct {
+	Enabled     bool     `yaml:"enabled"`
+	Command     string   `yaml:"command"`
+	ExtraArgs   []string `yaml:"extra_args"`
+	ArgTemplate []string `yaml:"arg_template"`
+	// StdinInstruction sends the task card on stdin rather than as an argument. Nil means
+	// "whatever this driver defaults to", which is why it is a pointer.
+	StdinInstruction *bool `yaml:"stdin_instruction"`
+	// MCPServers are additional MCP servers merged into the config the runner generates for
+	// an attempt driven by this harness. The conductor server is always present and cannot
+	// be displaced by an entry here -- an agent that could unhook its own coordination
+	// channel would be able to work untracked.
+	//
+	// Declared per harness rather than per project because the harness is the runtime
+	// identity: a cairn search worker needs the cairn node's tools, and a repository-work
+	// agent has no use for them.
+	MCPServers map[string]MCPServerSpec `yaml:"mcp_servers"`
+}
+
+// MCPServerSpec is one stdio MCP server, in the shape every client's mcp.json already uses.
+type MCPServerSpec struct {
+	Command string            `yaml:"command"`
+	Args    []string          `yaml:"args"`
+	Env     map[string]string `yaml:"env"`
+}
+
 // ProjectFile mirrors .conductor/project.yaml.
 type ProjectFile struct {
 	APIVersion string `yaml:"apiVersion"`
@@ -80,6 +115,10 @@ type ProjectFile struct {
 	Workflow struct {
 		File string `yaml:"file"`
 	} `yaml:"workflow"`
+	// Harnesses lets a repository declare how an agent runtime is invoked, including one
+	// this build has never heard of, which harness.BuildRegistry drives through its generic
+	// exec driver. Absent or empty, the built-in defaults apply unchanged.
+	Harnesses map[string]HarnessSpec `yaml:"harnesses"`
 	Artifacts struct {
 		Backend       string `yaml:"backend"`
 		Root          string `yaml:"root"`

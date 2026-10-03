@@ -193,13 +193,15 @@ func memberRemove(ctx context.Context, args []string) error {
 
 func cmdToken(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: conductor token <create|list|revoke|revoke-all>")
+		return errors.New("usage: conductor token <create|list|reset|revoke|revoke-all>")
 	}
 	switch sub, rest := args[0], args[1:]; sub {
 	case "create", "new":
 		return tokenCreate(ctx, rest)
 	case "list", "ls":
 		return tokenList(ctx, rest)
+	case "reset":
+		return tokenReset(ctx, rest)
 	case "revoke":
 		return tokenRevoke(ctx, rest)
 	case "revoke-all":
@@ -247,6 +249,62 @@ func tokenCreate(ctx context.Context, args []string) error {
 	fmt.Fprintf(os.Stderr,
 		"\nToken %q created. Shown once; stored only as a hash.\nUse --save to write it to your credentials file.\n",
 		result.Name)
+	return nil
+}
+
+func tokenReset(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("token reset", flag.ExitOnError)
+	name := fs.String("name", "cli", "a label so you can tell your tokens apart")
+	ttl := fs.Duration("ttl", 90*24*time.Hour, "lifetime for the replacement (0 for no expiry)")
+	save := fs.Bool("save", false, "write the replacement token to ~/.conductor/credentials")
+	asJSON := fs.Bool("json", false, "machine-readable output")
+	fs.Usage = func() {
+		fmt.Fprint(os.Stderr, `conductor token reset — rotate your credentials in one step
+
+Mints a replacement token and revokes every other token you hold, atomically:
+afterwards exactly one of your credentials is valid. The credential used for this
+request is among the revoked, so save the replacement (--save) or log in with it.
+
+  conductor token reset --save
+
+Flags:
+`)
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	api, creds, err := mustClient()
+	if err != nil {
+		return err
+	}
+
+	var result struct {
+		Name    string `json:"name"`
+		Token   string `json:"token"`
+		Revoked int    `json:"revoked"`
+	}
+	if err := api.Post(ctx, "/v1/tokens/reset",
+		map[string]any{"name": *name, "ttl": ttl.String()}, &result); err != nil {
+		return err
+	}
+	if *asJSON {
+		return emit(result)
+	}
+
+	if *save {
+		creds.Token = result.Token
+		if err := client.SaveCredentials(creds); err != nil {
+			return err
+		}
+		fmt.Printf("Reset complete: replacement token %q saved, %d old token(s) revoked.\n",
+			result.Name, result.Revoked)
+		fmt.Println("Saved logins on your other machines now hold a dead token — reset again there if needed.")
+		return nil
+	}
+	fmt.Printf("Reset complete: %d old token(s) revoked.\n\n%s\n", result.Revoked, result.Token)
+	fmt.Fprintf(os.Stderr,
+		"\nThis is the only time the token is shown. Your saved login still holds a revoked\ntoken — re-run with --save, or log in with the token above.\n")
 	return nil
 }
 

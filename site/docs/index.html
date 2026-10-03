@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Conductor documentation: run it, use it daily, understand the mechanisms, and scale it to a team." />
+    <title>Documentation — Conductor</title>
+    <link rel="stylesheet" href="../src/style.css" />
+  </head>
+  <body data-page="index">
+    <header class="nav">
+      <div class="nav-inner">
+        <a class="wordmark" href="../"><span class="wordmark-mark" aria-hidden="true"></span>Conductor</a>
+        <nav class="nav-links" aria-label="Primary">
+          <a href="../#features">Features</a>
+          <a href="../#quickstart">Quickstart</a>
+          <a href="./">Docs</a>
+          <a href="https://github.com/aburan28/conductor">GitHub</a>
+        </nav>
+        <button class="nav-toggle" type="button" aria-expanded="false">Menu</button>
+      </div>
+    </header>
+    <main>
+      <div class="docs-layout">
+        <aside class="docs-side">
+          <h4>Conductor docs</h4>
+          <ul>
+            <li><a class="active" href="./">Documentation</a></li>
+            <li><a href="./quickstart.html">Quickstart</a></li>
+            <li><a href="./daily-use.html">Daily use</a></li>
+            <li><a href="./concepts.html">Concepts</a></li>
+            <li><a href="./configuration.html">Configuration</a></li>
+            <li><a href="./meshing.html">Meshing daemons</a></li>
+            <li><a href="./access.html">Adding coworkers</a></li>
+          </ul>
+          <h4>On this page</h4>
+          <nav id="toc" aria-label="Table of contents"></nav>
+        </aside>
+        <div class="docs-content">
+          <h1>Documentation</h1>
+          <p class="lede">Run it, use it daily, understand the mechanisms, and scale it to a team.</p>
+          <div class="doc-cards">
+            <div class="card"><h3><a href="./quickstart.html">Quickstart</a></h3><p>Postgres on :55432, the control plane on 127.0.0.1:8080, and your CLI login — from one command.</p></div>
+            <div class="card"><h3><a href="./daily-use.html">Daily use</a></h3><p>Check before editing, claim work, wrap sessions, share budget, pause and resume.</p></div>
+            <div class="card"><h3><a href="./concepts.html">Concepts</a></h3><p>Atomic claims, fencing epochs, reservations, merge risk, and privacy-preserving duplicate detection.</p></div>
+            <div class="card"><h3><a href="./configuration.html">Configuration</a></h3><p>Policy lives in the repository, versioned with the code it governs.</p></div>
+            <div class="card"><h3><a href="./meshing.html">Meshing daemons</a></h3><p>Peer control planes over mutual TLS: connectivity and identity, nothing else.</p></div>
+            <div class="card"><h3><a href="./access.html">Adding coworkers</a></h3><p>One link onboards a teammate: invite mints them a token, join redeems it.</p></div>
+          </div>
+          <div id="content"></div>
+        </div>
+      </div>
+    </main>
+    <footer>
+      <div class="footer-inner">
+        <span>Conductor — coordination for humans and coding agents.</span>
+        <span class="right">
+          <a href="./">Docs</a>
+          <a href="https://github.com/aburan28/conductor">GitHub</a>
+        </span>
+      </div>
+    </footer>
+    <script type="module" src="../src/docs.ts"></script>
+  </body>
+</html>

@@ -110,7 +110,8 @@ Flags:
 		return err
 	}
 
-	registry := harness.BuildRegistry(harness.DefaultHarnessConfigs())
+	harnessCfgs := harnessConfigs(repoPath)
+	registry := harness.BuildRegistry(harnessCfgs)
 	selected := *harnessName
 	if *dryRun != "" {
 		selected = harness.FakeHarness
@@ -153,6 +154,7 @@ Flags:
 		PermissionMode:      *permission,
 		MCPEndpoint:         creds.Endpoint,
 		MCPToken:            creds.Token,
+		HarnessMCPServers:   harnessMCPServers(harnessCfgs),
 		MaxTurns:            *maxTurns,
 		AttemptTimeout:      *timeout,
 		KeepFailedWorktrees: true,

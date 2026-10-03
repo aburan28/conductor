@@ -1,0 +1,64 @@
+name: Pages
+
+# The marketing + docs site rebuilds whenever the site itself changes or the
+# content it syncs from changes (sync-content.cjs copies README.md and
+# docs/*.md into the build at prebuild time).
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - 'README.md'
+      - 'docs/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time; a superseding push queues behind the live run
+# rather than cancelling it, so the site is never left half-published.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      # prebuild runs scripts/sync-content.cjs: README.md and docs/*.md are
+      # copied into src/content/ so the docs pages always render fresh text.
+      - name: install
+        working-directory: site
+        run: npm ci
+
+      - name: build
+        working-directory: site
+        run: npm run build
+
+      - name: upload
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/dist
+
+  deploy:
+    name: deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

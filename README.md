@@ -299,7 +299,8 @@ The longer form still works, and is what a script or CI wants:
 conductor member add rachel --role contributor   # prints a `conductor login …` line, once
 conductor member list
 conductor member remove rachel                   # also revokes their tokens
-conductor token create --save                    # rotate your own
+conductor token create --save                    # mint one more; the old ones stay valid
+conductor token reset --save                     # rotate: one replacement, everything else revoked
 ```
 
 A joined teammate contributes to the swarm — `conductor wrap` for interactive work, `conductor
@@ -797,6 +798,10 @@ a certificate the mesh CA vouches for, it's identified by whatever name its own
 `--peer-discover-dns` compose freely (`conductor peers` marks a discovered link `(dns)`),
 and a resolver hiccup only pauses discovery of *new* peers — it never drops one already
 linked. Env equivalent: `CONDUCTOR_PEER_DISCOVER_DNS`.
+
+The lookup uses the system resolver, which on some machines never sees a laptop-local
+directory (Go ignores `/etc/resolver`). `--peer-dns-server host:port` points the lookup
+straight at a directory server instead — `CONDUCTOR_PEER_DNS_SERVER` is the env form.
 
 ---
 

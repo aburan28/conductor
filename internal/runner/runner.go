@@ -45,6 +45,10 @@ type Options struct {
 	MCPEndpoint    string
 	MCPToken       string
 	MCPCommand     string
+	// HarnessMCPServers are extra MCP servers to expose to an attempt, keyed by the harness
+	// driving it. A cairn search worker is the motivating case: it needs the cairn node's
+	// tools, and no other harness does. See docs/cairn-integration.md.
+	HarnessMCPServers map[string]map[string]harness.MCPServer
 	PollInterval   time.Duration
 	MaxTurns       int
 	AttemptTimeout time.Duration
@@ -255,7 +259,7 @@ func (r *Runner) execute(ctx context.Context, snap coord.RunnerSnapshot, claim d
 	if err != nil {
 		return err
 	}
-	mcpConfig, err := r.writeMCPConfig(ws.Path, project, claim.Fence)
+	mcpConfig, err := r.writeMCPConfig(ws.Path, project, claim.Fence, decision.Harness)
 	if err != nil {
 		return err
 	}
@@ -642,26 +646,40 @@ func writeCard(worktreePath, taskRef, rendered string) (string, error) {
 //
 // The token written here is the runner's, and the file lives in a worktree that is removed
 // on success — it is a short-lived, machine-local credential, not a shared secret.
-func (r *Runner) writeMCPConfig(dir string, project domain.Project, fence domain.Fence) (string, error) {
+func (r *Runner) writeMCPConfig(dir string, project domain.Project, fence domain.Fence, harnessKind string) (string, error) {
 	if r.opts.MCPEndpoint == "" {
 		return "", nil
 	}
-	cfg := map[string]any{
-		"mcpServers": map[string]any{
-			"conductor": map[string]any{
-				"command": r.opts.MCPCommand,
-				"args":    []string{"--endpoint", r.opts.MCPEndpoint},
-				"env": map[string]string{
-					"CONDUCTOR_TOKEN":         r.opts.MCPToken,
-					"CONDUCTOR_PROJECT":       project.ID,
-					"CONDUCTOR_TASK_ID":       fence.TaskID,
-					"CONDUCTOR_ATTEMPT_ID":    fence.AttemptID,
-					"CONDUCTOR_LEASE_ID":      fence.LeaseID,
-					"CONDUCTOR_FENCING_EPOCH": fmt.Sprintf("%d", fence.FencingEpoch),
-				},
-			},
+	servers := map[string]any{}
+	// The harness's own servers go in first so that the conductor entry below overwrites any
+	// attempt to shadow it. An agent that could redirect "conductor" at a server of its own
+	// choosing would be able to report progress nobody recorded.
+	for name, s := range r.opts.HarnessMCPServers[harnessKind] {
+		if name == "" || name == "conductor" {
+			continue
+		}
+		entry := map[string]any{"command": s.Command}
+		if len(s.Args) > 0 {
+			entry["args"] = s.Args
+		}
+		if len(s.Env) > 0 {
+			entry["env"] = s.Env
+		}
+		servers[name] = entry
+	}
+	servers["conductor"] = map[string]any{
+		"command": r.opts.MCPCommand,
+		"args":    []string{"--endpoint", r.opts.MCPEndpoint},
+		"env": map[string]string{
+			"CONDUCTOR_TOKEN":         r.opts.MCPToken,
+			"CONDUCTOR_PROJECT":       project.ID,
+			"CONDUCTOR_TASK_ID":       fence.TaskID,
+			"CONDUCTOR_ATTEMPT_ID":    fence.AttemptID,
+			"CONDUCTOR_LEASE_ID":      fence.LeaseID,
+			"CONDUCTOR_FENCING_EPOCH": fmt.Sprintf("%d", fence.FencingEpoch),
 		},
 	}
+	cfg := map[string]any{"mcpServers": servers}
 	body, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return "", err

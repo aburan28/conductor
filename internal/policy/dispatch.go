@@ -25,7 +25,42 @@ type Facts struct {
 	// Harnesses lists what the deciding runner can launch. Empty means "do not filter".
 	Harnesses []string
 	Now       time.Time
+	// Cairn is the position of the cairn objective this task works, when it works one.
+	Cairn CairnFacts
 }
+
+// CairnFacts is one objective's position on a cairn ledger: what the best verified result
+// scores, what is left in the reward pool, and whether the objective has closed.
+//
+// These belong here, beside budget and attempt history, because they are the same kind of
+// thing — deterministic, re-derivable by anyone holding the log, and provable by `cairn
+// audit`. Nothing here comes from a model's opinion about its own work, which is the property
+// that lets a routing rule spend real money on the answer.
+//
+// They are what makes escalation answerable rather than superstitious: "walk up the ladder
+// when the frontier has not moved in eight epochs and the pool still pays" is a decision
+// neither system can reach alone. Conductor knows what an attempt cost; only cairn knows what
+// the result was worth.
+type CairnFacts struct {
+	// Known distinguishes "this task does not work a cairn objective, or the node could not
+	// be reached" from any particular value. It is the whole safety story: when false, Env
+	// renders every cairn name as nil, and the evaluator treats a comparison against nil as
+	// false. Were absence rendered as zero instead, a rule as reasonable as
+	// `cairn.reward_remaining <= 0` would fire on every repository task in the project and
+	// quietly stop the lane.
+	Known           bool
+	ObjectiveID     string
+	FrontierScore   int64
+	RewardRemaining int64
+	Settled         bool
+}
+
+// Deliberately absent: how long the frontier has stood still. It is the fact the escalation
+// rule in docs/cairn-integration.md most wants, and a cairn node serves no endpoint that
+// reports it -- deriving it means walking the log for the epoch of the frontier claim. A
+// declared fact nothing can populate is worse than a missing one: `conductor policy lint`
+// blesses the rule that reads it, and the rule then never fires for a reason no operator can
+// see. Add it here when there is something to read it from.
 
 // BudgetFacts is the project's spend position.
 type BudgetFacts struct {
@@ -54,6 +89,8 @@ var KnownFacts = []string{
 	"task.latency_priority", "task.base_branch_drift",
 	"attempt.number", "attempt.failures", "attempt.review_rejections", "attempt.changed_files",
 	"budget.fraction", "budget.monthly_usd", "budget.spent_usd",
+	"cairn.known", "cairn.objective_id", "cairn.frontier_score", "cairn.reward_remaining",
+	"cairn.settled",
 	"role", "harnesses", "hour", "weekday",
 }
 
@@ -76,6 +113,18 @@ func (f Facts) Env() MapEnv {
 	risk := string(t.RiskLevel)
 	if risk == "" {
 		risk = string(domain.RiskUnknown)
+	}
+	// Absent cairn facts are nil, never zero: a threshold must not be satisfied by a fact
+	// nobody supplied. See CairnFacts.Known.
+	var (
+		cairnObjective, cairnSettled any
+		cairnScore, cairnReward      any
+	)
+	if f.Cairn.Known {
+		cairnObjective = f.Cairn.ObjectiveID
+		cairnSettled = f.Cairn.Settled
+		cairnScore = f.Cairn.FrontierScore
+		cairnReward = f.Cairn.RewardRemaining
 	}
 	return MapEnv{
 		"task.ref":                    t.Ref,
@@ -118,10 +167,17 @@ func (f Facts) Env() MapEnv {
 		"budget.fraction":             f.Budget.Fraction(),
 		"budget.monthly_usd":          f.Budget.MonthlyUSD,
 		"budget.spent_usd":            f.Budget.SpentUSD,
-		"role":                        string(f.Role),
-		"harnesses":                   f.Harnesses,
-		"hour":                        now.Hour(),
-		"weekday":                     strings.ToLower(now.Weekday().String()),
+		// cairn.known is a plain bool so `!cairn.known` reads naturally; the rest are nil
+		// when absent so that no threshold comparison against them can be true.
+		"cairn.known":            f.Cairn.Known,
+		"cairn.objective_id":     cairnObjective,
+		"cairn.frontier_score":   cairnScore,
+		"cairn.reward_remaining": cairnReward,
+		"cairn.settled":          cairnSettled,
+		"role":                   string(f.Role),
+		"harnesses":              f.Harnesses,
+		"hour":                   now.Hour(),
+		"weekday":                strings.ToLower(now.Weekday().String()),
 	}
 }
 

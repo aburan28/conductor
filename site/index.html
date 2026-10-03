@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Conductor: a coordination control plane for teams where humans and coding agents work the same repository at the same time."
+    />
+    <title>Conductor — coordination for humans and coding agents</title>
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <header class="nav">
+      <div class="nav-inner">
+        <a class="wordmark" href="./"><span class="wordmark-mark" aria-hidden="true"></span>Conductor</a>
+        <nav class="nav-links" aria-label="Primary">
+          <a href="#features">Features</a>
+          <a href="#quickstart">Quickstart</a>
+          <a href="./docs/">Docs</a>
+          <a href="https://github.com/aburan28/conductor">GitHub</a>
+        </nav>
+        <button class="nav-toggle" type="button" aria-expanded="false">Menu</button>
+      </div>
+    </header>
+
+    <main>
+      <div class="wrap">
+        <section class="hero" id="top">
+          <div class="hero-grid">
+            <div>
+              <p class="eyebrow">Coordination control plane</p>
+              <h1>Coordination for humans and coding agents on the same repo</h1>
+              <p class="lede">
+                Coding agents got fast; coordination did not. Conductor answers
+                &#8220;what is actually in flight right now?&#8221; — who holds what,
+                what shape of work they are doing, and where two efforts are about to collide.
+              </p>
+              <div class="hero-actions">
+                <a class="btn primary" href="./docs/quickstart.html">Get started</a>
+                <a class="btn" href="./docs/">Read the docs</a>
+              </div>
+              <div class="cmdline" id="quickstart">
+                <code>make up</code>
+                <button class="copy-btn" type="button" data-copy>Copy</button>
+              </div>
+              <p class="lede" style="font-size: 14px; margin-top: 10px;">
+                Postgres on <code>:55432</code>, the control plane on
+                <code>127.0.0.1:8080</code>, your CLI login saved — no token to copy, no second terminal.
+              </p>
+            </div>
+            <div>
+              <div class="terminal" role="img" aria-label="conductor check reporting a scope conflict">
+                <div class="terminal-bar">
+                  <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+                  <span class="terminal-title">conductor check</span>
+                </div>
+                <pre><span class="t-cmd">$ conductor check --summary "add retry-aware model routing" --scope dir:internal/router</span>
+
+<span class="t-out">block_conflict: scope conflict on dir:internal/router</span>
+
+<span class="t-out">  alice holds dir:internal/router for T-1 (write_exclusive).
+  Wait for it, split your scope, or join their task.</span></pre>
+              </div>
+              <div class="cmdline">
+                <code>conductor status</code>
+                <button class="copy-btn" type="button" data-copy>Copy</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="problem">
+          <p class="eyebrow">The problem</p>
+          <h2 class="section-title">The expensive failures are not bad code</h2>
+          <div class="prose-narrow">
+            <p class="lede">
+              On a three-person team all running Claude Code, Codex, or OpenCode against one repo:
+              two people building the same thing, two branches rewriting the same file,
+              two migrations racing the same table.
+            </p>
+            <div class="problem-box">
+              The obvious fix — share the chats — is the wrong fix. Prompts and model output
+              are the most private thing a developer produces.
+            </div>
+            <p class="privacy-line">
+              <strong>Conductor never shares prompts or output — only intent and territory.</strong>
+            </p>
+          </div>
+        </section>
+
+        <section id="features">
+          <p class="eyebrow">Features</p>
+          <h2 class="section-title">One command to check, everything else to trust the answer</h2>
+          <p class="lede">
+            That is the whole product in one command. Everything else exists to make that answer
+            correct, fast, and safe to trust.
+          </p>
+          <div class="grid-3">
+            <article class="card">
+              <h3>Conflict check</h3>
+              <p>Run before you edit. Exit 3 means stop: someone holds your territory.</p>
+              <pre>$ conductor check --summary "…" --scope dir:internal/api
+
+block_conflict: scope conflict on dir:internal/router
+
+  alice holds dir:internal/router for T-1 (write_exclusive).
+  Wait for it, split your scope, or join their task.</pre>
+            </article>
+            <article class="card">
+              <h3>Semantic duplicate detection</h3>
+              <p>
+                Two people describing the same work in different words, with no overlapping
+                files yet. Both summaries are reduced to HMAC&#8217;d token sets under a
+                per-tenant key and compared with MinHash. Detection without disclosure.
+              </p>
+              <pre>$ conductor check --summary "Build team invitation flow"
+
+suggest_join: similar work already in flight
+
+  T-3 (owner alice) looks like the same work.
+  Join it, or narrow your scope.</pre>
+            </article>
+            <article class="card">
+              <h3>Capability-aware dispatch</h3>
+              <p>
+                A session advertises what it is driving; the catalog decides what that is worth.
+                A floor is a floor: an idle cheap session never wins a selection it does not qualify for.
+              </p>
+              <pre>$ conductor task assign T-42 --require-tier T4 --require-effort xhigh
+
+T-42 offered to alice (claude-opus-5 on claude).
+  requirement: tier ≥ T4, effort ≥ xhigh
+  1 of 3 live session(s) qualified
+
+$ conductor policy lint
+
+  0 error(s), 1 warning(s).</pre>
+            </article>
+            <article class="card">
+              <h3>Transferable budgets</h3>
+              <p>
+                Every member gets the same token allowance over a rolling 30-day window — and it
+                is transferable, with no admin in the loop. Balances are pure arithmetic over two
+                ledgers, so there is no counter to drift and no way to mint tokens.
+              </p>
+              <pre>$ conductor budget share bob 2m --note "finishing the router refactor"
+
+Shared 2m tokens with bob.
+
+  you    1.1m remaining
+  bob    3.4m remaining</pre>
+            </article>
+            <article class="card">
+              <h3>Swarm and admission queue</h3>
+              <p>
+                Coworkers join the same control plane and their machines and sessions become
+                shared capacity. Past the caps, new work takes a place in line instead of failing.
+              </p>
+              <pre>$ conductor swarm
+
+Capacity: 2 runner(s), 3 session(s) accepting work,
+          5 free slot(s), 1 waiting in queue
+
+concurrency:
+  max_active_sessions: 6
+  max_sessions_per_principal: 2
+  max_concurrent_attempts: 4</pre>
+            </article>
+            <article class="card">
+              <h3>Pause, resume, and measure</h3>
+              <p>
+                One command freezes every agent terminal on the machine; one command wakes them.
+                Every harness meters itself; Conductor reads those logs and keeps one ledger.
+                What crosses the wire is numbers, a model name, and an hour.
+              </p>
+              <pre>$ conductor pause     # freeze every interactive agent session
+$ conductor resume    # wake them; closed terminals are reopened
+
+$ conductor usage --by day,harness
+$ conductor budget    # the team's token budget this window</pre>
+            </article>
+          </div>
+        </section>
+      </div>
+
+      <div class="strip" id="architecture">
+        <div class="strip-inner">
+          <p class="eyebrow">Architecture</p>
+          <h2 class="section-title">How it holds together</h2>
+          <p class="lede">
+            Ledger, leases, reservations, conflict graph, presence — on Postgres as the source of truth.
+            Four mechanisms do the real work: transactional claims, fencing epochs, reservations
+            under an advisory lock, and merge risk from observed diffs.
+          </p>
+          <pre class="diagram"> Claude Code · Codex · OpenCode · human sessions
+        │                    │
+   MCP tools           conductor CLI / wrap
+        └────────┬───────────┘
+                 ▼
+      control plane (conductord)
+   ledger · leases · reservations · conflict graph · presence
+                 │
+          PostgreSQL (source of truth)
+                 │
+      scheduler ─┴─ adaptive router
+                 │
+   harness drivers → isolated git worktrees</pre>
+        </div>
+      </div>
+
+      <div class="wrap">
+        <section id="integrations">
+          <p class="eyebrow">Integrations</p>
+          <h2 class="section-title">One command wires your coding tool</h2>
+          <p class="lede">
+            MCP config plus, where supported, pre-edit hooks that run the conflict check before
+            every edit and block on a hard conflict. Each merge keeps what is already there.
+          </p>
+          <div class="tool-list">
+            <span class="tool">Claude Code</span>
+            <span class="tool">Cursor</span>
+            <span class="tool">Codex</span>
+            <span class="tool">OpenCode</span>
+            <span class="tool">Windsurf</span>
+            <span class="tool">VS Code</span>
+            <span class="tool">Zed</span>
+            <span class="tool">Gemini</span>
+          </div>
+          <div class="cmdline" style="max-width: 560px;">
+            <code>conductor integrate all</code>
+            <button class="copy-btn" type="button" data-copy>Copy</button>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <footer>
+      <div class="footer-inner">
+        <span>Conductor — coordination for humans and coding agents.</span>
+        <span class="right">
+          <a href="./docs/">Docs</a>
+          <a href="https://github.com/aburan28/conductor">GitHub</a>
+        </span>
+      </div>
+    </footer>
+
+    <script type="module" src="./src/landing.ts"></script>
+  </body>
+</html>

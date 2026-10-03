@@ -8,9 +8,19 @@ INSTALL_BIN := $(INSTALL_PREFIX)/bin
 CONDUCTOR_BINS := conductord conductor conductor-mcp
 TOKEN_FILE := .conductor/.bootstrap-token
 
+# Upstream holding the GitHub releases `make install` downloads. Derived from
+# the origin remote so forks work; override with REPO=owner/name. (No literal
+# parentheses in the shell command: make would eat them inside $(shell ...).)
+GIT_REPO := $(shell git remote get-url origin 2>/dev/null | sed 's|^https://github.com/||; s|^git@github.com:||; s|\.git$$||; s|/$$||')
+ifneq (,$(findstring /,$(GIT_REPO)))
+REPO ?= $(GIT_REPO)
+else
+REPO ?= aburan28/conductor
+endif
+
 export DATABASE_URL
 
-.PHONY: all build test unit vet fmt db-up db-down db-wait bootstrap setup run serve login up down mcp wrap claude codex opencode clean e2e install uninstall
+.PHONY: all build test unit vet fmt db-up db-down db-wait bootstrap setup run serve login up down mcp wrap claude codex opencode clean e2e install install-local uninstall
 
 all: vet build test
 
@@ -126,10 +136,20 @@ e2e: build
 clean:
 	rm -rf $(BIN)
 
-# Build the binaries, copy them into INSTALL_BIN (default ~/.local/bin), and
-# idempotently add that directory to PATH in ~/.zshrc. Override the prefix
+# Download the released binaries for this platform from the GitHub releases of
+# $(REPO) into INSTALL_BIN (default ~/.local/bin), and idempotently add that
+# directory to PATH in ~/.zshrc. No Go toolchain needed. Pin a release with
+# VERSION=vX.Y.Z; by default the latest release is used. Override the prefix
 # with: make install INSTALL_PREFIX=/usr/local (needs sudo for /usr/local).
-install: build
+# To install a build of the current tree instead, use install-local.
+install:
+	@mkdir -p $(INSTALL_BIN)
+	@./scripts/install-release.sh $(REPO) $(INSTALL_BIN) $(if $(VERSION),$(VERSION),)
+	@./scripts/install-path.sh $(INSTALL_BIN)
+	@echo "installed: $(CONDUCTOR_BINS:%=$(INSTALL_BIN)/%)"
+
+# Build the binaries from the current tree and copy them into INSTALL_BIN.
+install-local: build
 	@mkdir -p $(INSTALL_BIN)
 	@for bin in $(CONDUCTOR_BINS); do \
 	  install -m 0755 $(BIN)/$$bin $(INSTALL_BIN)/$$bin; \

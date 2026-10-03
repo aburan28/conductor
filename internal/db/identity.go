@@ -264,6 +264,47 @@ func (s *Store) RevokeAllTokens(ctx context.Context, principalID domain.ID) (int
 	return tag.RowsAffected(), nil
 }
 
+// ResetTokens rotates a principal's credentials in one transaction: a fresh token is
+// minted and every other live token they hold is revoked, so exactly one valid
+// credential remains afterwards. The plaintext is returned exactly once, like
+// CreateToken. Doing both halves in one transaction means there is no window where two
+// live tokens exist and no name ambiguity when several share a label.
+func (s *Store) ResetTokens(ctx context.Context, principalID domain.ID, name string, ttl time.Duration) (string, int64, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", 0, err
+	}
+	token := TokenPrefix + base64.RawURLEncoding.EncodeToString(raw)
+	hash := hashToken(token)
+
+	var expires any
+	if ttl > 0 {
+		expires = s.Now().Add(ttl)
+	}
+	var revoked int64
+	err := s.Tx(ctx, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO api_tokens (principal_id, name, token_hash, expires_at)
+			VALUES ($1::uuid, $2, $3, $4)`,
+			principalID, name, hash, expires); err != nil {
+			return err
+		}
+		tag, err := tx.Exec(ctx, `
+			UPDATE api_tokens SET revoked_at = now()
+			 WHERE principal_id = $1::uuid AND revoked_at IS NULL AND token_hash != $2`,
+			principalID, hash)
+		if err != nil {
+			return err
+		}
+		revoked = tag.RowsAffected()
+		return nil
+	})
+	if err != nil {
+		return "", 0, err
+	}
+	return token, revoked, nil
+}
+
 // TokenInfo describes a token without disclosing it. There is no field here that could carry
 // the secret, because the secret is not stored — only its hash.
 type TokenInfo struct {

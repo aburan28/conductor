@@ -21,6 +21,8 @@ import (
 const usageText = `conductor — coordinate humans and coding agents on one repository
 
 Setup
+  conductor up                       one command: Postgres, control plane, and login
+  conductor down [--db]              stop the control plane (--db also stops Postgres)
   conductor init                     scaffold .conductor/ into this repository
   conductor login                    save endpoint, token, and project
   conductor doctor                   report which harnesses are installed
@@ -28,7 +30,7 @@ Setup
   conductor invite <handle>          mint a teammate a token and print one join link
   conductor join <link>              accept an invite link and log in
   conductor member list|remove       see or revoke who has access
-  conductor token create|list|revoke manage your own credentials
+  conductor token create|list|reset|revoke manage your own credentials
   conductor dashboard                print a ready-to-open dashboard link
   conductor integrate <tool>         connect Claude Code, Cursor, Codex, OpenCode, … to this project
   conductor models                   the model catalog; models discover finds local ones
@@ -97,6 +99,10 @@ func main() {
 	switch os.Args[1] {
 	case "init":
 		err = cmdInit(args)
+	case "up":
+		err = cmdUp(ctx, args)
+	case "down":
+		err = cmdDown(ctx, args)
 	case "login":
 		err = cmdLogin(ctx, args)
 	case "member":

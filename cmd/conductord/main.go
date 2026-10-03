@@ -73,6 +73,8 @@ func serve(args []string) error {
 		"this daemon's mesh private key")
 	peerDiscoverDNS := fs.String("peer-discover-dns", envOr("CONDUCTOR_PEER_DISCOVER_DNS", ""),
 		"DNS SRV record resolved on every tick to find mesh peers automatically, instead of a hand-maintained --peer per daemon (e.g. _conductor-mesh._tcp.mesh.internal)")
+	peerDNSServer := fs.String("peer-dns-server", envOr("CONDUCTOR_PEER_DNS_SERVER", ""),
+		"host:port of the DNS server used for --peer-discover-dns lookups (default: system DNS). For a laptop-local directory: 127.0.0.1:15353")
 	verbose := fs.Bool("v", false, "verbose logging")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, `conductord — Conductor control plane
@@ -191,10 +193,25 @@ Binding 127.0.0.1 needs none of these.`, *addr)
 			return errors.New("mesh certificate carries no name (no DNS SAN, no common name)")
 		}
 		if len(meshPeers) > 0 || *peerDiscoverDNS != "" {
+			// A pinned DNS server bypasses the system resolver for discovery
+			// lookups. The Go resolver ignores /etc/resolver, so on a laptop the
+			// directory has to live somewhere the OS resolver never looks —
+			// this points the lookup straight at it instead.
+			var resolver peer.SRVResolver
+			if *peerDNSServer != "" {
+				dnsServer := *peerDNSServer
+				resolver = &net.Resolver{
+					PreferGo: true,
+					Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+						return net.Dial(network, dnsServer)
+					},
+				}
+			}
 			mgr, err := peer.New(peer.Options{
 				Peers: meshPeers, SelfURL: selfEndpoint,
 				CAPath: *peerCA, CertPath: *peerCert, KeyPath: *peerKey,
 				DiscoverDNS: *peerDiscoverDNS,
+				Resolver:    resolver,
 				Logger:      logger,
 			})
 			if err != nil {

@@ -30,6 +30,7 @@ func (s *Server) routes() {
 
 	m.HandleFunc("GET /v1/tokens", auth(s.listTokens))
 	m.HandleFunc("POST /v1/tokens", auth(s.createToken))
+	m.HandleFunc("POST /v1/tokens/reset", auth(s.resetToken))
 	m.HandleFunc("DELETE /v1/tokens/{name}", auth(s.revokeToken))
 	m.HandleFunc("POST /v1/tokens/revoke-all", auth(s.revokeAllTokens))
 

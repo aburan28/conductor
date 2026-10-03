@@ -174,7 +174,10 @@ func cmdDoctor(ctx context.Context, args []string) error {
 		return err
 	}
 
-	reg := harness.BuildRegistry(harness.DefaultHarnessConfigs())
+	// Resolved before the registry, not after, because a repository may declare harnesses of
+	// its own and doctor's whole job is reporting what this machine will actually run.
+	repoRoot, _ := config.FindRoot(".")
+	reg := buildHarnessRegistry(repoRoot)
 	caps := reg.CapabilityReport(ctx)
 
 	type report struct {
@@ -202,9 +205,7 @@ func cmdDoctor(ctx context.Context, args []string) error {
 			out.Principal = who.Principal.Handle
 		}
 	}
-	if root, err := config.FindRoot("."); err == nil {
-		out.Repository = root
-	}
+	out.Repository = repoRoot
 	// Which coding tools on this machine are wired to Conductor, and how.
 	home, _ := os.UserHomeDir()
 	out.Integrations = integrations.Statuses(integrations.Options{

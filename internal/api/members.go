@@ -240,5 +240,31 @@ func (s *Server) revokeAllTokens(w http.ResponseWriter, r *http.Request, p domai
 	})
 }
 
+// resetToken rotates the caller's credentials: one fresh token is minted and every other
+// live token they hold is revoked, atomically. Unlike create-then-revoke by hand, there
+// is no window where two credentials are valid and no ambiguity when several tokens
+// share a name. The credential used for this request is among the revoked: the caller
+// must use the returned token (or --save it) from here on.
+func (s *Server) resetToken(w http.ResponseWriter, r *http.Request, p domain.Principal) {
+	var body createTokenBody
+	if err := decode(r, &body); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if body.Name == "" {
+		body.Name = "cli"
+	}
+	token, revoked, err := s.store.ResetTokens(r.Context(), p.ID, body.Name, body.TTL.Std())
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.store.Audit(r.Context(), p.OrganizationID, "", p.ID,
+		"token.reset", "principal", p.ID, map[string]any{"revoked": revoked})
+	s.ok(w, r, http.StatusCreated, map[string]any{
+		"name": body.Name, "token": token, "revoked": revoked,
+	})
+}
+
 // tokenTTLDefault bounds a human's credential when none is specified by the caller.
 const tokenTTLDefault = 90 * 24 * time.Hour

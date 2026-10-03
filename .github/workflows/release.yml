@@ -1,0 +1,80 @@
+name: release
+
+# Cutting a release is a tag push, not a CI step: pushing vX.Y.Z builds the
+# binaries for every supported platform and publishes them as release assets.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: darwin, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: linux,  goarch: amd64 }
+          - { goos: linux,  goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          dir="dist/conductor_${version}_${GOOS}_${GOARCH}"
+          mkdir -p "$dir"
+          for bin in conductord conductor conductor-mcp; do
+            go build -trimpath -ldflags "-s -w" -o "$dir/$bin" "./cmd/$bin"
+          done
+          tar -C dist -czf "dist/${dir}.tar.gz" "$dir"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*.tar.gz
+
+  publish:
+    needs: build
+    # needs: build waits for every matrix leg, so all archives are present
+    # by the time the release is created.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: collect platform archives
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: checksums and release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p out
+          for f in dist/*/*.tar.gz; do cp "$f" out/; done
+          cd out
+          sha256sum *.tar.gz > SHA256SUMS
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            # Release already exists (e.g. created locally before the tag
+            # push); replace its assets so re-tagging is safe.
+            gh release upload "${GITHUB_REF_NAME}" --clobber *.tar.gz SHA256SUMS
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "${GITHUB_REF_NAME}" \
+              --notes "$(git log -1 --format=%B)" \
+              *.tar.gz SHA256SUMS
+          fi

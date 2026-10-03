@@ -30,6 +30,51 @@ execution:
 workflow:
   file: .conductor/WORKFLOW.md
 
+# How an agent runtime is invoked. Declared entries merge over the built-in defaults
+# (claude, codex, opencode); a name this build does not know is driven through the generic
+# exec driver, so a new runtime is a config block rather than a pull request.
+#
+# `cairn` is Claude Code pointed at a cairn node's MCP server: same binary, different tools.
+# The dispatched agent gets score_candidate / frontier_status / submit_claim and works an
+# objective on the research network. See docs/cairn-integration.md.
+harnesses:
+  # codex ships disabled in the built-in defaults (App Server driver is still TODO,
+  # §16.3); the exec driver is verified, so this project opts in explicitly.
+  codex:
+    enabled: true
+    command: codex
+  cairn:
+    enabled: true
+    command: claude
+    arg_template:
+      - "-p"
+      - "--output-format"
+      - "stream-json"
+      - "--verbose"
+      - "--mcp-config"
+      - "{mcp_config}"
+      - "--model"
+      - "{model}"
+    # Merged into the generated attempt config alongside conductor's own server, which is
+    # always present and cannot be displaced. Absolute paths: the agent is launched in a
+    # git worktree, not in the cairn checkout.
+    #
+    # CAIRN_EPOCH_SECONDS=1 is a DEMO setting. A real network runs 600s epochs, and a log
+    # written at one length audits as broken when read at another.
+    mcp_servers:
+      cairn:
+        command: /Volumes/SSD990/cairn/bin/cairn
+        args:
+          - "--log"
+          - /Volumes/SSD990/cairn/cairn.jsonl
+          - "--root"
+          - /Volumes/SSD990/cairn
+          - mcp
+          - "--identity"
+          - /Volumes/SSD990/cairn/.local/agent.identity.json
+        env:
+          CAIRN_EPOCH_SECONDS: "1"
+
 artifacts:
   backend: filesystem
   root: .conductor/runtime/artifacts
