@@ -22,6 +22,9 @@ type EventType struct {
 // and the per-agent coordination chatter (offers, admission tickets) that only the session
 // involved acts on.
 var Catalog = []EventType{
+	{"conflict.blocked", "someone was refused territory another task holds"},
+	{"conflict.suggest_join", "someone started work that looks like a task already in flight"},
+	{"conflict.detected", "the conflict graph found two tasks colliding (medium severity and up)"},
 	{"task.status_changed", "a task moved to another status (narrow with :done, :failed, :blocked_conflict, …)"},
 	{"scope.released", "territory someone was blocked on is free again"},
 	{"attempt.stalled", "an agent's attempt has gone silent"},
@@ -45,9 +48,13 @@ var Catalog = []EventType{
 }
 
 // DefaultEvents is what a channel gets when none are named: the moments a team acts on —
-// work paused on a conflict, territory freed, agents stalled or lost, work landed or failed,
+// someone blocked by or converging on another's work, a new conflict, work paused on a
+// conflict, territory freed, agents stalled or lost, work landed or failed,
 // and money or quota running out.
 var DefaultEvents = []string{
+	"conflict.blocked",
+	"conflict.suggest_join",
+	"conflict.detected",
 	"task.status_changed:blocked_conflict",
 	"scope.released",
 	"attempt.stalled",

@@ -174,7 +174,7 @@ func TestNormalizeEvents(t *testing.T) {
 	if strings.Join(got, " ") != "scope.released github.pr_merged task.status_changed:done" {
 		t.Errorf("got %v", got)
 	}
-	for _, bad := range []string{"conflict.detected", "task.status_changed:nope", "scope.released:done", "attempt.progress"} {
+	for _, bad := range []string{"conflict.opened", "task.status_changed:nope", "scope.released:done", "attempt.progress"} {
 		if _, err := NormalizeEvents([]string{bad}); !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Errorf("%q accepted: %v", bad, err)
 		}
@@ -263,5 +263,32 @@ func TestSlackBodyEscapesMarkup(t *testing.T) {
 	d, _ := discordBody(m)
 	if !strings.Contains(string(d), `"allowed_mentions":{"parse":[]}`) {
 		t.Errorf("discord body permits mentions: %s", d)
+	}
+}
+
+// The conflict events render as a sentence a team can act on, and say nothing specific about
+// a private side.
+func TestConflictMessages(t *testing.T) {
+	detected := domain.Event{ID: "e", Type: "conflict.detected", Visibility: domain.VisibilityTeamSummary,
+		Payload: map[string]any{"task_ref": "T-1", "with_task_ref": "T-2", "kind": "merge_risk",
+			"severity": "high", "suggestion": "suggest_split", "changed_paths": []any{"internal/x.go"}}}
+	if got := buildMessage("p", detected, "").Text; got !=
+		"Conflict detected between T-1 and T-2 (merge_risk, high); both changed internal/x.go; suggestion: suggest split" {
+		t.Errorf("detected: %q", got)
+	}
+	blocked := domain.Event{ID: "e", Type: "conflict.blocked", Visibility: domain.VisibilityTeamSummary,
+		Payload: map[string]any{"task_ref": "T-3", "principal": "bob", "resources": []any{"dir:internal/x"}}}
+	if got := buildMessage("p", blocked, "").Text; got !=
+		"@bob was blocked by T-3's territory (dir:internal/x). They are told when it is released." {
+		t.Errorf("blocked: %q", got)
+	}
+	for _, e := range []domain.Event{detected, blocked} {
+		e.Visibility = domain.VisibilityPrivate
+		raw, _ := json.Marshal(buildMessage("p", e, ""))
+		for _, leak := range []string{"T-1", "T-2", "T-3", "internal/x"} {
+			if strings.Contains(string(raw), leak) {
+				t.Errorf("private %s carries %q: %s", e.Type, leak, raw)
+			}
+		}
 	}
 }

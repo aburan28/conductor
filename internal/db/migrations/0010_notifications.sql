@@ -53,3 +53,22 @@ ALTER TABLE outbox_events ADD COLUMN next_attempt_at timestamptz;
 -- The relay reads the pending rows of projects that have a channel, oldest first. Projects
 -- without one are never scanned; retention bounds their undelivered rows as before.
 CREATE INDEX outbox_events_project_pending ON outbox_events (project_id, id) WHERE delivered_at IS NULL;
+
+-- Conflict announcements (conflict.blocked, conflict.suggest_join, conflict.detected): the
+-- persisted half of "at most once per window", like budget_alert_levels and
+-- attempt_stall_alerts. An agent polling a blocked check, a restart, or a second replica
+-- finds the row and writes no second event.
+--
+--   blocked / suggest_join: subject is the requesting principal and task_id the task in the
+--     way; a row older than the window no longer counts and is replaced.
+--   detected: subject is the edge's first task, task_id its second, kind the edge kind; the
+--     row lives while the conflict stays open, so each conflict is announced once.
+CREATE TABLE conflict_alerts (
+    project_id   uuid NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    outcome      text NOT NULL CHECK (outcome IN ('blocked', 'suggest_join', 'detected')),
+    subject      uuid NOT NULL,
+    task_id      uuid NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    kind         text NOT NULL DEFAULT '',
+    announced_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (project_id, outcome, subject, task_id, kind)
+);

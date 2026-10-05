@@ -146,6 +146,46 @@ func summarize(typ, subject string, d map[string]any) string {
 		s := fmt.Sprintf("%s is now %s", task, orDash(str(d, "to")))
 		s = with(s, "from", " (was %s)")
 		return with(s, "reason", ": %s")
+	case "conflict.blocked":
+		s := "Someone was blocked by " + possessive(task) + " territory"
+		if who := str(d, "principal"); who != "" {
+			s = "@" + who + " was blocked by " + possessive(task) + " territory"
+		}
+		if res := strList(d, "resources"); len(res) > 0 {
+			s += " (" + strings.Join(res, ", ") + ")"
+		}
+		return s + ". They are told when it is released."
+	case "conflict.suggest_join":
+		s := "Someone"
+		if who := str(d, "principal"); who != "" {
+			s = "@" + who
+		}
+		return s + " is starting work that looks like " + task + "; joining it may beat duplicating it."
+	case "conflict.detected":
+		s := "Conflict detected"
+		if other := str(d, "with_task_ref"); other != "" && subject != "" {
+			s += " between " + task + " and " + other
+		} else if subject != "" {
+			s += " involving " + task
+		}
+		var detail []string
+		for _, k := range []string{"kind", "severity"} {
+			if v := str(d, k); v != "" {
+				detail = append(detail, v)
+			}
+		}
+		if len(detail) > 0 {
+			s += " (" + strings.Join(detail, ", ") + ")"
+		}
+		if res := strList(d, "resources"); len(res) > 0 {
+			s += " on " + strings.Join(res, ", ")
+		} else if paths := strList(d, "changed_paths"); len(paths) > 0 {
+			s += "; both changed " + strings.Join(paths, ", ")
+		}
+		if sug := str(d, "suggestion"); sug != "" {
+			s += "; suggestion: " + strings.ReplaceAll(sug, "_", " ")
+		}
+		return s
 	case "scope.released":
 		s := "Territory "
 		if who := str(d, "principal"); who != "" {
@@ -232,6 +272,13 @@ func summarize(typ, subject string, d map[string]any) string {
 		return typ + " on " + subject
 	}
 	return typ
+}
+
+func possessive(s string) string {
+	if strings.HasSuffix(s, "s") {
+		return s + "'"
+	}
+	return s + "'s"
 }
 
 func orDash(s string) string {

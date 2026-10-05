@@ -159,7 +159,7 @@ func TestNotificationCredentialsAreNotReturned(t *testing.T) {
 	for _, bad := range []map[string]any{
 		{"kind": "smtp", "url": "https://example.com/x"},
 		{"kind": "webhook", "url": "ftp://example.com/x"},
-		{"kind": "webhook", "url": "https://example.com/x", "events": []string{"conflict.detected"}},
+		{"kind": "webhook", "url": "https://example.com/x", "events": []string{"conflict.opened"}},
 	} {
 		if code, body := h.do(h.aliceTok, http.MethodPost, h.projectPath("/notifications"), bad); code != http.StatusBadRequest {
 			t.Errorf("%v = %d\n%s", bad, code, body)
@@ -260,5 +260,116 @@ func TestNotificationsNeverCarryAPrivateTask(t *testing.T) {
 	}
 	if !sawRelease {
 		t.Error("bob was not told the territory he waited for is free")
+	}
+}
+
+func (h *harness) countEvents(t *testing.T, eventType string) int {
+	t.Helper()
+	var n int
+	if err := h.store.Pool().QueryRow(context.Background(), `
+		SELECT count(*) FROM domain_events WHERE project_id = $1::uuid AND event_type = $2`,
+		h.project.ID, eventType).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// A check refused by someone else's territory, and a start that looks like work already in
+// flight, are announced — once per window however often the agent retries — and a private
+// holder appears in the notification as "a private task" with none of its specifics.
+func TestConflictEventsAreAnnouncedOnceAndPrivately(t *testing.T) {
+	h := newHarness(t)
+	n := h.withNotifications(t)
+	ctx := context.Background()
+	hook := newSink(t)
+	if code, body := h.do(h.aliceTok, http.MethodPost, h.projectPath("/notifications"),
+		map[string]any{"kind": "webhook", "url": hook.server.URL}); code != http.StatusCreated {
+		t.Fatalf("create = %d\n%s", code, body)
+	}
+
+	started := h.startWork(h.aliceTok, map[string]any{
+		"summary": "ZQXINTENT rework billing", "title": "ZQXTITLE billing rework", "visibility": "private",
+		"scopes": []map[string]any{{"resource": "dir:internal/billing", "mode": "write_exclusive"}},
+	})
+	check := map[string]any{"summary": "touch billing",
+		"scopes": []map[string]any{{"resource": "dir:internal/billing/x", "mode": "write_exclusive"}}}
+	for i := 0; i < 5; i++ {
+		if code, body := h.do(h.bobTok, http.MethodPost, h.projectPath("/intents/check"), check); code != http.StatusOK ||
+			!strings.Contains(string(body), "block_conflict") {
+			t.Fatalf("check = %d\n%s", code, body)
+		}
+	}
+	// Start-work refused for the same reason is the same announcement.
+	if code, body := h.do(h.bobTok, http.MethodPost, h.projectPath("/work/start"), check); code == http.StatusOK && !strings.Contains(string(body), "block_conflict") {
+		t.Fatalf("start = %d\n%s", code, body)
+	}
+	// The holder checking its own territory is not "blocked by someone else".
+	h.do(h.aliceTok, http.MethodPost, h.projectPath("/intents/check"), check)
+	if got := h.countEvents(t, "conflict.blocked"); got != 1 {
+		t.Fatalf("%d conflict.blocked events after repeated checks, want 1", got)
+	}
+
+	// Similar work: a team-visible task, and someone starting what reads as the same thing.
+	h.startWork(h.aliceTok, map[string]any{
+		"summary": "add retry aware routing to the model dispatcher with exponential backoff and jitter",
+		"scopes":  []map[string]any{{"resource": "dir:internal/router", "mode": "write_exclusive"}},
+	})
+	similar := map[string]any{"summary": "add retry aware routing to the model dispatcher with exponential backoff"}
+	var outcome struct {
+		Outcome string `json:"outcome"`
+	}
+	for i := 0; i < 3; i++ {
+		h.jsonDo(h.bobTok, http.MethodPost, h.projectPath("/intents/check"), similar, &outcome)
+	}
+	if outcome.Outcome != "suggest_join" {
+		t.Fatalf("the similar check = %q; the test needs suggest_join", outcome.Outcome)
+	}
+	if got := h.countEvents(t, "conflict.suggest_join"); got != 1 {
+		t.Errorf("%d conflict.suggest_join events after three checks, want 1", got)
+	}
+
+	// What a teammate's event feed shows of the block: who was blocked and the territory,
+	// nothing of the private task's intent.
+	_, obsTok := h.member("olive", domain.RoleObserver)
+	_, feed := h.do(obsTok, http.MethodGet, h.projectPath("/events"), nil)
+	if !strings.Contains(string(feed), "conflict.blocked") {
+		t.Fatalf("the feed lacks the announcement:\n%s", feed)
+	}
+	for _, marker := range []string{"ZQXTITLE", "ZQXINTENT", "touch billing"} {
+		if strings.Contains(string(feed), marker) {
+			t.Errorf("the event feed carries %q", marker)
+		}
+	}
+
+	for {
+		r, err := n.Pass(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Claimed == 0 {
+			break
+		}
+	}
+	var blocked, join string
+	for _, body := range hook.all() {
+		switch {
+		case strings.Contains(body, `"type":"conflict.blocked"`):
+			blocked = body
+		case strings.Contains(body, `"type":"conflict.suggest_join"`):
+			join = body
+		}
+	}
+	if !strings.Contains(blocked, "@bob was blocked by a private task") {
+		t.Errorf("blocked notification:\n%s", blocked)
+	}
+	var task domain.Task
+	h.jsonDo(h.aliceTok, http.MethodGet, "/v1/tasks/"+started.TaskID, nil, &task)
+	for _, leak := range []string{"ZQXTITLE", "ZQXINTENT", "internal/billing", task.Ref, "touch billing"} {
+		if strings.Contains(blocked, leak) {
+			t.Errorf("blocked notification carries %q:\n%s", leak, blocked)
+		}
+	}
+	if !strings.Contains(join, "@bob is starting work that looks like T-") || strings.Contains(join, "retry aware") {
+		t.Errorf("suggest_join notification:\n%s", join)
 	}
 }
