@@ -12,9 +12,9 @@ export function openTaskDrawer(ref, ctx, { onClose } = {}) {
   const body = h('div', { class: 'drawer-body' }, skeleton(8));
   const titleEl = h('span', { class: 'ref', style: { fontSize: '13px' } }, ref);
   const scrim = h('div', { class: 'drawer-scrim', onclick: () => close() });
-  const drawer = h('aside', { class: 'drawer', role: 'dialog', 'aria-label': 'Task ' + ref },
+  const drawer = h('div', { class: 'drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Task ' + ref },
     h('div', { class: 'drawer-bar' },
-      h('button', { class: 'btn ghost icon', 'aria-label': 'close', onclick: () => close() }, icon('back')),
+      h('button', { class: 'btn ghost icon', 'aria-label': 'Close task', onclick: () => close() }, icon('back')),
       titleEl, h('div', { class: 'spacer', style: { flex: 1 } }),
       h('button', { class: 'btn ghost sm', onclick: () => refresh() }, icon('refresh'), 'Refresh')),
     body);

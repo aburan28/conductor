@@ -60,7 +60,7 @@ export default defineView({
       if (!await confirmModal({ title: `Remove ${m.handle}?`, message: 'Their tokens are revoked and their live sessions lose access.', confirmLabel: 'Remove', kind: 'danger' })) return;
       try { await ctx.api.del(ctx.api.project(ctx.project, '/members/' + encodeURIComponent(m.handle))); toast(`Removed ${m.handle}`); refresh(); } catch (err) { toastError(err, 'Could not remove'); }
     };
-    const membersCard = card({ title: 'Members', flush: true, actions: canAdmin ? h('button', { class: 'btn sm primary', onclick: invite }, icon('plus'), 'Add member') : null,
+    const membersCard = card({ id: 'members', title: 'Members', flush: true, actions: canAdmin ? h('button', { class: 'btn sm primary', onclick: invite }, icon('plus'), 'Add member') : null,
       body: members.length ? table({ columns: [
         { key: 'handle', label: 'Handle', render: m => h('span', {}, h('strong', {}, m.handle), m.handle === ctx.handle ? h('span', { class: 'muted' }, ' (you)') : null) },
         { key: 'kind', label: 'Kind', render: m => chip(m.kind || 'human', { mono: false }) },
@@ -137,6 +137,23 @@ export default defineView({
         h('li', {}, 'Duplicate detection compares HMAC\'d token sets under a per-tenant key; the server never sees either sentence.'),
         h('li', {}, 'This dashboard makes no external requests of any kind; a test enforces it.'))) });
 
-    return h('div', { class: 'stack', style: { gap: '20px' } }, h('div', { class: 'grid-2' }, connection, appearance), securityCard, membersCard, notificationsCard(notifications, ctx, refresh), tokensCard, policyCard, privacy);
+    // Settings are grouped by whose they are. A new card goes in the section it belongs to:
+    // things about you, things about this project (maintainers' configuration, such as
+    // notification channels), or this machine's security. Organization-wide settings are
+    // in Admin.
+    const sections = [
+      ['you', 'You', [h('div', { class: 'grid-2' }, connection, appearance), tokensCard]],
+      ['project', 'This project', [membersCard, notificationsCard(notifications, ctx, refresh), policyCard]],
+      ['security', 'Security', [securityCard]],
+      ['about', 'About', [privacy]],
+    ];
+    const page = h('div', { class: 'settings' },
+      h('nav', { class: 'toc', 'aria-label': 'Settings sections' }, h('ul', {}, sections.map(([id, title]) => h('li', {}, h('a', { href: '#' + id }, title))),
+        ctx.isOrgAdmin ? h('li', {}, h('a', { href: '/admin', 'data-link': true }, 'Organization (Admin)')) : null)),
+      h('div', { class: 'stack', style: { gap: '28px' } }, sections.map(([id, title, cards]) =>
+        h('section', { class: 'settings-section', id, 'aria-labelledby': id + '-h' }, h('h2', { class: 'section-title', id: id + '-h' }, title),
+          h('div', { class: 'stack', style: { gap: '16px' } }, cards.filter(Boolean))))));
+    if (location.hash) setTimeout(() => { const el = document.getElementById(location.hash.slice(1)); if (el) el.scrollIntoView(); }, 0);
+    return page;
   },
 });

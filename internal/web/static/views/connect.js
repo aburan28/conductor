@@ -1,12 +1,13 @@
 import { h, icon } from '../lib/dom.js';
 import { createApi } from '../lib/api.js';
+import { applyBranding } from '../lib/branding.js';
 
 // The connect screen: paste a token, pick a project. The token is verified with /v1/whoami
 // before anything else loads, so a stale credential fails here rather than as a wall of 401s.
 export function renderConnect(root, { onConnect, error, note, token: initialToken }) {
-  const token = h('input', { type: 'password', placeholder: 'cdt_…', autocomplete: 'off', spellcheck: false, 'aria-label': 'token' });
+  const token = h('input', { type: 'password', placeholder: 'cdt_…', autocomplete: 'off', spellcheck: false });
   const projectSel = h('select', { disabled: true }, h('option', { value: '' }, 'verify the token first'));
-  const status = h('div', { class: 'hint', style: { minHeight: '18px' } }, error ? h('span', { class: 'risk-high' }, error) : '');
+  const status = h('div', { class: 'hint', role: 'status', 'aria-live': 'polite', style: { minHeight: '18px' } }, error ? h('span', { class: 'risk-high' }, error) : '');
   let projects = [];
   let handle = '';
 
@@ -49,8 +50,25 @@ export function renderConnect(root, { onConnect, error, note, token: initialToke
       h('p', { class: 'hint' }, 'Or paste a token:'));
   }).catch(() => {});
 
-  root.replaceChildren(h('div', { class: 'connect' }, h('div', { class: 'card' }, h('div', { class: 'body' },
-    h('div', { class: 'brand' }, h('div', { class: 'logo' }, icon('bolt', 15)), h('span', { class: 'name' }, 'Conductor')),
+  // The organization's branding and sign-in banner, before anyone has signed in. The banner
+  // is plain text: it is inserted as a text node, never as markup.
+  const brandName = h('span', { class: 'name' }, 'Conductor');
+  const brandLogo = h('div', { class: 'logo', 'aria-hidden': 'true' }, icon('bolt', 15));
+  const banner = h('div', { class: 'login-banner', hidden: true, role: 'note' });
+  createApi({}).get('/v1/branding').then(b => {
+    if (!b) return;
+    applyBranding(b);
+    if (b.display_name) brandName.textContent = b.display_name;
+    if (b.login_banner) { banner.textContent = b.login_banner; banner.hidden = false; }
+    if (b.has_logo) {
+      brandLogo.classList.add('image');
+      brandLogo.replaceChildren(h('img', { src: '/v1/branding/logo?v=' + encodeURIComponent(b.logo_sha256 || ''), alt: '' }));
+    }
+  }).catch(() => {});
+
+  root.replaceChildren(h('main', { class: 'connect' }, h('div', { class: 'card' }, h('div', { class: 'body' },
+    h('h1', { class: 'brand' }, brandLogo, brandName),
+    banner,
     h('p', { class: 'muted' }, 'Coordinate humans and coding agents on one repository. Sign in with a token from ', h('code', {}, 'conductord bootstrap'), ' or ', h('code', {}, 'conductor member add'), '.'),
     sso,
     h('form', { class: 'form', onsubmit: ev => { ev.preventDefault(); projectSel.disabled ? verify() : connect(); } },
