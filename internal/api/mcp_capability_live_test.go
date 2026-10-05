@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/mcp"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/mcp"
 )
 
 // The escalation path an agent actually walks, driven through the MCP gateway against a real

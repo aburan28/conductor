@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adamburan/conductor/internal/db"
-	"github.com/adamburan/conductor/internal/githubapp"
-	"github.com/adamburan/conductor/internal/tracker"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/githubapp"
+	"github.com/aburan28/conductor/internal/tracker"
 )
 
 // `conductor github` connects Conductor to GitHub through a GitHub App: one click creates the

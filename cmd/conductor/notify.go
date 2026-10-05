@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adamburan/conductor/internal/client"
-	"github.com/adamburan/conductor/internal/notify"
+	"github.com/aburan28/conductor/internal/client"
+	"github.com/aburan28/conductor/internal/notify"
 )
 
 // Notifications: send the project's events to Slack, Discord, or any webhook (DESIGN.md

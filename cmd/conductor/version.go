@@ -4,7 +4,7 @@ import (
 	"flag"
 	"fmt"
 
-	"github.com/adamburan/conductor/internal/version"
+	"github.com/aburan28/conductor/internal/version"
 )
 
 // cmdVersion prints the build this CLI is. `conductor doctor` compares it with the server's.

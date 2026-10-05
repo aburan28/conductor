@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adamburan/conductor/internal/db"
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // The interactive loop over the public API, exactly as the CLI and the wrap sidecar drive it.

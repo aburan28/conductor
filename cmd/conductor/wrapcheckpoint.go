@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/adamburan/conductor/internal/checkpoint"
+	"github.com/aburan28/conductor/internal/checkpoint"
 )
 
 // The wrap sidecar's checkpointer. Every few minutes (CONDUCTOR_CHECKPOINT_INTERVAL,

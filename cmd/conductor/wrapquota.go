@@ -7,11 +7,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/adamburan/conductor/internal/checkpoint"
-	"github.com/adamburan/conductor/internal/client"
-	"github.com/adamburan/conductor/internal/config"
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/quota"
+	"github.com/aburan28/conductor/internal/checkpoint"
+	"github.com/aburan28/conductor/internal/client"
+	"github.com/aburan28/conductor/internal/config"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/quota"
 )
 
 // The wrap sidecar's quota watcher. Every minute (CONDUCTOR_QUOTA_INTERVAL) it reads what the

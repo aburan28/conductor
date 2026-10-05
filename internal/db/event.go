@@ -7,9 +7,9 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/metrics"
-	"github.com/adamburan/conductor/internal/privacy"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/metrics"
+	"github.com/aburan28/conductor/internal/privacy"
 )
 
 // eventsWritten counts events inserted. It counts at insert time, so an event whose

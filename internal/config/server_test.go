@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adamburan/conductor/internal/admin"
+	"github.com/aburan28/conductor/internal/admin"
 )
 
 const tenantID = "8f1c2b3a-4d5e-6f70-8192-a3b4c5d6e7f8"

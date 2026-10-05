@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 
-	"github.com/adamburan/conductor/internal/db"
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/privacy"
-	"github.com/adamburan/conductor/internal/taskcard"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/privacy"
+	"github.com/aburan28/conductor/internal/taskcard"
 )
 
 // Service operations a runner needs.

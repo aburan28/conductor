@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/adamburan/conductor/internal/peer"
+	"github.com/aburan28/conductor/internal/peer"
 )
 
 // fakeSRVResolver answers LookupSRV from a fixed table instead of touching real DNS.

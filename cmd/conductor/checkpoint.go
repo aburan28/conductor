@@ -14,10 +14,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adamburan/conductor/internal/backup"
-	"github.com/adamburan/conductor/internal/checkpoint"
-	"github.com/adamburan/conductor/internal/localstate"
-	"github.com/adamburan/conductor/internal/usage"
+	"github.com/aburan28/conductor/internal/backup"
+	"github.com/aburan28/conductor/internal/checkpoint"
+	"github.com/aburan28/conductor/internal/localstate"
+	"github.com/aburan28/conductor/internal/usage"
 )
 
 // ---------------------------------------------------------------------------

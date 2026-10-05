@@ -14,7 +14,7 @@ import (
 
 	"golang.org/x/text/unicode/norm"
 
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // Resource is a parsed, normalized reservation key.

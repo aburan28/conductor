@@ -10,9 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/adamburan/conductor/internal/client"
-	"github.com/adamburan/conductor/internal/config"
-	"github.com/adamburan/conductor/internal/integrations"
+	"github.com/aburan28/conductor/internal/client"
+	"github.com/aburan28/conductor/internal/config"
+	"github.com/aburan28/conductor/internal/integrations"
 )
 
 // cmdIntegrate connects a coding tool to this project: it writes Conductor's MCP server into

@@ -5,10 +5,10 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/adamburan/conductor/internal/admin"
-	"github.com/adamburan/conductor/internal/db"
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/sso"
+	"github.com/aburan28/conductor/internal/admin"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/sso"
 )
 
 // Organization policy where it touches single sign-on: admission, provisioning, and group

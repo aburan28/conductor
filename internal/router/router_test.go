@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/policy"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/policy"
 )
 
 func price(v float64) *float64 { return &v }

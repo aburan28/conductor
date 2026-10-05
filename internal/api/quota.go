@@ -8,9 +8,9 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/adamburan/conductor/internal/db"
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/quota"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/quota"
 )
 
 // Usage limits (docs/USAGE_LIMITS.md). A principal reports readings of their own logins and

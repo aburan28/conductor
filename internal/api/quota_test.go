@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/quota"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/quota"
 )
 
 func quotaSnap(account, machine, window string, pct float64, resets time.Time, observed time.Time) quota.Snapshot {

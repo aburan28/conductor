@@ -15,7 +15,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/adamburan/conductor/internal/version"
+	"github.com/aburan28/conductor/internal/version"
 )
 
 // The CLI under test, built once per test run with a stamped version, so exit codes and the

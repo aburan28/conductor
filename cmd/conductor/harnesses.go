@@ -11,8 +11,8 @@ package main
 // This is what reads it.
 
 import (
-	"github.com/adamburan/conductor/internal/config"
-	"github.com/adamburan/conductor/internal/harness"
+	"github.com/aburan28/conductor/internal/config"
+	"github.com/aburan28/conductor/internal/harness"
 )
 
 // buildHarnessRegistry returns the registry a repository asks for, falling back to the

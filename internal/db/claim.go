@@ -9,8 +9,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/resource"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/resource"
 )
 
 const leaseColumns = `

@@ -15,11 +15,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adamburan/conductor/internal/admin"
-	"github.com/adamburan/conductor/internal/coord"
-	"github.com/adamburan/conductor/internal/db"
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/sso/ssotest"
+	"github.com/aburan28/conductor/internal/admin"
+	"github.com/aburan28/conductor/internal/coord"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/sso/ssotest"
 )
 
 // The admin area: organization policy, its enforcement, branding, the audit log and SCIM

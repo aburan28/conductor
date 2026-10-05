@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adamburan/conductor/internal/admin"
-	"github.com/adamburan/conductor/internal/db"
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/admin"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // The admin area (DESIGN.md §25.8): an organization's policy, branding, members, SCIM

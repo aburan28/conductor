@@ -10,10 +10,10 @@ import (
 	"os"
 	"strings"
 
-	"github.com/adamburan/conductor/internal/client"
-	"github.com/adamburan/conductor/internal/coord"
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/selector"
+	"github.com/aburan28/conductor/internal/client"
+	"github.com/aburan28/conductor/internal/coord"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/selector"
 )
 
 // Capability commands (DESIGN.md §7.3, §7.7).

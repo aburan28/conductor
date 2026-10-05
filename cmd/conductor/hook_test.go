@@ -10,10 +10,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/adamburan/conductor/internal/client"
-	"github.com/adamburan/conductor/internal/coord"
-	"github.com/adamburan/conductor/internal/db"
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/client"
+	"github.com/aburan28/conductor/internal/coord"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 func TestIsEditTool(t *testing.T) {

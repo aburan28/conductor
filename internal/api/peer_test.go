@@ -18,8 +18,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adamburan/conductor/internal/coord"
-	"github.com/adamburan/conductor/internal/peer"
+	"github.com/aburan28/conductor/internal/coord"
+	"github.com/aburan28/conductor/internal/peer"
 )
 
 // The peer surface is the one part of the API whose authn is the TLS layer itself, so it

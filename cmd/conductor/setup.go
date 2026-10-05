@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adamburan/conductor/internal/client"
-	"github.com/adamburan/conductor/internal/config"
+	"github.com/aburan28/conductor/internal/client"
+	"github.com/aburan28/conductor/internal/config"
 )
 
 // ---------------------------------------------------------------------------

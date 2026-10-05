@@ -6,8 +6,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/privacy"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/privacy"
 )
 
 // Field rules: what an issue's title and body become on a task.

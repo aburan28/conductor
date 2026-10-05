@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/adamburan/conductor/internal/sso"
-	"github.com/adamburan/conductor/internal/sso/ssotest"
+	"github.com/aburan28/conductor/internal/sso"
+	"github.com/aburan28/conductor/internal/sso/ssotest"
 )
 
 // Microsoft Entra ID asserts no email_verified, so without an explicit trust it cannot sign

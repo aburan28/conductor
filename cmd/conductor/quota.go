@@ -15,11 +15,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adamburan/conductor/internal/checkpoint"
-	"github.com/adamburan/conductor/internal/client"
-	"github.com/adamburan/conductor/internal/config"
-	"github.com/adamburan/conductor/internal/quota"
-	"github.com/adamburan/conductor/internal/usage"
+	"github.com/aburan28/conductor/internal/checkpoint"
+	"github.com/aburan28/conductor/internal/client"
+	"github.com/aburan28/conductor/internal/config"
+	"github.com/aburan28/conductor/internal/quota"
+	"github.com/aburan28/conductor/internal/usage"
 )
 
 // ---------------------------------------------------------------------------

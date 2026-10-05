@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // AddMember used to be an upsert, so adding an existing member silently rewrote their role.

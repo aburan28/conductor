@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adamburan/conductor/internal/db"
-	"github.com/adamburan/conductor/internal/scheduler"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/scheduler"
 )
 
 // clearEnv blanks every variable serve reads, so the developer's own environment cannot

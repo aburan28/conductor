@@ -10,9 +10,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/adamburan/conductor/internal/client"
-	"github.com/adamburan/conductor/internal/db"
-	"github.com/adamburan/conductor/internal/sso"
+	"github.com/aburan28/conductor/internal/client"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/sso"
 )
 
 // Single sign-on from the command line: `conductor login --sso`, and `conductor sso` to see

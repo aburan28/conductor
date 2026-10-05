@@ -9,10 +9,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/adamburan/conductor/internal/checkpoint"
-	"github.com/adamburan/conductor/internal/client"
-	"github.com/adamburan/conductor/internal/coord"
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/checkpoint"
+	"github.com/aburan28/conductor/internal/client"
+	"github.com/aburan28/conductor/internal/coord"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // The tool set is intentionally short (DESIGN.md §18). Thirteen tools, each mapping to one API

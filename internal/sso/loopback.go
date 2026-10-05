@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adamburan/conductor/internal/client"
+	"github.com/aburan28/conductor/internal/client"
 )
 
 // The command line's half of a sign-in (RFC 8252, native apps).

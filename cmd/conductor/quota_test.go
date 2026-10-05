@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adamburan/conductor/internal/quota"
+	"github.com/aburan28/conductor/internal/quota"
 )
 
 // The status line shim must leave the user's status line exactly as it was — same input in,

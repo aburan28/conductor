@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adamburan/conductor/internal/db"
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // Local sign-in: open the dashboard on your own laptop and you are in.

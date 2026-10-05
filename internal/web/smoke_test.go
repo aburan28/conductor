@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adamburan/conductor/internal/api"
-	"github.com/adamburan/conductor/internal/coord"
-	"github.com/adamburan/conductor/internal/db"
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/web"
+	"github.com/aburan28/conductor/internal/api"
+	"github.com/aburan28/conductor/internal/coord"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/web"
 )
 
 // TestDashboardSmoke drives scripts/ui-smoke.mjs — the simplified navigation and the admin

@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/adamburan/conductor/internal/db"
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/privacy"
-	"github.com/adamburan/conductor/internal/selector"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/privacy"
+	"github.com/aburan28/conductor/internal/selector"
 )
 
 // Capability aggregation and assignment (DESIGN.md §7.3, §7.7, §13).

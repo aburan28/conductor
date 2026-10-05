@@ -3,8 +3,8 @@ package router
 import (
 	"strings"
 
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/resource"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/resource"
 )
 
 // FeaturePolicy declares which resource patterns mark a task as sensitive. It comes from

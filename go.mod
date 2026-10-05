@@ -1,4 +1,4 @@
-module github.com/adamburan/conductor
+module github.com/aburan28/conductor
 
 go 1.25.14
 

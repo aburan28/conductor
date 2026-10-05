@@ -4,8 +4,8 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/adamburan/conductor/internal/db"
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // maxJoinAnnouncements bounds the suggest_join events one check can write: the closest few

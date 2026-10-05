@@ -13,10 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adamburan/conductor/internal/checkpoint"
-	"github.com/adamburan/conductor/internal/localstate"
-	"github.com/adamburan/conductor/internal/privacy"
-	"github.com/adamburan/conductor/internal/shutdownhook"
+	"github.com/aburan28/conductor/internal/checkpoint"
+	"github.com/aburan28/conductor/internal/localstate"
+	"github.com/aburan28/conductor/internal/privacy"
+	"github.com/aburan28/conductor/internal/shutdownhook"
 )
 
 // ---------------------------------------------------------------------------

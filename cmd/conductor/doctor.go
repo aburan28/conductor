@@ -15,11 +15,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adamburan/conductor/internal/client"
-	"github.com/adamburan/conductor/internal/config"
-	"github.com/adamburan/conductor/internal/harness"
-	"github.com/adamburan/conductor/internal/integrations"
-	"github.com/adamburan/conductor/internal/version"
+	"github.com/aburan28/conductor/internal/client"
+	"github.com/aburan28/conductor/internal/config"
+	"github.com/aburan28/conductor/internal/harness"
+	"github.com/aburan28/conductor/internal/integrations"
+	"github.com/aburan28/conductor/internal/version"
 )
 
 // defaultLocalDBAddr is where `conductor up` expects the local Postgres when DATABASE_URL is

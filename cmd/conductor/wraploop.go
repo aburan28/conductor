@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/adamburan/conductor/internal/client"
+	"github.com/aburan28/conductor/internal/client"
 )
 
 // The claim loop's half that lives in the wrap sidecar: adopting a claim made before the

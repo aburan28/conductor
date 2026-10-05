@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adamburan/conductor/internal/db"
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/harness"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/harness"
 )
 
 func readServers(t *testing.T, path string) map[string]map[string]any {

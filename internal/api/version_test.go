@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/adamburan/conductor/internal/version"
+	"github.com/aburan28/conductor/internal/version"
 )
 
 // `conductor doctor` compares its own version with the server's, so health must report it.

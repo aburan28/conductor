@@ -9,8 +9,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/adamburan/conductor/internal/admin"
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/admin"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // Organization-level administration (migration 0013): the policy document, the logo, who

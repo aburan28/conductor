@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/adamburan/conductor/internal/coord"
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/coord"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // End-to-end capability routing over HTTP: a session advertises a model, the catalog decides

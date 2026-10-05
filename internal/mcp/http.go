@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/adamburan/conductor/internal/client"
+	"github.com/aburan28/conductor/internal/client"
 )
 
 // HTTPTransport serves the gateway over MCP's Streamable HTTP transport (spec revisions
