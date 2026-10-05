@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -263,6 +265,86 @@ func TestSlackBodyEscapesMarkup(t *testing.T) {
 	d, _ := discordBody(m)
 	if !strings.Contains(string(d), `"allowed_mentions":{"parse":[]}`) {
 		t.Errorf("discord body permits mentions: %s", d)
+	}
+}
+
+// Through a configured proxy the address guard on the dialer sees only the proxy, so the
+// destination is resolved and checked before the proxy is asked for it: a private target is
+// refused — plain HTTP or CONNECT — and the proxy never hears of it.
+func TestProxyStillRefusesPrivateDestinations(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.Method+" "+r.Host)
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer proxy.Close()
+	proxyURL, err := ParseProxy(proxy.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dns := map[string][]netip.Addr{
+		"public.test":   {netip.MustParseAddr("93.184.216.34")},
+		"rebind.test":   {netip.MustParseAddr("93.184.216.34"), netip.MustParseAddr("10.0.0.7")},
+		"metadata.test": {netip.MustParseAddr("169.254.169.254")},
+	}
+	policy := NetworkPolicy{AllowHTTP: true, Proxy: proxyURL,
+		resolver: func(_ context.Context, host string) ([]netip.Addr, error) {
+			if a, ok := dns[host]; ok {
+				return a, nil
+			}
+			return nil, errors.New("no such host")
+		}}
+	client := policy.newClient(2 * time.Second)
+
+	for _, target := range []string{
+		"http://127.0.0.1:9/hook", "http://localhost:9/hook", "http://rebind.test/hook",
+		"http://metadata.test/latest", "https://10.0.0.5/hook", "https://[::1]/hook",
+	} {
+		resp, err := client.Post(target, "application/json", strings.NewReader("{}"))
+		if err == nil {
+			resp.Body.Close()
+			t.Errorf("POST %s through the proxy was allowed", target)
+			continue
+		}
+		if !errors.Is(err, errBlockedAddress) {
+			t.Errorf("POST %s: %v, want the destination check's refusal", target, err)
+		}
+	}
+	mu.Lock()
+	if len(seen) != 0 {
+		t.Errorf("the proxy was asked for private destinations: %v", seen)
+	}
+	mu.Unlock()
+
+	// A public destination goes through the proxy, which may itself be on a private address.
+	resp, err := client.Post("http://public.test/hook", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatalf("public destination through the proxy: %v", err)
+	}
+	resp.Body.Close()
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 1 || seen[0] != "POST public.test" {
+		t.Errorf("proxy saw %v, want the one public request", seen)
+	}
+}
+
+func TestParseProxy(t *testing.T) {
+	for _, ok := range []string{"http://proxy:3128", "https://user:pw@proxy.internal", "socks5://127.0.0.1:1080"} {
+		if _, err := ParseProxy(ok); err != nil {
+			t.Errorf("%s: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"proxy:3128", "ftp://proxy", ""} {
+		if _, err := ParseProxy(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+	if _, err := ParseProxy("ftp://user:hunter2@proxy"); err == nil || strings.Contains(err.Error(), "hunter2") {
+		t.Errorf("error quotes the proxy's credentials: %v", err)
 	}
 }
 

@@ -202,6 +202,9 @@ func parseServeConfig(args []string, output io.Writer) (*serveConfig, error) {
 		"let notification channels reach loopback, private and link-local addresses (a chat server on your LAN); refused by default to prevent request forgery")
 	fs.BoolVar(&c.notifyNetwork.AllowHTTP, "notify-allow-http", false,
 		"accept http:// notification URLs, for local testing; credentials and payloads then cross the network in the clear")
+	notifyProxy := fs.String("notify-proxy", envOr("CONDUCTOR_NOTIFY_PROXY", ""),
+		"forward proxy (http, https or socks5 URL) for notification requests, where conductord reaches the internet only through one; "+
+			"destinations are still resolved and refused here if not public. HTTPS_PROXY is not used")
 	fs.BoolVar(&c.verbose, "v", false, "verbose logging")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), `conductord — Conductor control plane
@@ -300,6 +303,13 @@ Binding 127.0.0.1 needs none of these.`, c.addr)
 	}
 	if c.shutdownTimeout <= 0 {
 		return nil, errors.New("--shutdown-timeout must be positive")
+	}
+	if *notifyProxy != "" {
+		proxy, err := notify.ParseProxy(*notifyProxy)
+		if err != nil {
+			return nil, fmt.Errorf("--notify-proxy: %w", err)
+		}
+		c.notifyNetwork.Proxy = proxy
 	}
 	return c, nil
 }

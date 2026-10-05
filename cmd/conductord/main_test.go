@@ -29,7 +29,7 @@ func clearEnv(t *testing.T) {
 		"CONDUCTOR_PEER_DISCOVER_DNS", "CONDUCTOR_PEER_DNS_SERVER", "CONDUCTOR_SECURITY_MODE",
 		"CONDUCTOR_GITHUB_API", "CONDUCTOR_GITHUB_WEB", "CONDUCTOR_RETENTION_DAYS",
 		"CONDUCTOR_AUDIT_RETENTION_DAYS", "CONDUCTOR_METRICS_TOKEN", "CONDUCTOR_SECRET_KEY",
-		"CONDUCTOR_SECRET_KEY_FILE", "CONDUCTOR_STATE_DIR"} {
+		"CONDUCTOR_SECRET_KEY_FILE", "CONDUCTOR_STATE_DIR", "CONDUCTOR_NOTIFY_PROXY"} {
 		t.Setenv(k, "")
 	}
 }
@@ -128,6 +128,18 @@ func TestServeConfigNotifyFlags(t *testing.T) {
 	}
 	if c.notifyPoll >= 0 || !c.notifyNetwork.AllowPrivate || !c.notifyNetwork.AllowHTTP {
 		t.Errorf("flags: poll %v, network %+v", c.notifyPoll, c.notifyNetwork)
+	}
+	if c.notifyNetwork.Proxy != nil {
+		t.Errorf("a proxy with none configured: %v", c.notifyNetwork.Proxy)
+	}
+
+	t.Setenv("CONDUCTOR_NOTIFY_PROXY", "http://proxy.internal:3128")
+	c, err = parseServeConfigQuiet([]string{"--dsn", "x"})
+	if err != nil || c.notifyNetwork.Proxy == nil || c.notifyNetwork.Proxy.Host != "proxy.internal:3128" {
+		t.Errorf("CONDUCTOR_NOTIFY_PROXY = %+v, %v", c, err)
+	}
+	if _, err := parseServeConfigQuiet([]string{"--dsn", "x", "--notify-proxy", "ftp://proxy"}); err == nil {
+		t.Error("an ftp proxy was accepted")
 	}
 }
 

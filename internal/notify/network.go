@@ -31,6 +31,32 @@ type NetworkPolicy struct {
 	// network in the clear, and a Slack-style URL is itself the credential, so this is for
 	// local testing only.
 	AllowHTTP bool
+	// Proxy, when set, is the forward proxy every notification goes through (http, https,
+	// or socks5). The destination is still checked: resolved here and refused if any of its
+	// addresses is not public, before the proxy is asked to connect to it.
+	Proxy *url.URL
+
+	// resolver looks destination names up when a proxy is in use; tests replace it.
+	resolver func(ctx context.Context, host string) ([]netip.Addr, error)
+}
+
+// ParseProxy validates a --notify-proxy value.
+func ParseProxy(raw string) (*url.URL, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" {
+		return nil, fmt.Errorf("notify proxy %q is not a URL like http://proxy.internal:3128", redactURL(raw))
+	}
+	switch u.Scheme {
+	case "http", "https", "socks5", "socks5h":
+	default:
+		return nil, fmt.Errorf("notify proxy must be http, https or socks5, not %q", u.Scheme)
+	}
+	if u.Scheme == "socks5h" {
+		// socks5h asks the proxy to resolve names, which is the default for socks5 in Go
+		// anyway; the destination check below resolves them here as well.
+		u.Scheme = "socks5"
+	}
+	return u, nil
 }
 
 // errBlockedAddress is returned when a destination is not a public address.
@@ -123,18 +149,75 @@ func (p NetworkPolicy) guardDial(_, address string, _ syscall.RawConn) error {
 	return nil
 }
 
+// checkDestination resolves a destination host and refuses it unless every address it has is
+// public. It is the check a proxy cannot make for us: once a request is handed to a proxy,
+// the address conductord would dial is the proxy's, and the guard on the dialer sees only
+// that.
+//
+// The proxy resolves the name again for itself, and its answer can differ from this one
+// (a different resolver, split-horizon DNS, or a record that changes in between — DNS
+// rebinding). Refusing names that resolve privately here closes the plain case; a proxy that
+// itself refuses private destinations closes the rest (docs/OPERATIONS.md).
+func (p NetworkPolicy) checkDestination(ctx context.Context, host string) error {
+	if p.AllowPrivate {
+		return nil
+	}
+	if strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".localhost") {
+		return fmt.Errorf("%w %s (%s)", errBlockedAddress, host, allowPrivateHint)
+	}
+	var addrs []netip.Addr
+	if ip, err := netip.ParseAddr(host); err == nil {
+		addrs = []netip.Addr{ip}
+	} else {
+		resolve := p.resolver
+		if resolve == nil {
+			resolve = func(ctx context.Context, host string) ([]netip.Addr, error) {
+				return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+			}
+		}
+		if addrs, err = resolve(ctx, host); err != nil {
+			return fmt.Errorf("resolving %s: %w", host, err)
+		}
+	}
+	if len(addrs) == 0 {
+		return fmt.Errorf("%s has no addresses", host)
+	}
+	for _, ip := range addrs {
+		if !publicAddress(ip) {
+			return fmt.Errorf("%w %s: %s resolves to %s (%s)", errBlockedAddress, host, host, ip, allowPrivateHint)
+		}
+	}
+	return nil
+}
+
 // newClient builds the HTTP client every notification is sent with.
 //
-// It connects directly, never through HTTP(S)_PROXY: the address guard checks the address
-// dialed, and through a proxy that is the proxy's. It follows no redirects, which would be a
-// second, unchecked destination for the same credentials. The timeout bounds the whole
-// request, including reading the response.
+// Without a configured proxy it connects directly, never through HTTP(S)_PROXY from the
+// environment, and checks the address on every connection after DNS (guardDial). With one,
+// it connects only to the proxy, and the proxy hook refuses a destination that resolves to a
+// non-public address before the proxy is asked for it (checkDestination) — so a CONNECT to a
+// private target is never sent. Either way it follows no redirects, which would be a second,
+// unchecked destination for the same credentials. The timeout bounds the whole request,
+// including reading the response.
 func (p NetworkPolicy) newClient(timeout time.Duration) *http.Client {
 	dialer := &net.Dialer{Timeout: min(timeout, 10*time.Second), Control: p.guardDial}
+	var proxy func(*http.Request) (*url.URL, error)
+	if p.Proxy != nil {
+		// The proxy is the operator's and may well be on a private network; the dialer only
+		// ever connects to it, so its own address is not checked.
+		dialer.Control = nil
+		proxyURL := p.Proxy
+		proxy = func(r *http.Request) (*url.URL, error) {
+			if err := p.checkDestination(r.Context(), r.URL.Hostname()); err != nil {
+				return nil, err
+			}
+			return proxyURL, nil
+		}
+	}
 	return &http.Client{
 		Timeout: timeout,
 		Transport: &http.Transport{
-			Proxy:                 nil,
+			Proxy:                 proxy,
 			DialContext:           dialer.DialContext,
 			ForceAttemptHTTP2:     true,
 			TLSHandshakeTimeout:   min(timeout, 10*time.Second),
