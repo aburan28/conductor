@@ -9,10 +9,12 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -143,6 +145,8 @@ const (
 	principalKey ctxKey = iota
 	// tokenNameKey carries the name of the token that authenticated the request.
 	tokenNameKey
+	// tokenScopeKey carries the project the authenticating token is confined to, if any.
+	tokenScopeKey
 )
 
 // tokenName returns the name of the token the request authenticated with.
@@ -151,11 +155,30 @@ func tokenName(r *http.Request) string {
 	return name
 }
 
+// tokenProjectScope returns the project the request's token is confined to, or "".
+func tokenProjectScope(r *http.Request) domain.ID {
+	id, _ := r.Context().Value(tokenScopeKey).(domain.ID)
+	return id
+}
+
 // authenticate resolves the bearer token to a principal.
 //
 // Tokens are matched by SHA-256 hash, so a database dump contains no usable credential, and
-// the plaintext is never logged (DESIGN.md §25.1).
+// the plaintext is never logged (DESIGN.md §25.1). The token must arrive in the Authorization
+// header; see authenticateStream for the one route that also accepts it in the URL.
 func (s *Server) authenticate(next func(http.ResponseWriter, *http.Request, domain.Principal)) http.HandlerFunc {
+	return s.authenticateWith(false, next)
+}
+
+// authenticateStream is authenticate for the SSE event stream, the one route that also
+// accepts ?token=. A browser's EventSource cannot set headers, so the dashboard has no other
+// way to open the stream; everywhere else a token in the URL is refused, because URLs land in
+// proxy logs, browser history, and Referer headers where a header never does.
+func (s *Server) authenticateStream(next func(http.ResponseWriter, *http.Request, domain.Principal)) http.HandlerFunc {
+	return s.authenticateWith(true, next)
+}
+
+func (s *Server) authenticateWith(allowQueryToken bool, next func(http.ResponseWriter, *http.Request, domain.Principal)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		client := clientKey(r, s.behindProxy)
 		// The throttle gates *failures*, not requests. A correct credential is always
@@ -177,22 +200,29 @@ func (s *Server) authenticate(next func(http.ResponseWriter, *http.Request, doma
 
 		header := r.Header.Get("Authorization")
 		token := strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
-		if token == "" || token == header {
-			// Also accept the token as a query parameter for SSE, where browsers cannot set
-			// headers on EventSource. Restricted to GET so a token never rides on a mutation.
-			if r.Method == http.MethodGet {
-				token = r.URL.Query().Get("token")
-			}
+		if token == header {
+			token = ""
+		}
+		if token == "" && allowQueryToken && r.Method == http.MethodGet {
+			// Restricted to GET on the stream route, so a token never rides on a mutation.
+			token = r.URL.Query().Get("token")
 		}
 		if token == "" {
 			reject()
 			return
 		}
-		principal, name, err := s.store.AuthenticateTokenNamed(r.Context(), token)
+		principal, info, err := s.store.AuthenticateTokenInfo(r.Context(), token)
 		if err != nil {
+			if !errors.Is(err, domain.ErrUnauthenticated) {
+				// A database failure is not a bad credential; do not count it against the
+				// client, and do not tell it the token was wrong.
+				s.fail(w, r, err)
+				return
+			}
 			reject()
 			return
 		}
+		name := info.Name
 		// A token local sign-in issued is good only while local sign-in is: the moment the
 		// server is in enhanced mode — switched at runtime, pinned by flag, or the default
 		// for a reachable daemon — it stops working, whether or not it was revoked.
@@ -211,6 +241,12 @@ func (s *Server) authenticate(next func(http.ResponseWriter, *http.Request, doma
 		s.limiter.succeed(client)
 		ctx := context.WithValue(r.Context(), principalKey, principal)
 		ctx = context.WithValue(ctx, tokenNameKey, name)
+		if info.ProjectID != "" {
+			ctx = context.WithValue(ctx, tokenScopeKey, info.ProjectID)
+			// coord.Authorize enforces the scope, so every project-scoped handler inherits it
+			// without having to remember to.
+			ctx = coord.WithTokenScope(ctx, info.ProjectID)
+		}
 		next(w, r.WithContext(ctx), principal)
 	}
 }
@@ -298,6 +334,8 @@ type ErrorBody struct {
 	Error   string `json:"error"`
 	Code    string `json:"code"`
 	Details any    `json:"details,omitempty"`
+	// RequestID is set on server faults, whose detail is logged rather than returned.
+	RequestID string `json:"request_id,omitempty"`
 }
 
 // fail maps a domain error onto an HTTP status exactly once, here, so status decisions cannot
@@ -336,10 +374,30 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		status, code = http.StatusServiceUnavailable, "no_capacity"
 	}
 
+	if status == http.StatusInternalServerError {
+		// The detail of a server fault — usually a database error naming tables, columns,
+		// constraints, or the database host — stays in the server log. The client gets a
+		// request id to quote, which is all an operator needs to find that line.
+		id := newRequestID()
+		s.logger.Error("request failed", "request_id", id, "method", r.Method,
+			"path", r.URL.Path, "error", err)
+		w.Header().Set("X-Request-Id", id)
+		s.ok(w, r, status, ErrorBody{Error: "internal error", Code: code, RequestID: id})
+		return
+	}
 	if status >= 500 {
-		s.logger.Error("request failed", "path", r.URL.Path, "error", err)
+		// A mapped 5xx (no capacity) is a domain answer whose message is meant for the
+		// client, but it is still worth a log line.
+		s.logger.Warn("request failed", "method", r.Method, "path", r.URL.Path, "error", err)
 	}
 	s.ok(w, r, status, ErrorBody{Error: err.Error(), Code: code})
+}
+
+// newRequestID returns a short random identifier correlating a 5xx response with its log line.
+func newRequestID() string {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
 }
 
 // decode reads a JSON body with a size limit, so a malformed or hostile request cannot
@@ -418,9 +476,10 @@ func (s *Server) recoverPanic(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				s.logger.Error("panic recovered", "path", r.URL.Path, "panic", rec)
+				id := newRequestID()
+				s.logger.Error("panic recovered", "request_id", id, "path", r.URL.Path, "panic", rec)
 				s.ok(w, r, http.StatusInternalServerError,
-					ErrorBody{Error: "internal error", Code: "panic"})
+					ErrorBody{Error: "internal error", Code: "panic", RequestID: id})
 			}
 		}()
 		next.ServeHTTP(w, r)
@@ -466,3 +525,42 @@ func fenceFrom(r *http.Request, body fenceCarrier) domain.Fence {
 }
 
 type fenceCarrier interface{ fence() domain.Fence }
+
+// execProject resolves the project and authorizes the caller for execution endpoints, which
+// accept the runner role as well as contributors (coord.Caller.CanExecute).
+func (s *Server) execProject(r *http.Request, principal domain.Principal) (domain.Project, coord.Caller, error) {
+	project, err := s.resolveProject(r.Context(), principal, r.PathValue("project"))
+	if err != nil {
+		return domain.Project{}, coord.Caller{}, err
+	}
+	caller, err := s.svc.AuthorizeExecution(r.Context(), principal, project.ID)
+	if err != nil {
+		return domain.Project{}, coord.Caller{}, err
+	}
+	return project, caller, nil
+}
+
+// execTaskFor is taskFor for execution endpoints.
+func (s *Server) execTaskFor(r *http.Request, principal domain.Principal) (domain.Task, coord.Caller, error) {
+	task, caller, err := s.taskFor(r, principal, domain.RoleObserver)
+	if err != nil {
+		return domain.Task{}, coord.Caller{}, err
+	}
+	if !caller.CanExecute() {
+		return domain.Task{}, coord.Caller{}, fmt.Errorf("%w: role %s cannot execute work",
+			domain.ErrNotPermitted, caller.Role)
+	}
+	return task, caller, nil
+}
+
+// auditOthersWork records a principal acting on a task or lease that is not theirs — a
+// maintainer releasing a stuck lease, cancelling a teammate's task. Those are legitimate, and
+// precisely the actions someone will later need to explain.
+func (s *Server) auditOthersWork(r *http.Request, caller coord.Caller, task domain.Task, action string, detail map[string]any) {
+	if detail == nil {
+		detail = map[string]any{}
+	}
+	detail["task_ref"] = task.Ref
+	s.store.Audit(r.Context(), task.OrganizationID, task.ProjectID, caller.Principal.ID,
+		action, "task", task.ID, detail)
+}

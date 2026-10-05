@@ -26,6 +26,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /v1/projects/{project}", auth(s.getProject))
 	m.HandleFunc("GET /v1/projects/{project}/members", auth(s.listMembers))
 	m.HandleFunc("POST /v1/projects/{project}/members", auth(s.inviteMember))
+	m.HandleFunc("PATCH /v1/projects/{project}/members/{handle}", auth(s.setMemberRole))
 	m.HandleFunc("DELETE /v1/projects/{project}/members/{handle}", auth(s.removeMember))
 
 	m.HandleFunc("GET /v1/tokens", auth(s.listTokens))
@@ -82,7 +83,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /v1/projects/{project}/budget/grants", auth(s.listBudgetGrants))
 
 	m.HandleFunc("GET /v1/projects/{project}/events", auth(s.listEvents))
-	m.HandleFunc("GET /v1/projects/{project}/events/stream", auth(s.streamEvents))
+	m.HandleFunc("GET /v1/projects/{project}/events/stream", s.authenticateStream(s.streamEvents))
 
 	m.HandleFunc("POST /v1/runners/register", auth(s.registerRunner))
 	m.HandleFunc("POST /v1/runners/{runner}/heartbeat", auth(s.heartbeatRunner))
@@ -119,8 +120,11 @@ func (s *Server) routes() {
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.Pool().Ping(r.Context()); err != nil {
+		// Unauthenticated: the driver's error names the database host and user, which is
+		// for the server log, not for anyone who can reach the port.
+		s.logger.Warn("health check: database unreachable", "error", err)
 		s.ok(w, r, http.StatusServiceUnavailable,
-			map[string]any{"status": "degraded", "database": err.Error()})
+			map[string]any{"status": "degraded", "database": "unreachable"})
 		return
 	}
 	s.ok(w, r, http.StatusOK, map[string]any{"status": "ok", "time": time.Now().UTC()})
@@ -805,6 +809,17 @@ func (s *Server) getTaskCard(w http.ResponseWriter, r *http.Request, p domain.Pr
 
 	card := taskcard.FromTask(task, project.Slug, owner.Handle, attempt, lease,
 		reservations, task.DependsOn, project.Config.RequiredChecks)
+	if lease != nil && card.Lease != nil {
+		// Everyone may see that the task is held, by whom, and until when — that is what
+		// stops a collision. Only the holder sees the lease id and fencing epoch, which are
+		// the identifiers that act on the lease.
+		if holder, err := s.store.GetPrincipal(r.Context(), lease.HolderPrincipal); err == nil {
+			card.Lease.Holder = holder.Handle
+		}
+		if !caller.HoldsLease(*lease) {
+			card.Lease.ID, card.Lease.FencingEpoch = "", 0
+		}
+	}
 	rendered, err := card.Render()
 	if err != nil {
 		s.fail(w, r, err)
@@ -927,7 +942,7 @@ func (s *Server) claimTask(w http.ResponseWriter, r *http.Request, p domain.Prin
 }
 
 func (s *Server) claimNext(w http.ResponseWriter, r *http.Request, p domain.Principal) {
-	project, caller, err := s.project(r, p, domain.RoleContributor)
+	project, caller, err := s.execProject(r, p)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -990,7 +1005,7 @@ type releaseBody struct {
 }
 
 func (s *Server) releaseTask(w http.ResponseWriter, r *http.Request, p domain.Principal) {
-	task, _, err := s.taskFor(r, p, domain.RoleContributor)
+	task, caller, err := s.execTaskFor(r, p)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -1000,18 +1015,10 @@ func (s *Server) releaseTask(w http.ResponseWriter, r *http.Request, p domain.Pr
 		s.fail(w, r, err)
 		return
 	}
-	fence := body.fence()
-	fence.TaskID = task.ID
-	if fence.LeaseID == "" {
-		lease, err := s.store.ActiveLeaseForTask(r.Context(), task.ID)
-		if err != nil {
-			s.fail(w, r, err)
-			return
-		}
-		fence = domain.Fence{
-			TaskID: task.ID, AttemptID: lease.AttemptID,
-			LeaseID: lease.ID, FencingEpoch: lease.FencingEpoch,
-		}
+	fence, override, err := s.svc.ResolveFence(r.Context(), caller, task.ID, body.fence())
+	if err != nil {
+		s.fail(w, r, err)
+		return
 	}
 	updated, err := s.store.Release(r.Context(), db.ReleaseParams{
 		Fence: fence, Reason: firstNonEmpty(body.Reason, body.Note),
@@ -1023,15 +1030,71 @@ func (s *Server) releaseTask(w http.ResponseWriter, r *http.Request, p domain.Pr
 		s.fail(w, r, err)
 		return
 	}
+	if override {
+		s.auditOthersWork(r, caller, task, "lease.released_by_other", map[string]any{
+			"lease_id": fence.LeaseID, "status": string(updated.Status)})
+	}
 	s.ok(w, r, http.StatusOK, updated)
 }
 
 type transitionBody struct {
 	Status domain.TaskStatus `json:"status"`
+	// To is accepted as a synonym for Status; it is what the dashboard sends.
+	To domain.TaskStatus `json:"to"`
+}
+
+// reviewTargets are the statuses that accept verified work. Moving a task into one of them
+// is a review decision, not a step of the work itself.
+var reviewTargets = map[domain.TaskStatus]bool{
+	domain.TaskDone: true, domain.TaskMerging: true, domain.TaskReviewRequired: true,
+}
+
+// authorizeTransition is the rule for moving a task by hand (DESIGN.md §24.2):
+//
+//   - a maintainer or above may make any legal transition;
+//   - accepting verified work — into review_required, merging, or done — is a review
+//     decision, made by a reviewer or a maintainer, never by the author or executor alone;
+//   - every other move is the business of the task's creator or the holder of its live
+//     lease, and needs a contributor.
+//
+// The state machine still decides which transitions are legal; this decides who may ask.
+// Before, any contributor could cancel, reset, or complete anyone's task.
+func (s *Server) authorizeTransition(r *http.Request, caller coord.Caller, task domain.Task, to domain.TaskStatus) (bool, error) {
+	if caller.Role.Can(domain.RoleMaintainer) {
+		others := task.CreatedBy != caller.Principal.ID
+		if lease, err := s.store.ActiveLeaseForTask(r.Context(), task.ID); err == nil {
+			others = others && !caller.HoldsLease(lease)
+		}
+		return others, nil
+	}
+	if reviewTargets[to] && task.Status != to {
+		if caller.Role == domain.RoleReviewer {
+			return task.CreatedBy != caller.Principal.ID, nil
+		}
+		return false, fmt.Errorf("%w: moving a task to %s is a review decision for a reviewer or maintainer",
+			domain.ErrNotPermitted, to)
+	}
+	if !caller.Role.Can(domain.RoleContributor) {
+		return false, fmt.Errorf("%w: role %s cannot move tasks", domain.ErrNotPermitted, caller.Role)
+	}
+	if task.CreatedBy == caller.Principal.ID {
+		return false, nil
+	}
+	lease, err := s.store.ActiveLeaseForTask(r.Context(), task.ID)
+	if err == nil && caller.HoldsLease(lease) {
+		return false, nil
+	}
+	if err != nil && !errors.Is(err, domain.ErrNotFound) {
+		return false, err
+	}
+	return false, fmt.Errorf("%w: only the task's creator, the holder of its lease, or a maintainer may move it",
+		domain.ErrNotPermitted)
 }
 
 func (s *Server) transitionTask(w http.ResponseWriter, r *http.Request, p domain.Principal) {
-	task, caller, err := s.taskFor(r, p, domain.RoleContributor)
+	// Reviewer is the floor here, below contributor: a reviewer may make review decisions
+	// and nothing else (authorizeTransition).
+	task, caller, err := s.taskFor(r, p, domain.RoleReviewer)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -1041,9 +1104,25 @@ func (s *Server) transitionTask(w http.ResponseWriter, r *http.Request, p domain
 		s.fail(w, r, err)
 		return
 	}
+	if body.Status == "" {
+		body.Status = body.To
+	}
+	if body.Status == "" {
+		s.fail(w, r, fmt.Errorf("%w: status is required", domain.ErrInvalidArgument))
+		return
+	}
+	others, err := s.authorizeTransition(r, caller, task, body.Status)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
 	if _, err := s.store.UpdateTaskStatus(r.Context(), task.ID, body.Status); err != nil {
 		s.fail(w, r, err)
 		return
+	}
+	if others {
+		s.auditOthersWork(r, caller, task, "task.transitioned_by_other", map[string]any{
+			"from": string(task.Status), "to": string(body.Status)})
 	}
 	view, err := s.svc.TaskView(r.Context(), caller, task.ID)
 	if err != nil {
@@ -1064,7 +1143,7 @@ type expandScopeBody struct {
 }
 
 func (s *Server) expandScope(w http.ResponseWriter, r *http.Request, p domain.Principal) {
-	task, caller, err := s.taskFor(r, p, domain.RoleContributor)
+	task, caller, err := s.execTaskFor(r, p)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -1074,22 +1153,20 @@ func (s *Server) expandScope(w http.ResponseWriter, r *http.Request, p domain.Pr
 		s.fail(w, r, err)
 		return
 	}
-	fence := body.fence()
-	fence.TaskID = task.ID
-	if fence.LeaseID == "" {
-		lease, err := s.store.ActiveLeaseForTask(r.Context(), task.ID)
-		if err != nil {
-			s.fail(w, r, err)
-			return
-		}
-		fence = domain.Fence{TaskID: task.ID, AttemptID: lease.AttemptID,
-			LeaseID: lease.ID, FencingEpoch: lease.FencingEpoch}
+	fence, override, err := s.svc.ResolveFence(r.Context(), caller, task.ID, body.fence())
+	if err != nil {
+		s.fail(w, r, err)
+		return
 	}
 	result, err := s.svc.ExpandScope(r.Context(), caller, fence, task.ProjectID,
 		body.Scopes, body.Source)
 	if err != nil {
 		s.fail(w, r, err)
 		return
+	}
+	if override {
+		s.auditOthersWork(r, caller, task, "lease.scope_expanded_by_other", map[string]any{
+			"lease_id": fence.LeaseID, "outcome": string(result.Outcome)})
 	}
 	status := http.StatusOK
 	if result.Outcome.Blocks() {
@@ -1160,8 +1237,14 @@ func (s *Server) heartbeatLease(w http.ResponseWriter, r *http.Request, p domain
 		s.fail(w, r, err)
 		return
 	}
-	if _, err := s.svc.Authorize(r.Context(), p, lease.ProjectID, domain.RoleContributor); err != nil {
+	caller, err := s.svc.AuthorizeExecution(r.Context(), p, lease.ProjectID)
+	if err != nil {
 		s.fail(w, r, err)
+		return
+	}
+	// Renewing someone else's lease would keep their abandoned work from being reclaimed.
+	if !caller.HoldsLease(lease) && !caller.Role.Can(domain.RoleMaintainer) {
+		s.fail(w, r, fmt.Errorf("%w: this lease is held by another principal", domain.ErrNotPermitted))
 		return
 	}
 	project, err := s.store.GetProject(r.Context(), lease.ProjectID)
@@ -1204,7 +1287,7 @@ func (s *Server) reportProgress(w http.ResponseWriter, r *http.Request, p domain
 		return
 	}
 	fence.TaskID = attempt.TaskID
-	caller, err := s.svc.Authorize(r.Context(), p, attempt.ProjectID, domain.RoleContributor)
+	caller, err := s.svc.AuthorizeExecution(r.Context(), p, attempt.ProjectID)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -1244,7 +1327,7 @@ func (s *Server) finishWork(w http.ResponseWriter, r *http.Request, p domain.Pri
 		return
 	}
 	fence.TaskID = attempt.TaskID
-	caller, err := s.svc.Authorize(r.Context(), p, attempt.ProjectID, domain.RoleContributor)
+	caller, err := s.svc.AuthorizeExecution(r.Context(), p, attempt.ProjectID)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -1286,16 +1369,14 @@ func (s *Server) createHandoff(w http.ResponseWriter, r *http.Request, p domain.
 		s.fail(w, r, err)
 		return
 	}
-	fence := body.fence()
-	fence.TaskID = task.ID
-	if fence.LeaseID == "" {
-		lease, err := s.store.ActiveLeaseForTask(r.Context(), task.ID)
-		if err != nil {
-			s.fail(w, r, err)
-			return
-		}
-		fence = domain.Fence{TaskID: task.ID, AttemptID: lease.AttemptID,
-			LeaseID: lease.ID, FencingEpoch: lease.FencingEpoch}
+	fence, override, err := s.svc.ResolveFence(r.Context(), caller, task.ID, body.fence())
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if override {
+		s.auditOthersWork(r, caller, task, "lease.handed_off_by_other", map[string]any{
+			"lease_id": fence.LeaseID})
 	}
 	// A handoff that names a capability floor is a delegation: package the work *and* offer
 	// it to a session that can meet the floor, in one call.
@@ -1327,12 +1408,12 @@ func (s *Server) createHandoff(w http.ResponseWriter, r *http.Request, p domain.
 }
 
 func (s *Server) getHandoff(w http.ResponseWriter, r *http.Request, p domain.Principal) {
-	task, _, err := s.taskFor(r, p, domain.RoleObserver)
+	task, caller, err := s.taskFor(r, p, domain.RoleObserver)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	handoff, err := s.store.LatestHandoff(r.Context(), task.ID)
+	handoff, err := s.svc.HandoffView(r.Context(), caller, task)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -1405,7 +1486,8 @@ func (s *Server) resolveConflict(w http.ResponseWriter, r *http.Request, p domai
 		s.fail(w, r, domain.ErrNotFound)
 		return
 	}
-	if _, err := s.svc.Authorize(r.Context(), p, projectID, domain.RoleContributor); err != nil {
+	caller, err := s.svc.Authorize(r.Context(), p, projectID, domain.RoleContributor)
+	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -1413,6 +1495,11 @@ func (s *Server) resolveConflict(w http.ResponseWriter, r *http.Request, p domai
 	if err != nil {
 		s.fail(w, r, err)
 		return
+	}
+	// Ignoring a conflict silences a warning for both parties, so it is on the record.
+	if edge.State != "open" {
+		s.store.Audit(r.Context(), caller.Principal.OrganizationID, projectID, p.ID,
+			"conflict."+edge.State, "conflict", edge.ID, map[string]any{"state": edge.State})
 	}
 	s.ok(w, r, http.StatusOK, edge)
 }
@@ -1422,12 +1509,19 @@ func (s *Server) resolveConflict(w http.ResponseWriter, r *http.Request, p domai
 // ---------------------------------------------------------------------------
 
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request, p domain.Principal) {
-	project, _, err := s.project(r, p, domain.RoleObserver)
+	project, caller, err := s.project(r, p, domain.RoleObserver)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
 	events, err := s.store.ListEvents(r.Context(), project.ID, intParam(r, "limit", 100))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	// Every event leaves through the caller's visibility (coord.ProjectEvents), exactly like
+	// the task it describes.
+	events, err = s.svc.ProjectEvents(r.Context(), caller, project.ID, events)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -1438,7 +1532,7 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request, p domain.Pri
 // streamEvents is the SSE feed behind the dashboard (DESIGN.md §7.1: SSE first, because it
 // passes through load balancers without special handling).
 func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request, p domain.Principal) {
-	project, _, err := s.project(r, p, domain.RoleObserver)
+	project, caller, err := s.project(r, p, domain.RoleObserver)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -1475,7 +1569,11 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request, p domain.P
 			flusher.Flush()
 
 		case <-ticker.C:
-			events, err := s.store.EventsSince(r.Context(), project.ID, cursor, lastID, 200)
+			raw, err := s.store.EventsSince(r.Context(), project.ID, cursor, lastID, 200)
+			if err != nil {
+				return
+			}
+			events, err := s.svc.ProjectEvents(r.Context(), caller, project.ID, raw)
 			if err != nil {
 				return
 			}
@@ -1520,11 +1618,16 @@ func (s *Server) registerRunner(w http.ResponseWriter, r *http.Request, p domain
 			s.fail(w, r, err)
 			return
 		}
-		if _, err := s.svc.Authorize(r.Context(), p, project.ID, domain.RoleContributor); err != nil {
+		if _, err := s.svc.AuthorizeExecution(r.Context(), p, project.ID); err != nil {
 			s.fail(w, r, err)
 			return
 		}
 		projectID = project.ID
+	} else if tokenProjectScope(r) != "" {
+		// An org-wide runner would be reachable from projects the token is not scoped to.
+		s.fail(w, r, fmt.Errorf("%w: a project-scoped token registers only a runner for that project",
+			domain.ErrNotPermitted))
+		return
 	}
 	runner, err := s.store.RegisterRunner(r.Context(), domain.Runner{
 		OrganizationID: p.OrganizationID, ProjectID: projectID, PrincipalID: p.ID,
@@ -1534,6 +1637,8 @@ func (s *Server) registerRunner(w http.ResponseWriter, r *http.Request, p domain
 		s.fail(w, r, err)
 		return
 	}
+	s.store.Audit(r.Context(), p.OrganizationID, projectID, p.ID,
+		"runner.registered", "runner", runner.ID, map[string]any{"count": runner.MaxConcurrency})
 	s.ok(w, r, http.StatusOK, runner)
 }
 
@@ -1547,7 +1652,17 @@ func (s *Server) heartbeatRunner(w http.ResponseWriter, r *http.Request, p domai
 		s.fail(w, r, err)
 		return
 	}
-	if err := s.store.HeartbeatRunner(r.Context(), r.PathValue("runner"), body.InFlight); err != nil {
+	// Only the principal that registered a runner may report its liveness and load; the
+	// store matches on both, so another principal — in this organization or any other —
+	// gets the same 404 as for a runner that does not exist.
+	if tokenProjectScope(r) != "" {
+		if runner, err := s.store.GetRunner(r.Context(), r.PathValue("runner")); err != nil ||
+			runner.ProjectID != tokenProjectScope(r) {
+			s.fail(w, r, domain.ErrNotFound)
+			return
+		}
+	}
+	if err := s.store.HeartbeatRunner(r.Context(), r.PathValue("runner"), p.ID, body.InFlight); err != nil {
 		s.fail(w, r, err)
 		return
 	}

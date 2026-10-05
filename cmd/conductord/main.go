@@ -400,8 +400,12 @@ func bootstrap(args []string) error {
 		"control plane URL saved into this machine's login")
 	noLogin := fs.Bool("no-login", false, "do not write this machine's login file; print the token only")
 	owner := fs.Bool("owner", false, "make this principal the machine's owner even if another is already set (local sign-in acts as the owner)")
+	tokenTTL := fs.Duration("token-ttl", 90*24*time.Hour, "lifetime of the minted token (0 for no expiry)")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *tokenTTL < 0 {
+		return errors.New("--token-ttl cannot be negative")
 	}
 	if *dsn == "" {
 		return errors.New("no database configured: pass --dsn or set DATABASE_URL")
@@ -482,7 +486,9 @@ func bootstrap(args []string) error {
 		}
 	}
 
-	if err := store.AddMember(ctx, project.ID, principal.ID, domain.Role(*role)); err != nil {
+	// Bootstrap holds database credentials, so it may set a role outright; re-running it
+	// converges on what was asked for.
+	if err := store.UpsertMember(ctx, project.ID, principal.ID, domain.Role(*role)); err != nil {
 		return fmt.Errorf("membership: %w", err)
 	}
 
@@ -507,10 +513,16 @@ func bootstrap(args []string) error {
 		}
 	}
 
-	token, err := store.CreateToken(ctx, principal.ID, "bootstrap", 0)
+	// Re-running bootstrap is how a lost login is recovered, so the token it printed last
+	// time is revoked as this one is minted: a bootstrap credential left in an old terminal
+	// scrollback or CI log stops working the next time anyone bootstraps. It also expires
+	// on its own (--token-ttl), like any other human credential.
+	token, revoked, err := store.ReplaceToken(ctx, principal.ID, "bootstrap", *tokenTTL)
 	if err != nil {
 		return fmt.Errorf("token: %w", err)
 	}
+	store.Audit(ctx, org.ID, project.ID, principal.ID, "bootstrap", "principal", principal.ID,
+		map[string]any{"principal": principal.Handle, "role": *role, "count": revoked})
 
 	loginSaved := false
 	if !*noLogin {
@@ -554,6 +566,13 @@ To log in on another machine, or again on this one:
 
 The token is shown once and is stored only as a hash. Keep it out of shared logs.
 `, *endpoint, token, project.Slug)
+	if *tokenTTL > 0 {
+		fmt.Printf("It expires %s; run bootstrap again, or `conductor token reset --save`, before then.\n",
+			time.Now().Add(*tokenTTL).UTC().Format(time.RFC3339))
+	}
+	if revoked > 0 {
+		fmt.Printf("The %d bootstrap token(s) minted before this one were revoked.\n", revoked)
+	}
 	return nil
 }
 

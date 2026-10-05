@@ -2,7 +2,12 @@ package db
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/adamburan/conductor/internal/domain"
 )
@@ -238,6 +243,11 @@ func scanRunner(scan func(...any) error) (domain.Runner, error) {
 
 // RegisterRunner advertises a machine's execution capabilities (DESIGN.md §7.10). Runners
 // connect outbound, so a laptop never needs an inbound port.
+//
+// Runner names are unique per organization, and re-registering under a name refreshes that
+// runner — but only for the principal that registered it. Before, any member of the
+// organization could register a teammate's runner name and take the record over, steering
+// the scheduler's view of that machine; now that is a conflict.
 func (s *Store) RegisterRunner(ctx context.Context, r domain.Runner) (domain.Runner, error) {
 	caps, err := marshalJSON(r.Capabilities)
 	if err != nil {
@@ -246,7 +256,7 @@ func (s *Store) RegisterRunner(ctx context.Context, r domain.Runner) (domain.Run
 	if r.MaxConcurrency <= 0 {
 		r.MaxConcurrency = 1
 	}
-	return scanRunner(s.pool.QueryRow(ctx, `
+	runner, err := scanRunner(s.pool.QueryRow(ctx, `
 		INSERT INTO runners (organization_id, project_id, principal_id, name,
 		                     capabilities, max_concurrency, state)
 		VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, 'online')
@@ -257,17 +267,58 @@ func (s *Store) RegisterRunner(ctx context.Context, r domain.Runner) (domain.Run
 		    max_concurrency = EXCLUDED.max_concurrency,
 		    state = 'online',
 		    heartbeat_at = now()
+		 WHERE runners.principal_id IS NULL OR runners.principal_id = EXCLUDED.principal_id
 		RETURNING `+runnerColumns,
 		r.OrganizationID, nullable(r.ProjectID), nullable(r.PrincipalID), r.Name,
 		caps, r.MaxConcurrency,
 	).Scan)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// The name exists and belongs to someone else: the conflict update matched nothing.
+		return domain.Runner{}, fmt.Errorf(
+			"%w: a runner named %q is registered by another principal; choose another name (--name)",
+			domain.ErrDuplicate, r.Name)
+	}
+	return runner, err
 }
 
-func (s *Store) HeartbeatRunner(ctx context.Context, id domain.ID, inFlight int) error {
-	_, err := s.pool.Exec(ctx, `
-		UPDATE runners SET heartbeat_at = now(), in_flight = $2, state = 'online'
-		 WHERE id = $1::uuid`, id, inFlight)
-	return err
+// HeartbeatRunner refreshes a runner's liveness and load. Only the principal that registered
+// the runner may do it: anyone else could otherwise hold a dead machine "online", or report a
+// live one as full, and steer the scheduler around it. A runner that does not exist and one
+// that belongs to someone else are the same ErrNotFound, so the endpoint cannot be used to
+// probe for runner ids.
+func (s *Store) HeartbeatRunner(ctx context.Context, id, principalID domain.ID, inFlight int) error {
+	if inFlight < 0 {
+		inFlight = 0
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE runners SET heartbeat_at = now(), in_flight = $3, state = 'online'
+		 WHERE id = $1::uuid AND principal_id = $2::uuid`, id, principalID, inFlight)
+	if err != nil {
+		if isBadUUIDError(err) {
+			return domain.ErrNotFound
+		}
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.ErrNotFound
+	}
+	return nil
+}
+
+// GetRunner loads one runner by id.
+func (s *Store) GetRunner(ctx context.Context, id domain.ID) (domain.Runner, error) {
+	r, err := scanRunner(s.pool.QueryRow(ctx,
+		`SELECT `+runnerColumns+` FROM runners WHERE id = $1::uuid`, id).Scan)
+	if err != nil && isBadUUIDError(err) {
+		return domain.Runner{}, domain.ErrNotFound
+	}
+	return r, noRows(err)
+}
+
+// isBadUUIDError reports a non-UUID string cast to uuid, which is a lookup miss.
+func isBadUUIDError(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "22P02"
 }
 
 // AvailableRunners lists runners with spare capacity that can execute a given harness.

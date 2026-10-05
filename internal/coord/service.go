@@ -45,6 +45,12 @@ func (c Caller) Viewer() privacy.Viewer {
 // implied by the URL, because DESIGN.md §25.6 forbids any path that reaches a row by id
 // alone.
 func (s *Service) Authorize(ctx context.Context, principal domain.Principal, projectID domain.ID, need domain.Role) (Caller, error) {
+	// A token confined to one project is a stranger to every other: the same answer as for a
+	// project the principal does not belong to, so a scoped credential cannot even confirm
+	// what else its owner can reach.
+	if scope := TokenScope(ctx); scope != "" && scope != projectID {
+		return Caller{}, domain.ErrNotFound
+	}
 	role, err := s.Store.RoleIn(ctx, projectID, principal.ID)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
@@ -57,6 +63,122 @@ func (s *Service) Authorize(ctx context.Context, principal domain.Principal, pro
 		return Caller{}, fmt.Errorf("%w: role %s cannot act as %s", domain.ErrNotPermitted, role, need)
 	}
 	return Caller{Principal: principal, Role: role}, nil
+}
+
+// tokenScopeKey carries the project a request's credential is confined to.
+type tokenScopeKey struct{}
+
+// WithTokenScope records that the request authenticated with a token confined to projectID.
+// The API layer sets it once, at authentication, so no handler can forget to apply it.
+func WithTokenScope(ctx context.Context, projectID domain.ID) context.Context {
+	if projectID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, tokenScopeKey{}, projectID)
+}
+
+// TokenScope returns the project the request's credential is confined to, or "".
+func TokenScope(ctx context.Context) domain.ID {
+	id, _ := ctx.Value(tokenScopeKey{}).(domain.ID)
+	return id
+}
+
+// CanExecute reports whether a caller may act on execution endpoints: claiming queued work,
+// heartbeating and reporting on a lease it holds, and submitting results. Contributors can,
+// and so can the dedicated runner role, which exists so a machine that executes work need
+// not be granted a contributor's right to file, edit, and transition other people's tasks.
+func (c Caller) CanExecute() bool {
+	return c.Role == domain.RoleRunner || c.Role.Can(domain.RoleContributor)
+}
+
+// AuthorizeExecution is Authorize for execution endpoints (see Caller.CanExecute).
+func (s *Service) AuthorizeExecution(ctx context.Context, principal domain.Principal, projectID domain.ID) (Caller, error) {
+	c, err := s.Authorize(ctx, principal, projectID, domain.RoleObserver)
+	if err != nil {
+		return Caller{}, err
+	}
+	if !c.CanExecute() {
+		return Caller{}, fmt.Errorf("%w: role %s cannot execute work", domain.ErrNotPermitted, c.Role)
+	}
+	return c, nil
+}
+
+// ---------------------------------------------------------------------------
+// Lease authority
+// ---------------------------------------------------------------------------
+
+// HoldsLease reports whether the caller is the lease's holder. A lease names its holder
+// principal, and the fencing epoch proves the holder is current; neither alone is enough,
+// because the fence's identifiers are not secrets — they appear in claim responses, task
+// cards, and logs — and the epoch check only proves the caller presented the latest numbers.
+func (c Caller) HoldsLease(l domain.Lease) bool {
+	return l.HolderPrincipal != "" && l.HolderPrincipal == c.Principal.ID
+}
+
+// ResolveFence turns what a caller presented into the fence of the task's live lease, and
+// checks the caller may act under it: the holder may, and so may a maintainer or above, who
+// can always take back a stuck task. A caller who names no lease gets the live one filled in
+// only under the same rule — the server used to fill in anyone's lease for anyone, which let
+// any contributor release, re-scope, or hand off a teammate's running work.
+//
+// The returned bool reports that the caller acted on a lease it does not hold, which the
+// caller's handler records in the audit log.
+func (s *Service) ResolveFence(ctx context.Context, c Caller, taskID domain.ID, presented domain.Fence) (domain.Fence, bool, error) {
+	var lease domain.Lease
+	var err error
+	if presented.LeaseID == "" {
+		lease, err = s.Store.ActiveLeaseForTask(ctx, taskID)
+	} else {
+		lease, err = s.Store.GetLease(ctx, presented.LeaseID)
+		if err == nil && lease.TaskID != taskID {
+			err = domain.ErrNotFound
+		}
+	}
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return domain.Fence{}, false, fmt.Errorf("%w: no live lease on this task", domain.ErrLeaseNotHeld)
+		}
+		return domain.Fence{}, false, err
+	}
+	override := !c.HoldsLease(lease)
+	if override && !c.Role.Can(domain.RoleMaintainer) {
+		return domain.Fence{}, false, fmt.Errorf(
+			"%w: this task's lease is held by another principal; only its holder or a maintainer may act on it",
+			domain.ErrNotPermitted)
+	}
+	fence := presented
+	fence.TaskID = taskID
+	if presented.LeaseID == "" {
+		fence = domain.Fence{TaskID: taskID, AttemptID: lease.AttemptID,
+			LeaseID: lease.ID, FencingEpoch: lease.FencingEpoch}
+	}
+	if fence.AttemptID == "" {
+		fence.AttemptID = lease.AttemptID
+	}
+	return fence, override, nil
+}
+
+// assertLeaseAuthority checks a presented fence's lease belongs to the caller (or the caller
+// is a maintainer). The fence itself is still verified by the store, inside the transaction
+// that acts on it; this is the "who" that the epoch check cannot answer.
+func (s *Service) assertLeaseAuthority(ctx context.Context, c Caller, fence domain.Fence) error {
+	if fence.LeaseID == "" {
+		return fmt.Errorf("%w: no lease presented", domain.ErrLeaseNotHeld)
+	}
+	lease, err := s.Store.GetLease(ctx, fence.LeaseID)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return fmt.Errorf("%w: unknown lease", domain.ErrLeaseNotHeld)
+		}
+		return err
+	}
+	if fence.TaskID != "" && lease.TaskID != fence.TaskID {
+		return fmt.Errorf("%w: the lease belongs to another task", domain.ErrLeaseNotHeld)
+	}
+	if !c.HoldsLease(lease) && !c.Role.Can(domain.RoleMaintainer) {
+		return fmt.Errorf("%w: this lease is held by another principal", domain.ErrNotPermitted)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -436,6 +558,9 @@ func (s *Service) ExpandScope(ctx context.Context, c Caller, fence domain.Fence,
 	if err != nil {
 		return ExpandScopeResult{}, err
 	}
+	if err := s.assertLeaseAuthority(ctx, c, fence); err != nil {
+		return ExpandScopeResult{}, err
+	}
 	if err := s.Store.AssertFence(ctx, fence); err != nil {
 		return ExpandScopeResult{}, err
 	}
@@ -506,6 +631,9 @@ type ProgressReport struct {
 func (s *Service) ReportProgress(ctx context.Context, c Caller, fence domain.Fence, projectID domain.ID, r ProgressReport) error {
 	project, err := s.Store.GetProject(ctx, projectID)
 	if err != nil {
+		return err
+	}
+	if err := s.assertLeaseAuthority(ctx, c, fence); err != nil {
 		return err
 	}
 	if _, err := s.Store.HeartbeatLease(ctx, fence,
@@ -583,6 +711,9 @@ type FinishResult struct {
 func (s *Service) FinishWork(ctx context.Context, c Caller, req FinishRequest) (FinishResult, error) {
 	project, err := s.Store.GetProject(ctx, req.ProjectID)
 	if err != nil {
+		return FinishResult{}, err
+	}
+	if err := s.assertLeaseAuthority(ctx, c, req.Fence); err != nil {
 		return FinishResult{}, err
 	}
 	if err := s.Store.AssertFence(ctx, req.Fence); err != nil {
@@ -686,6 +817,9 @@ func joinComma(in []string) string {
 // from the outgoing session's conversation. That is what lets Claude hand to Codex without
 // either one seeing the other's transcript.
 func (s *Service) Handoff(ctx context.Context, c Caller, fence domain.Fence, toHarness, toRole string, bundle domain.HandoffBundle) (domain.Handoff, error) {
+	if err := s.assertLeaseAuthority(ctx, c, fence); err != nil {
+		return domain.Handoff{}, err
+	}
 	task, err := s.Store.GetTask(ctx, fence.TaskID)
 	if err != nil {
 		return domain.Handoff{}, err

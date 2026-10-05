@@ -5,6 +5,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 	"time"
 
@@ -17,11 +19,13 @@ import (
 
 func cmdMember(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: conductor member <add|list|remove>")
+		return errors.New("usage: conductor member <add|list|role|remove>")
 	}
 	switch sub, rest := args[0], args[1:]; sub {
 	case "add":
 		return memberAdd(ctx, rest)
+	case "role":
+		return memberRole(ctx, rest)
 	case "list":
 		return memberList(ctx, rest)
 	case "remove", "rm":
@@ -48,7 +52,9 @@ func memberAdd(ctx context.Context, args []string) error {
   conductor member add rachel --role contributor
   conductor member add ci-runner --kind runner_service --role runner
 
-Prints a token once. It is stored only as a hash and cannot be recovered.
+Prints a token once for a new account. It is stored only as a hash and cannot be recovered.
+An account that already exists in the organization is added without a token: it keeps
+signing in with its own. A member's role is changed with `+"`conductor member role`"+`.
 
 Flags:
 `)
@@ -71,13 +77,7 @@ Flags:
 		return err
 	}
 
-	var result struct {
-		Handle    string `json:"handle"`
-		Role      string `json:"role"`
-		Token     string `json:"token"`
-		ExpiresAt string `json:"expires_at"`
-		Created   bool   `json:"created_principal"`
-	}
+	var result inviteResult
 	// --expires (friendly: 7d, 2w) takes precedence over --ttl (Go duration), so the flag
 	// name matches `conductor invite` while --ttl stays for back-compat.
 	tokenTTL := ttl.String()
@@ -99,14 +99,10 @@ Flags:
 		return emit(result)
 	}
 
-	verb := "Added"
-	if !result.Created {
-		verb = "Granted"
-	}
-	fmt.Printf("%s %s as %s on %s.\n", verb, result.Handle, result.Role, ref)
 	if result.Token == "" {
-		return nil
+		return printTokenlessInvite(result, ref, false)
 	}
+	fmt.Printf("Added %s as %s on %s.\n", result.Handle, result.Role, ref)
 
 	fmt.Printf(`
 Send them this, once, over a channel you trust:
@@ -118,6 +114,59 @@ Send them this, once, over a channel you trust:
 	}
 	fmt.Fprintln(os.Stderr,
 		"\nThis is the only time the token is shown. It is stored as a hash and cannot be recovered.")
+	return nil
+}
+
+// memberRole changes an existing member's role. It is the only way a role changes: adding
+// someone who is already a member is refused rather than silently re-roled.
+func memberRole(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("member role", flag.ExitOnError)
+	project := fs.String("project", "", "project id or slug")
+	asJSON := fs.Bool("json", false, "machine-readable output")
+	fs.Usage = func() {
+		fmt.Fprint(os.Stderr, `conductor member role — change a member's role
+
+  conductor member role rachel maintainer
+
+You cannot grant a role above your own or change the role of someone who outranks you, and
+the project's last administrator cannot be demoted.
+
+Flags:
+`)
+		fs.PrintDefaults()
+	}
+	positional, err := parseFlags(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 2 {
+		return errors.New("usage: conductor member role <handle> <role>")
+	}
+	api, creds, err := mustClient()
+	if err != nil {
+		return err
+	}
+	ref, err := projectRef(*project, creds)
+	if err != nil {
+		return err
+	}
+	var out struct {
+		Handle   string `json:"handle"`
+		Role     string `json:"role"`
+		Previous string `json:"previous_role"`
+	}
+	if err := api.Do(ctx, http.MethodPatch, "/v1/projects/"+ref+"/members/"+url.PathEscape(positional[0]),
+		map[string]any{"role": positional[1]}, &out); err != nil {
+		return err
+	}
+	if *asJSON {
+		return emit(out)
+	}
+	if out.Previous == "" {
+		fmt.Printf("%s is already %s on %s.\n", out.Handle, out.Role, ref)
+		return nil
+	}
+	fmt.Printf("%s is now %s on %s (was %s).\n", out.Handle, out.Role, ref, out.Previous)
 	return nil
 }
 
@@ -214,7 +263,7 @@ func cmdToken(ctx context.Context, args []string) error {
 func tokenCreate(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("token create", flag.ExitOnError)
 	name := fs.String("name", "cli", "a label so you can tell your tokens apart")
-	ttl := fs.Duration("ttl", 90*24*time.Hour, "lifetime (0 for no expiry)")
+	ttl := fs.Duration("ttl", 90*24*time.Hour, "lifetime; 0 means the server default, and a human's token is capped at 90 days")
 	save := fs.Bool("save", false, "write the new token to ~/.conductor/credentials")
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	if err := fs.Parse(args); err != nil {
@@ -255,7 +304,7 @@ func tokenCreate(ctx context.Context, args []string) error {
 func tokenReset(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("token reset", flag.ExitOnError)
 	name := fs.String("name", "cli", "a label so you can tell your tokens apart")
-	ttl := fs.Duration("ttl", 90*24*time.Hour, "lifetime for the replacement (0 for no expiry)")
+	ttl := fs.Duration("ttl", 90*24*time.Hour, "lifetime for the replacement; 0 means the server default, and a human's token is capped at 90 days")
 	save := fs.Bool("save", false, "write the replacement token to ~/.conductor/credentials")
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	fs.Usage = func() {

@@ -82,36 +82,34 @@ func (s *Server) listModels(w http.ResponseWriter, r *http.Request, p domain.Pri
 	s.ok(w, r, http.StatusOK, map[string]any{"profiles": profiles})
 }
 
+// taskValidation serves a task's check results, under the same visibility rule as the
+// validation inside a task view (coord.ValidationView).
 func (s *Server) taskValidation(w http.ResponseWriter, r *http.Request, p domain.Principal) {
-	task, _, err := s.taskFor(r, p, domain.RoleObserver)
+	task, caller, err := s.taskFor(r, p, domain.RoleObserver)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	results, err := s.store.ListValidation(r.Context(), task.ID)
+	results, err := s.svc.ValidationView(r.Context(), caller, task)
 	if err != nil {
 		s.fail(w, r, err)
 		return
-	}
-	if results == nil {
-		results = []domain.ValidationResult{}
 	}
 	s.ok(w, r, http.StatusOK, map[string]any{"results": results})
 }
 
+// taskDecisions serves a task's policy decisions; a private task's rationale stays with its
+// owner (coord.DecisionsView).
 func (s *Server) taskDecisions(w http.ResponseWriter, r *http.Request, p domain.Principal) {
-	task, _, err := s.taskFor(r, p, domain.RoleObserver)
+	task, caller, err := s.taskFor(r, p, domain.RoleObserver)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	decisions, err := s.store.ListDecisions(r.Context(), task.ID, intParam(r, "limit", 50))
+	decisions, err := s.svc.DecisionsView(r.Context(), caller, task, intParam(r, "limit", 50))
 	if err != nil {
 		s.fail(w, r, err)
 		return
-	}
-	if decisions == nil {
-		decisions = []domain.PolicyDecision{}
 	}
 	s.ok(w, r, http.StatusOK, map[string]any{"decisions": decisions})
 }
