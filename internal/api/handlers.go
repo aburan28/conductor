@@ -98,6 +98,7 @@ func (s *Server) routes() {
 	s.mcpRoutes(m)
 	s.queueRoutes(m)
 	s.localRoutes(m)
+	s.ssoRoutes(m)
 	s.githubRoutes(m)
 	s.quotaRoutes(m)
 	s.lifecycleRoutes(m)
