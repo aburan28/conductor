@@ -405,3 +405,41 @@ func TestReleaseNotifiesWhoeverWasWaiting(t *testing.T) {
 	}
 	t.Fatal("no scope.released event for the waiting party")
 }
+
+// Recording a pull request's end twice records it once; a closed pull request that is seen
+// open again was reopened and is linked again, but a merge never moves back.
+func TestPullRequestEndsAreRecordedOnce(t *testing.T) {
+	f := newFixture(t)
+	a := f.newTask(t, "Closed twice")
+	claim, err := f.store.Claim(f.ctx, f.claimParams(a, f.alice))
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	f.finish(t, claim)
+	url := "https://github.com/acme/w/pull/30"
+	first, err := f.store.PullRequestClosed(f.ctx, a.ID, url)
+	if err != nil || !first.Recorded || !first.Changed {
+		t.Fatalf("first close = %+v, %v", first, err)
+	}
+	again, err := f.store.PullRequestClosed(f.ctx, a.ID, url)
+	if err != nil || again.Recorded || again.Changed {
+		t.Fatalf("second close = %+v, %v; want nothing recorded", again, err)
+	}
+	if linked, err := f.store.LinkPullRequest(f.ctx, a.ID, url); err != nil || !linked {
+		t.Errorf("a reopened pull request was not linked again: %v, %v", linked, err)
+	}
+
+	b := f.newTask(t, "Merged, then listed open by a stale poll")
+	if _, err := f.store.Claim(f.ctx, f.claimParams(b, f.alice)); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if out, err := f.store.PullRequestMerged(f.ctx, b.ID, url+"1"); err != nil || !out.Recorded {
+		t.Fatalf("merge = %+v, %v", out, err)
+	}
+	if out, err := f.store.PullRequestMerged(f.ctx, b.ID, url+"1"); err != nil || out.Recorded {
+		t.Errorf("second merge = %+v, %v; want nothing recorded", out, err)
+	}
+	if linked, _ := f.store.LinkPullRequest(f.ctx, b.ID, url+"1"); linked {
+		t.Error("a merged pull request was moved back to open")
+	}
+}

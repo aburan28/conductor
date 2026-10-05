@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"sync"
 	"testing"
@@ -51,13 +52,26 @@ func (f *mergeGitHub) handler() http.Handler {
 	m.HandleFunc("GET /repos/acme/{repo}/pulls", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		open := []map[string]any{}
-		for _, pr := range f.pulls {
-			if pr["state"] == "open" {
-				open = append(open, pr)
-			}
+		state := r.URL.Query().Get("state")
+		if state == "" {
+			state = "open"
 		}
-		write(w, open)
+		list := []map[string]any{}
+		for _, pr := range f.pulls {
+			if pr["state"] != state {
+				continue
+			}
+			// Like GitHub, a list entry carries merged_at but not merged.
+			entry := map[string]any{}
+			for k, v := range pr {
+				if k != "merged" {
+					entry[k] = v
+				}
+			}
+			list = append(list, entry)
+		}
+		sort.Slice(list, func(i, j int) bool { return list[i]["updated_at"].(string) > list[j]["updated_at"].(string) })
+		write(w, list)
 	})
 	m.HandleFunc("GET /repos/acme/{repo}/pulls/{n}", func(w http.ResponseWriter, r *http.Request) {
 		n, _ := strconv.Atoi(r.PathValue("n"))
@@ -82,8 +96,13 @@ func (f *mergeGitHub) handler() http.Handler {
 
 func (f *mergeGitHub) pull(number int, branch, state string, merged bool) map[string]any {
 	same := map[string]any{"full_name": "acme/" + f.repo}
+	var mergedAt any
+	if merged {
+		mergedAt = time.Now().UTC().Format(time.RFC3339)
+	}
 	return map[string]any{
-		"number": number, "state": state, "merged": merged,
+		"number": number, "state": state, "merged": merged, "merged_at": mergedAt,
+		"updated_at":       time.Now().UTC().Format(time.RFC3339),
 		"html_url":         "https://github.example/acme/" + f.repo + "/pull/" + strconv.Itoa(number),
 		"merge_commit_sha": "feedface",
 		"head":             map[string]any{"ref": branch, "sha": "sha-" + branch, "repo": same},
@@ -221,6 +240,13 @@ func TestWebhookMergeAndCloseMoveTheTask(t *testing.T) {
 	if got, held := taskState(t, h, merged.ID); got.Status != domain.TaskDone || held != 0 || got.PullRequestState != "merged" {
 		t.Fatalf("merged: status %s, %d held, pr %q", got.Status, held, got.PullRequestState)
 	}
+	// GitHub redelivers: the second delivery changes nothing and announces nothing.
+	if code := send(fake.pull(8, "agent/"+merged.Ref+"/attempt-1", "closed", true)); code != http.StatusOK {
+		t.Fatalf("redelivery = %d", code)
+	}
+	if n := eventCount(t, h, merged.ID, "github.pr_merged"); n != 1 {
+		t.Errorf("pr_merged events after a redelivery = %d, want 1", n)
+	}
 
 	// Closed without merging: the work goes back to the queue and drops its hold.
 	closed := finishedTask(t, h, "feature/abandoned", "internal/merge/c.go")
@@ -251,6 +277,69 @@ func TestParsePullURL(t *testing.T) {
 	for _, bad := range []string{"", "https://github.com/acme/widgets", "https://github.com/acme/widgets/issues/3", "https://github.com/acme/widgets/pull/x"} {
 		if _, _, _, ok := parsePullURL(bad); ok {
 			t.Errorf("%q parsed", bad)
+		}
+	}
+}
+
+// eventCount counts a task's events of one type.
+func eventCount(t *testing.T, h *harness, taskID domain.ID, eventType string) int {
+	t.Helper()
+	events, err := h.store.ListEvents(context.Background(), h.project.ID, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, e := range events {
+		if e.AggregateID == taskID && e.Type == eventType {
+			n++
+		}
+	}
+	return n
+}
+
+// A pull request opened and merged between two polls is never on the open list. The sweep of
+// recently closed pull requests still completes its task — once: later sweeps that see the
+// same closed pull request change nothing and say nothing.
+func TestPollerCatchesAMergeItNeverSawOpen(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	integration, fake, _ := newMergeIntegration(t, h)
+
+	merged := finishedTask(t, h, "feature/quick", "internal/merge/q.go")
+	rejected := finishedTask(t, h, "feature/nope", "internal/merge/n.go")
+	if err := integration.pollOnce(ctx); err != nil {
+		t.Fatalf("first poll: %v", err)
+	}
+
+	// Between polls: one opened and merged, one opened and closed.
+	fake.set(21, fake.pull(21, "feature/quick", "closed", true))
+	fake.set(22, fake.pull(22, "feature/nope", "closed", false))
+	for i := 0; i < 3; i++ {
+		if err := integration.pollOnce(ctx); err != nil {
+			t.Fatalf("poll %d: %v", i+2, err)
+		}
+	}
+
+	if got, held := taskState(t, h, merged.ID); got.Status != domain.TaskDone || held != 0 || got.PullRequestState != "merged" {
+		t.Errorf("merged between polls: status %s, %d held, pr %q", got.Status, held, got.PullRequestState)
+	}
+	if got, held := taskState(t, h, rejected.ID); got.Status != domain.TaskReady || held != 0 || got.PullRequestState != "closed" {
+		t.Errorf("closed between polls: status %s, %d held, pr %q", got.Status, held, got.PullRequestState)
+	}
+	for _, c := range []struct {
+		task domain.ID
+		typ  string
+	}{
+		{merged.ID, "github.pr_merged"}, {rejected.ID, "github.pr_closed"},
+		{merged.ID, "task.status_changed"}, {rejected.ID, "task.status_changed"},
+	} {
+		// Three sweeps saw each closed pull request; exactly one transition and one notice.
+		want := 1
+		if c.typ == "task.status_changed" {
+			want = 2 // claimed -> running on the way in (finishedTask), then the close
+		}
+		if n := eventCount(t, h, c.task, c.typ); n != want {
+			t.Errorf("%s events for %s = %d, want %d", c.typ, c.task, n, want)
 		}
 	}
 }

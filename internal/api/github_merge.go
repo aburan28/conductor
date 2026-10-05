@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/adamburan/conductor/internal/db"
@@ -92,6 +93,47 @@ func (g *GitHub) linkPulls(ctx context.Context, pulls []githubapp.PullRequest, p
 // merges costs a few API calls per pass rather than one burst of many.
 const maxClosedLookups = 20
 
+// The closed-list sweep. A pull request opened and merged between two polls is never on the
+// open list, so it is never linked, and the vanished-PR lookup cannot find it; listing what
+// closed since the last sweep does.
+const (
+	// maxClosedPages bounds one sweep to a few hundred pull requests per repository.
+	maxClosedPages = 3
+	// closedSweepMargin re-reads a little before the last sweep, so a pull request updated
+	// while that sweep was running is not lost to clock skew between here and GitHub.
+	closedSweepMargin = 10 * time.Minute
+	// closedFirstLookback is how far back the first sweep after a start reads. A merge
+	// older than that while the daemon was down is still found if its pull request was
+	// linked (the vanished-PR lookup), but not otherwise.
+	closedFirstLookback = 24 * time.Hour
+)
+
+// pullSweep is the per-repository time of the last successful closed-list sweep. It lives in
+// memory: losing it on restart costs one wider sweep, never a missed or doubled transition,
+// because recording a pull request's end is idempotent (db.PullRequestOutcome.Recorded).
+type pullSweep struct {
+	mu   sync.Mutex
+	last map[string]time.Time
+}
+
+func (p *pullSweep) since(repo string, now time.Time) time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if t, ok := p.last[repo]; ok {
+		return t.Add(-closedSweepMargin)
+	}
+	return now.Add(-closedFirstLookback)
+}
+
+func (p *pullSweep) done(repo string, at time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.last == nil {
+		p.last = map[string]time.Time{}
+	}
+	p.last[repo] = at
+}
+
 // syncPullLifecycle is the poller's half of the lifecycle, run after each repository's open
 // pull requests are checked: link the open ones to their tasks, then look up every linked
 // pull request that is no longer open and apply how it ended. The open list is the evidence;
@@ -109,6 +151,26 @@ func (g *GitHub) syncPullLifecycle(ctx context.Context, installationID int64, ow
 	if c == nil {
 		return nil
 	}
+
+	// Everything that closed since the last sweep, linked or not.
+	started := time.Now()
+	key := strings.ToLower(owner + "/" + repo)
+	closed, err := c.ClosedPullRequests(ctx, installationID, owner, repo, g.sweep.since(key, started), maxClosedPages)
+	if err != nil {
+		return fmt.Errorf("closed pull requests: %w", err)
+	}
+	for _, pr := range closed {
+		if pr.State != "closed" {
+			continue
+		}
+		if _, err := g.pullClosed(ctx, pr, projects); err != nil {
+			return err
+		}
+	}
+	g.sweep.done(key, started)
+
+	// Linked pull requests that left the open list but were not in the sweep (older than
+	// its pages reach): look each one up.
 	lookups := 0
 	for _, p := range projects {
 		linked, err := g.store.TasksWithOpenPullRequests(ctx, p.ID)
@@ -165,27 +227,29 @@ func (g *GitHub) pullClosed(ctx context.Context, pr githubapp.PullRequest, proje
 func (g *GitHub) applyPullClosed(ctx context.Context, p domain.Project, taskID domain.ID, pr githubapp.PullRequest) (db.PullRequestOutcome, error) {
 	var res db.PullRequestOutcome
 	var err error
+	merged := pr.WasMerged()
 	event := "github.pr_closed"
-	if pr.Merged {
+	if merged {
 		res, err = g.store.PullRequestMerged(ctx, taskID, pr.HTMLURL)
 		event = "github.pr_merged"
 	} else {
 		res, err = g.store.PullRequestClosed(ctx, taskID, pr.HTMLURL)
 	}
-	if err != nil {
+	if err != nil || !res.Recorded {
+		// Already on record (a redelivery, or the sweep seeing it again): nothing to say.
 		return res, err
 	}
 	payload := map[string]any{
 		"task_ref": res.TaskRef, "pull_request": pr.HTMLURL, "branch": pr.Head.Ref,
 		"from": string(res.From), "status": string(res.Status),
 	}
-	if pr.MergeCommitSHA != "" && pr.Merged {
+	if pr.MergeCommitSHA != "" && merged {
 		payload["commit_sha"] = pr.MergeCommitSHA
 	}
 	_ = g.store.AppendEvent(ctx, p.OrganizationID, p.ID, "", "task", taskID, event,
 		domain.VisibilityTeamSummary, payload)
 	g.logger.Info("pull request closed", "project", p.Slug, "task", res.TaskRef,
-		"merged", pr.Merged, "from", res.From, "status", res.Status)
+		"merged", merged, "from", res.From, "status", res.Status)
 	return res, nil
 }
 
@@ -232,5 +296,5 @@ func (s *Server) githubPullClosed(w http.ResponseWriter, r *http.Request, owner,
 	if outcomes == nil {
 		outcomes = []db.PullRequestOutcome{}
 	}
-	s.ok(w, r, http.StatusOK, map[string]any{"merged": pr.Merged, "tasks": outcomes})
+	s.ok(w, r, http.StatusOK, map[string]any{"merged": pr.WasMerged(), "tasks": outcomes})
 }

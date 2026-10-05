@@ -80,6 +80,10 @@ type GitHub struct {
 	posted   map[string]string // owner/repo@sha → fingerprint of the last check posted
 	lastPoll time.Time
 	lastErr  string
+
+	// sweep remembers, per repository, when closed pull requests were last swept, so the
+	// poller pages only through what closed since (github_merge.go).
+	sweep pullSweep
 }
 
 type githubSetup struct {

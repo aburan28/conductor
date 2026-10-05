@@ -501,8 +501,10 @@ repository itself only, never a fork's); `conductor task show` and the dashboard
 link. When a linked pull request **merges**, the task moves to `done` — from wherever its work
 stood, ending a still-live claim — and its reserved files are released. When one is **closed
 without merging**, a task that was waiting on it goes back to `ready` and drops its hold, and a
-task still being worked is left alone. Without webhooks, the poller notices a merge when a
-pull request it saw open drops off the open list.
+task still being worked is left alone. Without webhooks, the poller does the same from the
+pull requests closed since its last pass (and looks up any linked pull request that left the
+open list), so a pull request opened and merged between two polls still completes its task.
+Seeing the same merge twice changes nothing and announces nothing.
 
 ### Connecting your coding tool
 

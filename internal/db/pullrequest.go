@@ -26,8 +26,8 @@ const (
 )
 
 // LinkPullRequest records the pull request a task's work travels in. It is idempotent, and it
-// never moves a link backwards: a pull request already known to have merged or closed stays
-// that way even if a stale poll still lists it as open.
+// never moves a merge backwards: a pull request already known to have merged stays merged
+// even if a stale poll still lists it as open. A closed one seen open again was reopened.
 func (s *Store) LinkPullRequest(ctx context.Context, taskID domain.ID, url string) (bool, error) {
 	if url == "" {
 		return false, nil
@@ -40,7 +40,7 @@ func (s *Store) LinkPullRequest(ctx context.Context, taskID domain.ID, url strin
 			UPDATE tasks
 			   SET pull_request_url = $2, pull_request_state = 'open', updated_at = now()
 			 WHERE id = $1::uuid
-			   AND (pull_request_url <> $2 OR pull_request_state = '')
+			   AND (pull_request_url <> $2 OR pull_request_state IN ('', 'closed'))
 			   AND status NOT IN ('done','cancelled','superseded')
 			RETURNING organization_id::text, project_id::text, ref`, taskID, url,
 		).Scan(&orgID, &projectID, &ref)
@@ -117,24 +117,48 @@ type PullRequestOutcome struct {
 	// Changed is false when the task was left where it was (already finished, never claimed,
 	// or a closed pull request against work still in progress).
 	Changed bool `json:"changed"`
+	// Recorded is false when this pull request's end was already on record for the task — a
+	// redelivered webhook, or the poller seeing the same closed pull request again. Nothing
+	// was written and no event should follow.
+	Recorded bool `json:"recorded"`
+}
+
+// recordPullEndTx stores how a task's pull request ended, unless exactly that is already on
+// record, and reports the task's ref and status either way.
+func recordPullEndTx(ctx context.Context, tx pgx.Tx, taskID domain.ID, url, state string, out *PullRequestOutcome) (domain.TaskStatus, error) {
+	var from domain.TaskStatus
+	var curURL, curState string
+	if err := tx.QueryRow(ctx, `
+		SELECT ref, status, pull_request_url, pull_request_state
+		  FROM tasks WHERE id = $1::uuid FOR UPDATE`, taskID,
+	).Scan(&out.TaskRef, &from, &curURL, &curState); err != nil {
+		return "", noRows(err)
+	}
+	out.From, out.Status = from, from
+	if curState == state && (url == "" || url == curURL) {
+		return from, nil
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE tasks
+		   SET pull_request_url = COALESCE(NULLIF($2, ''), pull_request_url),
+		       pull_request_state = $3, updated_at = now()
+		 WHERE id = $1::uuid`, taskID, url, state); err != nil {
+		return "", err
+	}
+	out.Recorded = true
+	return from, nil
 }
 
 // PullRequestMerged records that a task's pull request merged and completes the task: done,
-// its lease (if one is still live) ended, its territory released. Idempotent — a second
-// delivery of the same merge finds the task already done.
+// its lease (if one is still live) ended, its territory released. Idempotent — a merge
+// already on record changes nothing (Recorded is false).
 func (s *Store) PullRequestMerged(ctx context.Context, taskID domain.ID, url string) (PullRequestOutcome, error) {
 	var out PullRequestOutcome
 	err := s.Tx(ctx, func(tx pgx.Tx) error {
-		var from domain.TaskStatus
-		if err := tx.QueryRow(ctx, `
-			UPDATE tasks
-			   SET pull_request_url = COALESCE(NULLIF($2, ''), pull_request_url),
-			       pull_request_state = 'merged', updated_at = now()
-			 WHERE id = $1::uuid
-			RETURNING ref, status`, taskID, url).Scan(&out.TaskRef, &from); err != nil {
-			return noRows(err)
+		from, err := recordPullEndTx(ctx, tx, taskID, url, PullRequestMerged, &out)
+		if err != nil || !out.Recorded {
+			return err
 		}
-		out.From, out.Status = from, from
 		return completeTx(ctx, tx, taskID, from, "pull request merged", &out)
 	})
 	return out, err
@@ -191,18 +215,9 @@ func completeTx(ctx context.Context, tx pgx.Tx, taskID domain.ID, from domain.Ta
 func (s *Store) PullRequestClosed(ctx context.Context, taskID domain.ID, url string) (PullRequestOutcome, error) {
 	var out PullRequestOutcome
 	err := s.Tx(ctx, func(tx pgx.Tx) error {
-		var from domain.TaskStatus
-		if err := tx.QueryRow(ctx, `
-			UPDATE tasks
-			   SET pull_request_url = COALESCE(NULLIF($2, ''), pull_request_url),
-			       pull_request_state = 'closed', updated_at = now()
-			 WHERE id = $1::uuid
-			RETURNING ref, status`, taskID, url).Scan(&out.TaskRef, &from); err != nil {
-			return noRows(err)
-		}
-		out.From, out.Status = from, from
-		if !PendingMerge(from) {
-			return nil
+		from, err := recordPullEndTx(ctx, tx, taskID, url, PullRequestClosed, &out)
+		if err != nil || !out.Recorded || !PendingMerge(from) {
+			return err
 		}
 		task, err := updateTaskStatusTx(ctx, tx, taskID, domain.TaskReady, "pull request closed without merging")
 		if err != nil {
