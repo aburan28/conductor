@@ -50,7 +50,8 @@ type S3Config struct {
 	// PathStyle is usually required (MinIO, older setups).
 	Endpoint  string
 	PathStyle bool
-	// Insecure allows plain http, for a local MinIO in a test. Ignored when Endpoint is empty.
+	// Insecure allows plain http, for a local MinIO in a test. Without it an http:// endpoint
+	// is refused. Ignored when Endpoint is empty.
 	Insecure bool
 }
 
@@ -178,9 +179,19 @@ func (s *S3) url(keyOrQuery string) (string, error) {
 			return "", err
 		}
 		if u.Scheme != "" {
-			scheme = u.Scheme
+			scheme = strings.ToLower(u.Scheme)
 		} else if s.cfg.Insecure {
 			scheme = "http"
+		}
+		// Plain http sends the signed request — and every record and sealed checkpoint —
+		// past anyone on the path, and lets them answer in the bucket's place. It is for a
+		// local MinIO in a test, so it takes the explicit Insecure setting, whatever the
+		// endpoint URL says.
+		switch {
+		case scheme == "http" && !s.cfg.Insecure:
+			return "", fmt.Errorf("s3: endpoint %s is plain http; set CONDUCTOR_BACKUP_S3_INSECURE=1 to allow it", s.cfg.Endpoint)
+		case scheme != "http" && scheme != "https":
+			return "", fmt.Errorf("s3: endpoint scheme %q is not http or https", scheme)
 		}
 		host = u.Host
 		if host == "" {

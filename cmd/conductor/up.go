@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,6 +19,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/adamburan/conductor/internal/client"
 	"github.com/adamburan/conductor/internal/config"
 )
@@ -30,16 +35,27 @@ import (
 //	login     saved credentials verified, or a fresh bootstrap minting this machine's token
 //
 // The inverse is `conductor down`.
+//
+// The local database is published on 127.0.0.1 only, under a password generated on the first
+// `up` and kept in ~/.conductor/database.url (0600). It used to listen on every interface with
+// the password "conductor", and since bearer tokens are stored as plain SHA-256 hashes, anyone
+// who could write to that database could mint themselves a login. The DSN reaches conductord
+// through its environment, never its argv, which any local user can read with ps.
 func cmdUp(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("up", flag.ExitOnError)
 	endpoint := fs.String("endpoint", "", "control plane URL (default: saved login, else http://localhost:8080)")
 	addr := fs.String("addr", "", "listen address for a server started here (default: the endpoint's host:port)")
-	dsn := fs.String("dsn", envOrStr("DATABASE_URL", "postgres://conductor:conductor@localhost:55432/conductor?sslmode=disable"),
-		"PostgreSQL connection string")
+	dsnFlag := fs.String("dsn", "",
+		"PostgreSQL connection string (default: $DATABASE_URL, else the one saved in ~/.conductor/database.url, else a new local database with a generated password)")
 	project := fs.String("project", "", "project slug when the database is bootstrapped fresh (default: directory name)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	dsnValue, dsnSource, err := resolveDSN(*dsnFlag, os.Getenv("DATABASE_URL"))
+	if err != nil {
+		return err
+	}
+	dsn := &dsnValue
 
 	creds := client.LoadCredentials()
 	ep := strings.TrimRight(*endpoint, "/")
@@ -54,8 +70,13 @@ func cmdUp(ctx context.Context, args []string) error {
 
 	if remoteEndpoint(ep) {
 		// A non-local control plane has no local database or server to manage; the only
-		// thing this machine can fix is its own login.
-		if err := ensureLogin(ctx, daemon, ep, *dsn, *project); err != nil {
+		// thing this machine can fix is its own login, and it can bootstrap one only with a
+		// database it was told about.
+		remoteDSN := *dsn
+		if dsnSource == dsnGenerated {
+			remoteDSN = ""
+		}
+		if err := ensureLogin(ctx, daemon, ep, remoteDSN, *project); err != nil {
 			return err
 		}
 		fmt.Printf("control plane already serving at %s (remote; nothing started locally)\n", ep)
@@ -64,6 +85,19 @@ func cmdUp(ctx context.Context, args []string) error {
 
 	if err := ensureDatabase(*dsn); err != nil {
 		return err
+	}
+	if dsnSource == dsnGenerated {
+		// A database that was already there (an installation from before passwords were
+		// generated) still has the old fixed one; settle which DSN actually works, and keep
+		// it, before anything else depends on it.
+		settled, err := settleGeneratedDSN(ctx, *dsn)
+		if err != nil {
+			return err
+		}
+		*dsn = settled
+		if err := saveDSN(*dsn); err != nil {
+			return fmt.Errorf("saving the database DSN: %w", err)
+		}
 	}
 	if err := ensureServer(ctx, daemon, ep, *addr, *dsn); err != nil {
 		return err
@@ -148,13 +182,6 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func envOrStr(name, fallback string) string {
-	if v := os.Getenv(name); v != "" {
-		return v
-	}
-	return fallback
-}
-
 // ---------------------------------------------------------------------------
 // Database
 // ---------------------------------------------------------------------------
@@ -181,15 +208,20 @@ func ensureDatabase(dsn string) error {
 		return nil
 	}
 
+	// A container created here gets the DSN's own password, through the environment of the
+	// docker command rather than its argv. It only takes effect on an empty volume; an
+	// existing volume keeps the password it was initialized with.
+	password, _ := u.User.Password()
 	dir, name := findComposeFile()
 	if dir != "" {
 		cmd := exec.Command("docker", "compose", "-f", filepath.Join(dir, name), "up", "-d", "db")
 		cmd.Dir = dir
+		cmd.Env = append(withoutEnv(os.Environ(), "CONDUCTOR_DB_PASSWORD"), "CONDUCTOR_DB_PASSWORD="+password)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("docker compose up -d db: %v\n%s", err, out)
 		}
 	} else if dockerAvailable() {
-		if err := ensurePostgresContainer(port); err != nil {
+		if err := ensurePostgresContainer(port, password); err != nil {
 			return err
 		}
 	} else {
@@ -251,11 +283,13 @@ func dockerAvailable() bool {
 }
 
 // ensurePostgresContainer starts conductor-db when it is stopped, and creates it when it
-// does not exist, matching the repository's compose definition (image, credentials,
-// published port, named volume).
-func ensurePostgresContainer(port string) error {
+// does not exist, matching the repository's compose definition (image, published port,
+// named volume). The port is published on loopback only, and the password comes from the
+// DSN, handed to docker in its environment so it never appears in a process listing.
+func ensurePostgresContainer(port, password string) error {
 	out, err := exec.Command("docker", "inspect", "-f", "{{.State.Running}}", "conductor-db").CombinedOutput()
 	if err == nil {
+		warnIfPublished()
 		if strings.TrimSpace(string(out)) == "true" {
 			return nil
 		}
@@ -267,16 +301,53 @@ func ensurePostgresContainer(port string) error {
 	if !strings.Contains(string(out), "No such object") {
 		return fmt.Errorf("docker inspect conductor-db: %v\n%s", err, out)
 	}
+	if password == "" {
+		return errors.New("the database DSN has no password; refusing to create a database without one")
+	}
 	cmd := exec.Command("docker", "run", "-d",
 		"--name", "conductor-db", "--restart", "unless-stopped",
-		"-e", "POSTGRES_USER=conductor", "-e", "POSTGRES_PASSWORD=conductor", "-e", "POSTGRES_DB=conductor",
-		"-p", port+":5432",
+		"-e", "POSTGRES_USER=conductor", "-e", "POSTGRES_PASSWORD", "-e", "POSTGRES_DB=conductor",
+		"-p", "127.0.0.1:"+port+":5432",
 		"-v", "conductor-pgdata:/var/lib/postgresql/data",
 		"postgres:17-alpine")
+	cmd.Env = append(withoutEnv(os.Environ(), "POSTGRES_PASSWORD"), "POSTGRES_PASSWORD="+password)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("docker run conductor-db: %v\n%s", err, out)
 	}
 	return nil
+}
+
+// warnIfPublished tells the operator when an existing conductor-db container publishes its
+// port beyond this machine, as every container created before loopback binding did. A
+// published port cannot be changed in place; recreating the container keeps the volume.
+func warnIfPublished() {
+	out, err := exec.Command("docker", "inspect", "-f",
+		"{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostIp}}|{{end}}{{end}}",
+		"conductor-db").Output()
+	if err != nil || !publishedBeyondLoopback(string(out)) {
+		return
+	}
+	fmt.Fprint(os.Stderr, `
+Warning: the conductor-db container publishes Postgres on every network interface. Anyone who
+can reach this machine can try its password. Recreate it bound to loopback (the data volume is
+kept):
+
+  docker rm -f conductor-db && conductor up
+
+`)
+}
+
+// publishedBeyondLoopback reads the host addresses from warnIfPublished's inspect template,
+// each binding's address followed by "|"; an empty or wildcard address listens everywhere.
+func publishedBeyondLoopback(bindings string) bool {
+	parts := strings.Split(strings.TrimSpace(bindings), "|")
+	for _, ip := range parts[:len(parts)-1] {
+		switch strings.TrimSpace(ip) {
+		case "", "0.0.0.0", "::":
+			return true
+		}
+	}
+	return false
 }
 
 func portOpen(host, port string) bool {
@@ -286,6 +357,160 @@ func portOpen(host, port string) bool {
 	}
 	conn.Close()
 	return true
+}
+
+// ---------------------------------------------------------------------------
+// Database credentials
+// ---------------------------------------------------------------------------
+
+// Where the DSN came from, which decides whether `up` may settle and save it.
+const (
+	dsnFlag      = "flag"
+	dsnEnv       = "env"
+	dsnSaved     = "saved"
+	dsnGenerated = "generated"
+)
+
+// legacyDSN is what every installation used before passwords were generated; a generated DSN
+// is the same with a random password. A database initialized before then still has the old
+// password, which is why settleGeneratedDSN tries it.
+const legacyDSN = "postgres://conductor:conductor@localhost:55432/conductor?sslmode=disable"
+
+// dsnPath is where `conductor up` keeps the DSN of the database it manages.
+func dsnPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".conductor", "database.url"), nil
+}
+
+// resolveDSN picks the database: --dsn, then DATABASE_URL, then the DSN saved by an earlier
+// `up`, and only then a new one with a generated password.
+func resolveDSN(flagValue, envValue string) (string, string, error) {
+	switch {
+	case flagValue != "":
+		return flagValue, dsnFlag, nil
+	case envValue != "":
+		return envValue, dsnEnv, nil
+	}
+	if path, err := dsnPath(); err == nil {
+		if body, err := os.ReadFile(path); err == nil {
+			if saved := strings.TrimSpace(string(body)); saved != "" {
+				return saved, dsnSaved, nil
+			}
+		}
+	}
+	password, err := randomPassword()
+	if err != nil {
+		return "", "", err
+	}
+	u, _ := url.Parse(legacyDSN)
+	u.User = url.UserPassword("conductor", password)
+	return u.String(), dsnGenerated, nil
+}
+
+// randomPassword is 192 bits, hex-encoded so it needs no escaping in a URL or a shell.
+func randomPassword() (string, error) {
+	var b [24]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+// saveDSN writes the DSN owner-only: it is the database password.
+func saveDSN(dsn string) error {
+	path, err := dsnPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, []byte(dsn+"\n"), 0o600); err != nil {
+		return err
+	}
+	// WriteFile keeps an existing file's mode; make sure an old, looser file is tightened.
+	return os.Chmod(path, 0o600)
+}
+
+// settleGeneratedDSN confirms which credentials the database accepts. A database this `up`
+// just created takes the generated password. One that was already running — or whose volume
+// predates generated passwords — still has the legacy password: that DSN is kept so the
+// installation keeps working, and the operator is told how to rotate it.
+func settleGeneratedDSN(ctx context.Context, generated string) (string, error) {
+	err := probeDSN(ctx, generated)
+	if err == nil {
+		return generated, nil
+	}
+	if !isAuthFailure(err) {
+		return "", fmt.Errorf("connecting to the database: %w", err)
+	}
+	// The same database, with the password every earlier installation was given.
+	u, perr := url.Parse(generated)
+	if perr != nil {
+		return "", perr
+	}
+	u.User = url.UserPassword(u.User.Username(), "conductor")
+	legacy := u.String()
+	if legacyErr := probeDSN(ctx, legacy); legacyErr != nil {
+		return "", fmt.Errorf("the database at localhost:55432 rejected the generated password and the legacy one; "+
+			"pass --dsn or set DATABASE_URL: %w", err)
+	}
+	fmt.Fprint(os.Stderr, `
+Warning: this database still uses the old fixed password "conductor". It is published on
+loopback only from now on, but any local user or process can still log in with it. Rotate it:
+
+  docker exec conductor-db psql -U conductor -d conductor -c "ALTER ROLE conductor PASSWORD '<new>'"
+
+then put the new DSN in ~/.conductor/database.url (and DATABASE_URL for make and scripts).
+
+`)
+	return legacy, nil
+}
+
+// probeDSN connects once, retrying briefly while the database is still starting.
+func probeDSN(ctx context.Context, dsn string) error {
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		conn, err := pgx.Connect(cctx, dsn)
+		cancel()
+		if err == nil {
+			return conn.Close(ctx)
+		}
+		if isAuthFailure(err) || time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// isAuthFailure reports Postgres rejecting the credentials (invalid_password, or
+// invalid_authorization_specification), as opposed to the server not being up yet.
+func isAuthFailure(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && (pgErr.Code == "28P01" || pgErr.Code == "28000")
+}
+
+// daemonCommand runs conductord with the DSN in its environment. On the command line it
+// would be readable by every local user through ps or /proc.
+func daemonCommand(daemon, dsn string, args ...string) *exec.Cmd {
+	cmd := exec.Command(daemon, args...)
+	cmd.Env = append(withoutEnv(os.Environ(), "DATABASE_URL"), "DATABASE_URL="+dsn)
+	return cmd
+}
+
+// withoutEnv drops a variable from an environment list.
+func withoutEnv(environ []string, name string) []string {
+	out := make([]string, 0, len(environ))
+	for _, kv := range environ {
+		if k, _, _ := strings.Cut(kv, "="); k != name {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -328,8 +553,7 @@ func ensureServer(ctx context.Context, daemon, ep, addr, dsn string) error {
 		return err
 	}
 
-	cmd := exec.Command(daemon, "--addr", listen, "--dsn", dsn)
-	cmd.Env = os.Environ()
+	cmd := daemonCommand(daemon, dsn, "--addr", listen)
 	cmd.Stdout = log
 	cmd.Stderr = log
 	// Detach into its own session so the daemon outlives the CLI and a terminal
@@ -424,15 +648,18 @@ func ensureLogin(ctx context.Context, daemon, ep, dsn, project string) error {
 		}
 	}
 
+	if dsn == "" {
+		return fmt.Errorf("no valid login for %s; log in with `conductor login --endpoint %s --token …`, "+
+			"or pass --dsn to bootstrap its database from here", ep, ep)
+	}
 	fmt.Println("no valid login for this endpoint — bootstrapping")
-	cmd := exec.Command(daemon, "bootstrap", "--dsn", dsn, "--endpoint", ep)
+	cmd := daemonCommand(daemon, dsn, "bootstrap", "--endpoint", ep)
 	if project != "" {
 		cmd.Args = append(cmd.Args, "--project", project)
 	}
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Env = os.Environ()
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("bootstrap: %w", err)
 	}

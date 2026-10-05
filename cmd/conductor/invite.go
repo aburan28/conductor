@@ -107,18 +107,15 @@ Flags:
 		body["token_ttl"] = ttl.String()
 	}
 
-	var result struct {
-		Handle    string `json:"handle"`
-		Role      string `json:"role"`
-		Token     string `json:"token"`
-		ExpiresAt string `json:"expires_at"`
-		Created   bool   `json:"created_principal"`
-	}
+	var result inviteResult
 	if err := api.Post(ctx, "/v1/projects/"+ref+"/members", body, &result); err != nil {
 		return err
 	}
 	if result.Token == "" {
-		return errors.New("the server added the member but returned no token; they may already have one")
+		// An existing account is added to the project but never handed a new token: the
+		// server will not mint a credential for someone who already has one, since that
+		// would give the inviter a login as them.
+		return printTokenlessInvite(result, ref, *asJSON)
 	}
 
 	link := joinLink(joinEndpoint, ref, result.Token)
@@ -133,11 +130,7 @@ Flags:
 		})
 	}
 
-	verb := "Invited"
-	if !result.Created {
-		verb = "Re-invited"
-	}
-	fmt.Printf("%s %s as %s on %s.\n\n", verb, result.Handle, result.Role, ref)
+	fmt.Printf("Invited %s as %s on %s.\n\n", result.Handle, result.Role, ref)
 	fmt.Println("Send them this link, once, over a channel you trust:")
 	fmt.Println()
 	fmt.Println("  " + link)
@@ -176,6 +169,35 @@ console first; nothing becomes reachable from the public internet.
 		}
 	}
 	fmt.Fprintln(os.Stderr, "\nThis link contains a bearer token. It is shown once and stored only as a hash.")
+	return nil
+}
+
+// inviteResult is the server's answer to POST /v1/projects/{project}/members.
+type inviteResult struct {
+	Handle            string `json:"handle"`
+	Role              string `json:"role"`
+	Token             string `json:"token"`
+	ExpiresAt         string `json:"expires_at"`
+	Created           bool   `json:"created_principal"`
+	ExistingPrincipal bool   `json:"existing_principal"`
+	Note              string `json:"note"`
+}
+
+// printTokenlessInvite reports an invite that added a membership without minting a token —
+// an account that already existed, or --no-token.
+func printTokenlessInvite(result inviteResult, ref string, asJSON bool) error {
+	if asJSON {
+		return emit(map[string]any{
+			"handle": result.Handle, "role": result.Role, "created": result.Created,
+			"existing_principal": result.ExistingPrincipal, "project": ref,
+			"token": "", "note": result.Note,
+		})
+	}
+	fmt.Printf("Added %s as %s on %s.\n", result.Handle, result.Role, ref)
+	if result.ExistingPrincipal {
+		fmt.Printf("\n%s already has an account here, so no token was minted: they keep using their own\n"+
+			"login, which now reaches %s. Tell them to run:\n\n  conductor login --project %s\n", result.Handle, ref, ref)
+	}
 	return nil
 }
 
