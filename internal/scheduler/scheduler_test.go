@@ -361,7 +361,6 @@ func TestStallReportedOncePerEpisode(t *testing.T) {
 
 func TestPruneHonoursRetention(t *testing.T) {
 	f := newFixture(t, domain.DefaultProjectConfig())
-	const day = 24 * time.Hour
 	ctx := f.ctx
 
 	// One aggregate with three events, all old. The newest must survive: sequence numbers
