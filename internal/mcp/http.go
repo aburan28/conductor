@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -31,6 +32,11 @@ type HTTPTransport struct {
 	endpoint string
 	idleTTL  time.Duration
 	now      func() time.Time
+	// maxPerPrincipal and maxTotal bound the session table. Each session holds a gateway in
+	// memory for up to idleTTL, so without a bound any member could initialize sessions in a
+	// loop until the server ran out of memory.
+	maxPerPrincipal int
+	maxTotal        int
 
 	mu       sync.Mutex
 	sessions map[string]*httpSession
@@ -57,12 +63,27 @@ type httpSession struct {
 // endpoint (this server's own public URL).
 func NewHTTPTransport(endpoint string) *HTTPTransport {
 	return &HTTPTransport{
-		endpoint: endpoint,
-		idleTTL:  time.Hour,
-		now:      time.Now,
-		sessions: map[string]*httpSession{},
+		endpoint:        endpoint,
+		idleTTL:         time.Hour,
+		now:             time.Now,
+		maxPerPrincipal: DefaultMaxSessionsPerPrincipal,
+		maxTotal:        DefaultMaxSessions,
+		sessions:        map[string]*httpSession{},
 	}
 }
+
+// Session table bounds. A principal rarely runs more than a handful of tools at once; the
+// per-principal cap is generous for that and evicts the principal's own idlest session when
+// reached, so a tool that leaks sessions only ever crowds out itself. The global cap is the
+// backstop against many principals doing the same, and refuses rather than evicts, because
+// evicting would let one principal end another's session.
+const (
+	DefaultMaxSessionsPerPrincipal = 32
+	DefaultMaxSessions             = 4096
+)
+
+// errTooManySessions is returned when the global session cap is reached.
+var errTooManySessions = errors.New("too many MCP sessions on this server; retry later")
 
 // leaseIdle is how long an HTTP session may go without a request before its claim is no
 // longer kept alive. Over HTTP there is no process whose life is the session's: the only
@@ -138,7 +159,13 @@ func (t *HTTPTransport) post(w http.ResponseWriter, r *http.Request, principalID
 			return
 		}
 		project := t.resolveProject(r, token, pathProject)
-		sess = t.create(principalID, token, tokenHash, project)
+		var err error
+		sess, err = t.create(principalID, token, tokenHash, project)
+		if err != nil {
+			w.Header().Set("Retry-After", "60")
+			writeJSONRPCError(w, http.StatusServiceUnavailable, nullID, -32002, err.Error())
+			return
+		}
 	}
 
 	sess.call.Lock()
@@ -212,7 +239,7 @@ func (t *HTTPTransport) resolveProject(r *http.Request, token, pathProject strin
 	return ""
 }
 
-func (t *HTTPTransport) create(principalID, token, tokenHash, project string) *httpSession {
+func (t *HTTPTransport) create(principalID, token, tokenHash, project string) (*httpSession, error) {
 	keepCtx, stop := context.WithCancel(context.Background())
 	sess := &httpSession{
 		id:          newSessionID(),
@@ -224,17 +251,42 @@ func (t *HTTPTransport) create(principalID, token, tokenHash, project string) *h
 		lastSeen:    t.now(),
 		stopKeeping: stop,
 	}
-	// The session's claim stays alive while its client keeps calling (see leaseIdle).
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.sweepLocked()
+
+	// Per principal: make room by dropping this principal's least recently used session.
+	var oldest *httpSession
+	mine := 0
+	for _, other := range t.sessions {
+		if other.principalID != principalID {
+			continue
+		}
+		mine++
+		if oldest == nil || other.lastSeen.Before(oldest.lastSeen) {
+			oldest = other
+		}
+	}
+	if t.maxPerPrincipal > 0 && mine >= t.maxPerPrincipal && oldest != nil {
+		if oldest.stopKeeping != nil {
+			oldest.stopKeeping()
+		}
+		delete(t.sessions, oldest.id)
+	}
+	if t.maxTotal > 0 && len(t.sessions) >= t.maxTotal {
+		stop()
+		return nil, errTooManySessions
+	}
+	t.sessions[sess.id] = sess
+	// The session's claim stays alive while its client keeps calling (see leaseIdle). The
+	// keeper starts only once the session is admitted, and takes t.mu itself, after create
+	// has released it.
 	go sess.server.keepLeaseAlive(keepCtx, func() bool {
 		t.mu.Lock()
 		defer t.mu.Unlock()
 		return t.now().Sub(sess.lastSeen) < leaseIdle
 	})
-	t.mu.Lock()
-	t.sweepLocked()
-	t.sessions[sess.id] = sess
-	t.mu.Unlock()
-	return sess
+	return sess, nil
 }
 
 func (t *HTTPTransport) lookup(id, principalID, tokenHash string) *httpSession {

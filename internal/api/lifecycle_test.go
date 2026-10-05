@@ -200,7 +200,9 @@ func TestTransitionToDoneReleasesTerritory(t *testing.T) {
 		t.Fatal("finished work dropped its territory before merging")
 	}
 
-	if code := h.jsonDo(h.aliceTok, http.MethodPost, "/v1/tasks/"+taskID+"/transition", map[string]any{"to": "done"}, nil); code < 400 {
+	// "to" is accepted as an alias of "status" for dashboards still sending the old shape;
+	// a body naming neither is refused.
+	if code := h.jsonDo(h.aliceTok, http.MethodPost, "/v1/tasks/"+taskID+"/transition", map[string]any{}, nil); code < 400 {
 		t.Errorf("a body without status = %d, want a refusal", code)
 	}
 	var view struct {

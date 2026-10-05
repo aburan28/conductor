@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -208,7 +209,18 @@ func (f *fakeGitHub) handler() http.Handler {
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &f.checkRun)
 		w.WriteHeader(http.StatusCreated)
-		w.Write([]byte(`{"id":1}`))
+		w.Write([]byte(`{"id":4242}`))
+	})
+	mux.HandleFunc("PATCH /repos/{o}/{r}/check-runs/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if r.PathValue("id") != "4242" {
+			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		f.checkRun = nil
+		_ = json.Unmarshal(body, &f.checkRun)
+		f.checkRun["patched"] = true
+		w.Write([]byte(`{"id":4242}`))
 	})
 	return mux
 }
@@ -264,12 +276,23 @@ func TestClientAgainstFakeGitHub(t *testing.T) {
 		t.Errorf("installation token minted %d times; it should be cached", fake.tokens.Load())
 	}
 
-	err = c.PostCheckRun(ctx, 99, "acme", "widgets", CheckRun{HeadSHA: "abc", Conclusion: "neutral", Title: "1 overlap", Summary: "s", Text: "t"})
+	runID, err := c.PostCheckRun(ctx, 99, "acme", "widgets", CheckRun{HeadSHA: "abc", Conclusion: "neutral", Title: "1 overlap", Summary: "s", Text: "t"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fake.checkRun["name"] != CheckName || fake.checkRun["head_sha"] != "abc" || fake.checkRun["conclusion"] != "neutral" {
-		t.Errorf("check run body = %v", fake.checkRun)
+	if runID != 4242 || fake.checkRun["name"] != CheckName || fake.checkRun["head_sha"] != "abc" || fake.checkRun["conclusion"] != "neutral" {
+		t.Errorf("check run %d body = %v", runID, fake.checkRun)
+	}
+	// A changed result updates the same run.
+	if err := c.UpdateCheckRun(ctx, 99, "acme", "widgets", runID, CheckRun{Conclusion: "success", Title: "clear"}); err != nil {
+		t.Fatal(err)
+	}
+	if fake.checkRun["patched"] != true || fake.checkRun["conclusion"] != "success" {
+		t.Errorf("update body = %v", fake.checkRun)
+	}
+	var ae *APIError
+	if err := c.UpdateCheckRun(ctx, 99, "acme", "widgets", 1, CheckRun{Conclusion: "success"}); !errors.As(err, &ae) || !ae.NotFound() {
+		t.Errorf("updating a missing run = %v, want a not-found APIError", err)
 	}
 }
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
+	"time"
 
 	"github.com/adamburan/conductor/internal/client"
 	"github.com/adamburan/conductor/internal/coord"
@@ -129,6 +131,24 @@ func (b *RemoteBackend) RegisterRunner(ctx context.Context, r domain.Runner) (do
 func (b *RemoteBackend) HeartbeatRunner(ctx context.Context, runnerID domain.ID, inFlight int) error {
 	return remoteErr(b.api.Post(ctx, "/v1/runners/"+runnerID+"/heartbeat",
 		map[string]any{"in_flight": inFlight}, nil))
+}
+
+func (b *RemoteBackend) MintAttemptToken(ctx context.Context, attemptID domain.ID, ttl time.Duration) (string, string, error) {
+	name := attemptTokenName(attemptID)
+	var out struct {
+		Token string `json:"token"`
+	}
+	err := b.api.Post(ctx, "/v1/tokens", map[string]any{
+		"name": name, "ttl": ttl.String(), "project": b.projectID,
+	}, &out)
+	if err == nil && out.Token == "" {
+		err = errors.New("the control plane returned no token")
+	}
+	return out.Token, name, remoteErr(err)
+}
+
+func (b *RemoteBackend) RevokeToken(ctx context.Context, name string) error {
+	return remoteErr(b.api.Do(ctx, http.MethodDelete, "/v1/tokens/"+url.PathEscape(name), nil, nil))
 }
 
 // remoteErr maps HTTP failures back onto the domain sentinels the runner already branches on,

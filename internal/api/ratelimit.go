@@ -122,12 +122,22 @@ func (l *authLimiter) evictOldestLocked(now time.Time) {
 // X-Forwarded-For is honoured only when the server was told it sits behind a trusted proxy.
 // Trusting it unconditionally would let any client spoof its identity and bypass the limit
 // entirely — the header is attacker-controlled otherwise.
+//
+// Even behind the proxy, only the right-most entry is used. A proxy appends the address it
+// accepted the connection from, so the last hop is the one value the trusted proxy wrote;
+// everything to its left arrived from the client and is whatever the client chose to send.
+// Taking the left-most entry, as this once did, let a client mint a fresh throttle bucket per
+// request by prefixing a random address of its own. With a chain of several trusted proxies
+// the right-most entry is the nearest proxy's peer rather than the client, which only makes
+// the throttle coarser — failures are shared more widely, never escaped.
 func clientKey(r *http.Request, behindProxy bool) string {
 	if behindProxy {
-		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-			// Left-most entry is the original client; the proxy appends as it forwards.
-			if comma := indexByte(fwd, ','); comma >= 0 {
-				fwd = fwd[:comma]
+		// Several X-Forwarded-For headers are one list in order (RFC 7230 §3.2.2), so the
+		// right-most entry is the last element of the last header.
+		if values := r.Header.Values("X-Forwarded-For"); len(values) > 0 {
+			fwd := values[len(values)-1]
+			if comma := lastIndexByte(fwd, ','); comma >= 0 {
+				fwd = fwd[comma+1:]
 			}
 			if host := trimSpace(fwd); host != "" {
 				return host
@@ -141,8 +151,8 @@ func clientKey(r *http.Request, behindProxy bool) string {
 	return host
 }
 
-func indexByte(s string, b byte) int {
-	for i := 0; i < len(s); i++ {
+func lastIndexByte(s string, b byte) int {
+	for i := len(s) - 1; i >= 0; i-- {
 		if s[i] == b {
 			return i
 		}

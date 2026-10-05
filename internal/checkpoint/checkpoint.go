@@ -132,6 +132,26 @@ type Workspace struct {
 	Skipped        string   `json:"skipped,omitempty"` // why no workspace was captured
 }
 
+// IndexEntry is what may sit beside a sealed checkpoint in a bucket, in the clear: enough to
+// list and pick a checkpoint, and nothing about the conversation or the machine. The full
+// manifest carries the harness's own conversation title, the note, the working directory,
+// the repository, and the machine name — all of which say what someone was working on — so
+// it travels only inside the sealed bundle.
+type IndexEntry struct {
+	Schema      int       `json:"schema"`
+	ID          string    `json:"id"`
+	CreatedAt   time.Time `json:"created_at"`
+	Harness     string    `json:"harness"`
+	Sealed      bool      `json:"sealed"`
+	SealedBytes int64     `json:"sealed_bytes"`
+}
+
+// Index builds the bucket-side entry for this manifest's sealed bundle.
+func (m Manifest) Index(sealedBytes int64) IndexEntry {
+	return IndexEntry{Schema: m.Schema, ID: m.ID, CreatedAt: m.CreatedAt, Harness: m.Harness,
+		Sealed: true, SealedBytes: sealedBytes}
+}
+
 // FileEntry is one archive member.
 type FileEntry struct {
 	Path   string `json:"path"`
@@ -172,16 +192,61 @@ func ShortID(id string) string {
 }
 
 // Validate checks the invariants every manifest must hold before anything acts on it.
+//
+// A manifest can arrive from anywhere — a file someone sent, a bucket someone else can write
+// — and its identifiers become file names (the session id names the installed transcript, the
+// id names the continuation file) and command-line arguments (`codex resume <session>`). So
+// they are held to a plain identifier alphabet: nothing that could climb out of a directory,
+// name an absolute path, or be read as an option.
 func (m Manifest) Validate() error {
 	switch {
 	case m.Schema != Schema:
 		return fmt.Errorf("checkpoint schema %d is not supported by this build (wants %d)", m.Schema, Schema)
 	case m.ID == "":
 		return fmt.Errorf("checkpoint has no id")
+	case !SafeIdentifier(m.ID):
+		return fmt.Errorf("checkpoint id %q is not a plain identifier", m.ID)
 	case m.Harness == "":
 		return fmt.Errorf("checkpoint %s names no harness", m.ID)
+	case !SafeIdentifier(m.Harness):
+		return fmt.Errorf("checkpoint %s names harness %q, which is not a plain identifier", m.ID, m.Harness)
 	case m.SessionID == "":
 		return fmt.Errorf("checkpoint %s names no session", m.ID)
+	case !SafeIdentifier(m.SessionID):
+		return fmt.Errorf("checkpoint %s names session %q, which is not a plain identifier", m.ID, m.SessionID)
+	case m.Transcript.NativeRelPath != "" && !SafeRelPath(m.Transcript.NativeRelPath):
+		return fmt.Errorf("checkpoint %s records a transcript path that leaves its directory", m.ID)
 	}
 	return nil
+}
+
+// SafeIdentifier reports whether s is a plain identifier: letters, digits, '.', '_' and '-',
+// starting with a letter or digit, at most 200 bytes, and never "..".
+func SafeIdentifier(s string) bool {
+	if s == "" || len(s) > 200 || strings.Contains(s, "..") {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case i > 0 && (r == '.' || r == '_' || r == '-'):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// SafeRelPath reports whether p is a relative, forward-slash path that stays inside the
+// directory it is joined to: no absolute path, no ".." component, no backslash, no NUL.
+func SafeRelPath(p string) bool {
+	if p == "" || strings.ContainsAny(p, "\\\x00") || strings.HasPrefix(p, "/") {
+		return false
+	}
+	for _, part := range strings.Split(p, "/") {
+		if part == "" || part == "." || part == ".." {
+			return false
+		}
+	}
+	return true
 }

@@ -24,9 +24,9 @@ func (s *Server) lifecycleRoutes(m *http.ServeMux) {
 // transition route cannot express that — running -> done skips edges, and the live lease and
 // attempt have to end with it — so this walks the same path a merge does.
 //
-// Only the holder of the task's live lease may do this (or a maintainer): it ends that lease.
-// A task waiting to merge (verifying and on) has no lease and goes through the transition
-// route, which is where status authority for everyone else lives.
+// Who may do this is the transition route's rule for done (coord.AuthorizeTransition): a
+// reviewer or a maintainer, not the person who did the work alone. A task waiting to merge
+// (verifying and on) has no lease and goes through the transition route itself.
 func (s *Server) completeTask(w http.ResponseWriter, r *http.Request, p domain.Principal) {
 	task, caller, err := s.taskFor(r, p, domain.RoleContributor)
 	if err != nil {
@@ -43,15 +43,22 @@ func (s *Server) completeTask(w http.ResponseWriter, r *http.Request, p domain.P
 		s.fail(w, r, err)
 		return
 	}
-	if lease.HolderPrincipal != p.ID && !caller.Role.Can(domain.RoleMaintainer) {
-		s.fail(w, r, fmt.Errorf("%w: only the claim's holder or a maintainer may complete %s",
-			domain.ErrNotPermitted, task.Ref))
+	// Completing is a move to done, so it answers to the same rule as the transition route:
+	// accepting work takes a reviewer or a maintainer, never only the person who did it. A
+	// merged pull request completes work through the control plane instead (github_merge.go).
+	others, err := s.svc.AuthorizeTransition(r.Context(), caller, task, domain.TaskDone)
+	if err != nil {
+		s.fail(w, r, err)
 		return
 	}
 	out, err := s.store.CompleteWork(r.Context(), task.ID, "marked done by "+p.Handle)
 	if err != nil {
 		s.fail(w, r, err)
 		return
+	}
+	if others || lease.HolderPrincipal != p.ID {
+		s.auditOthersWork(r, caller, task, "task.completed_by_other", map[string]any{
+			"from": string(out.From), "holder": string(lease.HolderPrincipal)})
 	}
 	view, err := s.svc.TaskView(r.Context(), caller, task.ID)
 	if err != nil {

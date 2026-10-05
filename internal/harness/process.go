@@ -142,26 +142,14 @@ func (d *ProcessDriver) Start(ctx context.Context, spec RunSpec) (Handle, error)
 	return h, nil
 }
 
-// buildEnv assembles a minimal environment for the harness process.
+// buildEnv assembles the environment for the harness process.
 //
 // The parent environment is passed through because a coding agent needs its own credentials
-// and PATH, but Conductor's own database URL and service token are stripped: a worker has no
-// business holding the control plane's credentials (DESIGN.md §25.2).
+// and PATH, but Conductor's own database URL, the operator's token, and every other
+// CONDUCTOR_* secret are stripped (SanitizeEnv): a worker has no business holding the control
+// plane's credentials (DESIGN.md §25.2).
 func buildEnv(spec RunSpec) []string {
-	blocked := map[string]bool{
-		"DATABASE_URL":      true,
-		"CONDUCTOR_TOKEN":   true,
-		"CONDUCTOR_DB":      true,
-		"POSTGRES_PASSWORD": true,
-	}
-	var env []string
-	for _, kv := range os.Environ() {
-		name, _, _ := strings.Cut(kv, "=")
-		if blocked[name] {
-			continue
-		}
-		env = append(env, kv)
-	}
+	env := SanitizeEnv(os.Environ(), false)
 	env = append(env,
 		"CONDUCTOR_TASK_REF="+spec.TaskRef,
 		"CONDUCTOR_TASK_ID="+spec.Fence.TaskID,

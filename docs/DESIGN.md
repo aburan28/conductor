@@ -1831,6 +1831,44 @@ Reviewer: Claude reviewer attempt 9
 
 Repository access remains an independent requirement. Conductor must not grant access to code merely because a user can see project presence.
 
+What each role may do in this build, beyond reading (every member, `runner` included, can read
+what an `observer` can):
+
+- **Membership.** `project_admin` and above invite and remove members and change roles. Privilege
+  never flows upward: nobody grants, changes, or removes a role above their own (a
+  `project_admin` cannot create, demote, or remove an `org_admin`), and the last administrator
+  cannot be removed or demoted. Inviting a handle that names a **new** account creates it and
+  returns its first token, once. Inviting an **existing** account adds the membership and returns
+  no token — the person keeps their own credentials — because a token works in every project its
+  principal belongs to, so minting one for an existing account would hand the inviter that
+  account. Re-inviting a member is a `409`; a role changes only through
+  `PATCH /v1/projects/{project}/members/{handle}` (`conductor member role`).
+- **Execution** (`claim-next`, lease heartbeat, progress, result, scope expansion, release,
+  attempt route/state/brief, runner snapshot and registration) accepts `contributor` and above,
+  and the `runner` role. A runner identity can therefore claim and execute queued work without a
+  contributor's right to file, edit, or move other people's tasks.
+- **Lease authority.** Acting on a lease — release, expand scope, hand off, heartbeat, report
+  progress, finish — requires being the lease's holder principal, or `maintainer` and above (to
+  take back a stuck task; recorded in the audit log). The fencing epoch proves a holder is
+  current; it never proved *who* the caller was, and the server no longer fills in someone
+  else's lease for a caller who omits `lease_id`. An attempt's brief is for the session
+  executing it (its sponsor, executor, or the lease holder), the task's owner, or a maintainer
+  when the task is not private.
+- **Moving a task by hand** (`POST /v1/tasks/{task}/transition`). A `maintainer` or above may
+  make any legal transition. Accepting verified work — into `review_required`, `merging`, or
+  `done` — is a review decision for a `reviewer` or a maintainer, never the author or executor
+  alone. Every other move belongs to the task's creator or the holder of its live lease, and
+  needs a `contributor`. The state machine (§9) still decides what is legal; these rules decide
+  who may ask. The rule is one function, `coord.Service.AuthorizeTransition`, which every
+  handler that changes a status on a principal's behalf calls; the control plane acting on its
+  own (`coord.SystemCaller`: the scheduler, merge reconciliation) is not subject to it.
+- **Editing a task** (`PATCH /v1/tasks/{task}`): its content — title, objective, acceptance
+  criteria, priority, labels — belongs to its creator, the holder of its live lease, or a
+  maintainer; its visibility to its creator or a maintainer only, so a lease holder working
+  someone else's private task cannot publish it (`coord.Service.AuthorizeTaskEdit`).
+
+Acting on someone else's task or lease is audited.
+
 ### 24.3 Field-level authorization
 
 A task contains fields with separate visibility:
@@ -1874,6 +1912,29 @@ Do not solve privacy only with task-level rows; enforce visibility at serializat
   a reachable one defaults to `enhanced`. Tightening is open to any project admin, loosening
   only to the owner, and `--security-mode` pins either.
 
+Bearer tokens in this build:
+
+- A token is presented in the `Authorization` header. The SSE event stream alone also accepts
+  `?token=`, because a browser `EventSource` cannot set headers; everywhere else a token in the
+  URL is refused, since URLs end up in proxy logs and browser history.
+- Every token expires unless an administrator deliberately invites a service identity (a runner)
+  with no expiry. `POST /v1/tokens` and `/v1/tokens/reset` default to 90 days and cap a human's
+  token there. `conductord bootstrap` mints a 90-day token (`--token-ttl`) and revokes the
+  bootstrap token it printed before, so re-running bootstrap to recover a login retires the old one.
+- A token can be confined to one project (`POST /v1/tokens` with `project`). Every
+  project-scoped authorization goes through `coord.Authorize`, which treats any other project as
+  nonexistent; sessions and runners, authorized by owner, apply the scope themselves; listings
+  of projects are filtered to it. A scoped token reaches only routes that address a project or
+  a resource inside one, plus identity and read-only listings: never token administration, the
+  machine's security mode, or GitHub App setup. The runner mints one per attempt for the agent
+  it launches (§25.3).
+- Token creation, invite-minted tokens, bootstrap, runner registration, role changes, conflict
+  resolutions, and actions on other people's tasks and leases are written to the audit log; a
+  failed audit write is logged rather than dropped.
+- The failed-authentication throttle keys on the connection's peer address, or behind
+  `--behind-proxy` on the right-most `X-Forwarded-For` entry — the one the trusted proxy wrote.
+  The left-most entry is whatever the client sent.
+
 ### 25.2 Secrets
 
 - Store references to secrets, never secret values, in task cards.
@@ -1894,6 +1955,28 @@ Autonomous attempts should run with:
 - restricted credentials;
 - optional container, bubblewrap, or Landlock isolation;
 - no access to other users' local chat stores.
+
+That is the target. What `conductor worker` does today is narrower, and it matters to anyone
+running one:
+
+- **There is no sandbox.** The harness and the required checks run as the runner's own user,
+  with that user's file access — `~/.ssh`, `~/.aws`, `~/.conductor/credentials` included.
+- **A repository's Conductor config is executable code.** The harness `command`, `arg_template`,
+  and `mcp_servers` in `.conductor/project.yaml` are run by the worker, and the project's
+  `required_checks` run as `sh -c` in the worktree the agent just edited (so an edited `Makefile`
+  runs too). Run a worker only against repositories, and with members, you trust to run code on
+  that machine. The worker takes its repository from `--repo` or the checkout it is started in;
+  the path registered on the control plane is only a fallback, and is announced.
+- **Environments are cleaned.** A harness inherits the runner's environment minus Conductor's
+  credentials (`DATABASE_URL`, `CONDUCTOR_TOKEN`, every `CONDUCTOR_*` secret, Postgres
+  passwords); it keeps its own model API key. A check gets a stricter environment with anything
+  credential-shaped removed: tokens, keys, passwords, cloud and model-provider settings, the SSH
+  agent (`harness.SanitizeEnv`). This is a blocklist, so it narrows exposure; it does not
+  contain a hostile check.
+- **The agent never sees the operator's token.** For each attempt the runner mints a token
+  confined to the project that expires shortly after the attempt's timeout, writes the agent's
+  MCP config into a private `0700` directory outside the worktree (the worktree is committed
+  with `git add -A`), and revokes the token when the attempt ends.
 
 ### 25.4 Prompt injection and untrusted tool output
 
@@ -1927,6 +2010,28 @@ For team or hosted use:
 - per-tenant dedupe HMAC keys;
 - audit of administrative reads.
 
+The dedupe key is stored in the `organizations` table, so a database dump or backup carries it,
+and with it anyone can confirm a guess about a private intent by recomputing its fingerprint
+(intents are kept even when they never became tasks). Set `CONDUCTOR_DEDUPE_SECRET` on every
+process that opens the database and the key actually used becomes
+`HMAC-SHA256(secret, stored key)`, so the database alone no longer suffices. It is optional
+because setting or changing it changes every fingerprint computed afterwards: open work filed
+before the change stops deduplicating against work filed after it until it closes. Note what it
+does not protect: a private task's title and objective are themselves stored in plaintext, so a
+dump already reveals filed private work; the secret protects the intents that were only checked.
+Client-supplied fingerprints are still accepted as-is (§12.2); they gain a client nothing,
+because no API returns another principal's fingerprint to compare against.
+
+Read paths that do not return a `privacy.TaskView` apply the same rules
+(`internal/coord/visibility.go`): domain events (`GET …/events` and the SSE stream) are shown at
+the narrower of the visibility they were written with and their task's current visibility —
+territory only for another member's private task, summary fields from `team_summary`, commits,
+paths, and check results from `team_artifacts`, and an attempt's spend only to its sponsor; a
+handoff bundle, a task's validation results, and its policy-decision rationale follow the task's
+visibility; an attempt's changed paths and worktree path are shown to others from
+`team_summary` up (`privacy.ProjectAttempt`; the same tier as in events); lease ids and fencing epochs appear on a task card only for the lease holder. Server
+faults return `internal error` with a request id, and the detail goes to the server log.
+
 ---
 
 ## 26. Observability
@@ -1946,6 +2051,15 @@ For team or hosted use:
 - token/cost/capacity by role, model alias, project, and sponsor;
 - frontier-planner-to-worker token ratio;
 - worker utilization and provider rate-limit pressure.
+
+Implemented so far: conductord serves operational metrics in the Prometheus text format at
+`/metrics` (loopback only, or behind a bearer token) — HTTP requests and latency by route
+pattern, scheduler pass duration and errors, active, reclaimed and outage-extended leases,
+events written by type, retention deletions, GitHub polls, event streams, and database pool
+statistics — from a small standard-library registry (`internal/metrics`) rather than the
+Prometheus client, per §4's dependency posture. `/v1/ready` reports database, schema
+version, scheduler and poller health. The product metrics above are still served by the API
+and dashboard rather than as series. docs/OPERATIONS.md lists every metric.
 
 ### 26.2 Tracing
 
@@ -1971,6 +2085,11 @@ Do not put raw prompts, source contents, or secrets in span attributes.
 
 Structured logs include IDs, transitions, durations, retry classes, and policy decisions. Full harness stdout is owner-private by default and may remain local. Team logs contain sanitized summaries.
 
+Every request carries an id (`X-Request-Id`, propagated when the caller sends a well-formed
+one) that appears in its access-log line, in error responses, and in any log line about
+it. The access log records method, route pattern, status, duration and principal — never a
+query string, header or body.
+
 ### 26.4 Dashboard views
 
 1. **Project board:** tasks, owners, states, dependencies, conflicts.
@@ -1992,6 +2111,20 @@ Structured logs include IDs, transitions, durations, retry classes, and policy d
 - Mark expired attempts stale.
 - Requeue eligible tasks.
 - Rebuild presence and conflict projections from current rows/events.
+
+Reconciling must not mistake the outage itself for dead workers. Workers renew leases
+through the control plane, so while every replica is down none can, and a restart that
+simply reclaimed expired leases would fence off all in-flight work after any outage longer
+than the lease TTL. Each scheduler pass therefore stamps a heartbeat shared by all replicas;
+a gap longer than the normal pass interval is an outage, and open leases are extended by
+the gap before anything is reclaimed (once, under a row lock, however many replicas start
+together). The extension runs before a restarted process accepts requests, so a worker's
+first heartbeat after the outage succeeds. A worker that died while the control plane was
+up leaves no gap and is reclaimed on time.
+
+Shutdown is ordered too: background loops and long-lived streams end first, in-flight
+requests complete, and only then is the database pool closed, within a bounded grace
+period. docs/OPERATIONS.md covers both, and backup and restore.
 
 ### 27.2 Runner crash
 
@@ -2063,7 +2196,16 @@ session:
    state is empty) and reopens the conversations. The S3 client is SigV4-signed over the
    standard library — no vendor SDK, consistent with §4's dependency posture — and speaks to any
    S3-compatible endpoint. Only resume metadata is uploaded; the transcript never leaves the
-   harness's own store, exactly as in every other Conductor channel.
+   harness's own store, exactly as in every other Conductor channel. A plain `http://`
+   endpoint is refused unless `CONDUCTOR_BACKUP_S3_INSECURE` is set.
+
+   A bucket is writable by more parties than the machine, and a restored record names a
+   directory and a command, so the records are protected on both ends. With
+   `CONDUCTOR_CHECKPOINT_KEY` set they are sealed (the checkpoint AES-256-GCM format) and a
+   plaintext manifest is refused on pull (`--allow-unsealed` overrides). Whatever comes back is
+   sanitized: no argv, the harness's resume invocation recomputed locally, unknown harnesses and
+   odd wrap flags dropped, process ids cleared. And `conductor resume` shows what a record
+   restored from another machine would run, and where, and asks first (`--yes` answers).
 
 Recovery in all three cases is the same command: `conductor resume`, which reopens a saved
 record whose process is gone using the harness's own conversation-resume invocation.
@@ -2096,7 +2238,17 @@ is written only by the CLI on the user's machine, never by or through the contro
 `coord_checkpoint` is honoured only by the stdio gateway, which runs beside the harness;
 the HTTP gateway refuses it. A checkpoint leaves the machine only as a file the user moves,
 or sealed (AES-256-GCM under a passphrase) in the user's own bucket — `conductor checkpoint
-push` refuses plaintext. `docs/PORTABILITY.md` has the format and per-harness mechanics.
+push` refuses plaintext. Beside the sealed bundle the bucket holds only an index entry (id,
+time, harness, size): the manifest names the conversation, the note, the working directory, and
+the machine, so it travels inside the ciphertext. `docs/PORTABILITY.md` has the format and
+per-harness mechanics.
+
+A checkpoint that arrives from elsewhere is untrusted input to a restore. Its identifiers
+(checkpoint id, harness, session id) must be plain identifiers before they become file names or
+arguments; members are size-capped before they are read; and the working tree is restored
+through `os.Root` with no symbolic link followed and nothing written under `.git`, because the
+tracked patch is applied first and can itself create the link a later file would be written
+through.
 
 ---
 
@@ -2155,6 +2307,19 @@ Recommended properties:
 ### 28.3 Scaling model
 
 Stateless API replicas are safe when all claim operations are transactional in PostgreSQL. Scheduler replicas use leader election or `SKIP LOCKED`. Runner dispatch uses a durable queue/outbox. Presence is a projection and can tolerate eventual consistency; claims cannot.
+
+As built, conductord replicas share one database and need no leader election: scheduler
+steps use `SKIP LOCKED`, and everything else replicas must agree on is a row — the scheduler
+heartbeat (§27.1), the last budget alert level announced per project and the stalls already
+announced, the GitHub App's credentials (its secrets sealed with AES-256-GCM under a key kept
+outside the database, so a backup cannot act as the app) and pending setups, and the check
+run posted per commit. The one singleton
+duty, polling GitHub, runs under `pg_try_advisory_lock`, which Postgres releases if its
+holder dies. Two things stay per process: MCP HTTP sessions, which hold an agent's fence in
+memory and so need session affinity on `Mcp-Session-Id` at the load balancer, and the
+authentication failure limiter. Retention prunes events, audit, outbox, idempotency and
+usage rows on configurable windows, keeping each aggregate's newest event so sequence
+numbers continue. docs/OPERATIONS.md has the operator's view.
 
 ### 28.4 Daemon-to-daemon peering
 
