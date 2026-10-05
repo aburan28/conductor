@@ -279,6 +279,10 @@ func (g *GitHub) Run(ctx context.Context) error {
 	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
+	// The issue write-back runs here too, more often than a poll: a claim should reach its
+	// issue in seconds, and finding nothing due costs one query (github_issues.go).
+	wb := time.NewTicker(writeBackEvery)
+	defer wb.Stop()
 	var last time.Time
 	// The first poll, and one after a kick, may follow another replica's closely; a timed
 	// poll defers to one any replica ran within half an interval.
@@ -305,6 +309,11 @@ func (g *GitHub) Run(ctx context.Context) error {
 				goto wait
 			}
 			minGap = minKickInterval
+		case <-wb.C:
+			if c := g.current(ctx); c != nil && g.store != nil {
+				g.writeBackExclusive(ctx)
+			}
+			goto wait
 		}
 	}
 }
@@ -382,7 +391,16 @@ func (g *GitHub) pollOnce(ctx context.Context) error {
 			if err := g.syncPullLifecycle(ctx, inst.ID, repo.Owner, repo.Name, pulls, projects); err != nil {
 				errs = append(errs, fmt.Errorf("%s: %w", repo.FullName, err))
 			}
+			// Without a webhook, this is how issues reach their tasks (github_issues.go).
+			if err := g.syncRepoIssues(ctx, inst, repo, projects); err != nil {
+				errs = append(errs, err)
+			}
 		}
+	}
+	// What changed on synced tasks during the pass — a merge just completed, say — is
+	// written back in the same pass rather than a tick later.
+	if err := g.issueWriteBack(ctx, true); err != nil {
+		errs = append(errs, fmt.Errorf("issue write-back: %w", err))
 	}
 	return errors.Join(errs...)
 }
@@ -757,6 +775,10 @@ func (s *Server) githubRoutes(m *http.ServeMux) {
 	m.HandleFunc("POST /v1/github/setup", auth(s.githubStartSetup))
 	m.HandleFunc("POST /v1/github/check", auth(s.githubCheckNow))
 	m.HandleFunc("POST /v1/projects/{project}/github", auth(s.githubLink))
+	m.HandleFunc("GET /v1/projects/{project}/github/issues", auth(s.githubIssuesStatus))
+	m.HandleFunc("POST /v1/projects/{project}/github/issues", auth(s.githubIssuesConfigure))
+	m.HandleFunc("POST /v1/projects/{project}/github/issues/sync", auth(s.githubIssuesSync))
+	m.HandleFunc("GET /v1/tasks/{task}/issue", auth(s.githubTaskIssue))
 	// Browser pages and GitHub's own callbacks. None takes a bearer token: the setup page is
 	// authorized by its single-use state, the callback by the same state plus GitHub's code,
 	// and the webhook by its HMAC signature.
@@ -811,12 +833,13 @@ func (s *Server) githubStatus(w http.ResponseWriter, r *http.Request, p domain.P
 		out["install_url"] = creds.InstallURL(g.opts.Web)
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		installs, err := c.Installations(ctx)
-		cancel()
 		if err != nil {
 			out["installations_error"] = err.Error()
 		} else {
 			out["installations"] = installs
+			out["permission_gaps"] = g.permissionGaps(ctx, c, installs)
 		}
+		cancel()
 	}
 	// Linked projects the caller can see.
 	mine, err := s.store.ListProjectsFor(r.Context(), p.ID)
@@ -827,7 +850,18 @@ func (s *Server) githubStatus(w http.ResponseWriter, r *http.Request, p domain.P
 	linked := []map[string]string{}
 	for _, proj := range mine {
 		if o, rn, ok := githubapp.ParseRemote(proj.CanonicalRemote); ok {
-			linked = append(linked, map[string]string{"project": proj.Slug, "repository": o + "/" + rn})
+			entry := map[string]string{"project": proj.Slug, "repository": o + "/" + rn}
+			// Which issues the project syncs, if any: "label:<name>", or "all".
+			if cfg, found, err := s.store.TrackerConfigFor(r.Context(), proj.ID, db.TrackerGitHub); err != nil {
+				s.fail(w, r, err)
+				return
+			} else if found && cfg.Enabled {
+				entry["issues"] = "label:" + cfg.Label
+				if cfg.Label == "" {
+					entry["issues"] = "all"
+				}
+			}
+			linked = append(linked, entry)
 		}
 	}
 	out["linked"] = linked
@@ -995,7 +1029,8 @@ func (s *Server) githubSetupPage(w http.ResponseWriter, r *http.Request) {
 	s.renderGitHubPage(w, http.StatusOK, githubPageData{
 		Heading: "Connect Conductor to GitHub",
 		Paragraphs: []string{
-			"This creates a GitHub App named “" + st.Name + "” owned by " + owner + ". It can read repository contents and pull requests, and write one thing: a “Conductor” check run saying whether a pull request touches files other in-flight work has reserved.",
+			"This creates a GitHub App named “" + st.Name + "” owned by " + owner + ". It can read repository contents and pull requests, and write a “Conductor” check run saying whether a pull request touches files other in-flight work has reserved. " +
+				"For projects that turn on issue sync, it also comments on, labels, and closes the issues their tasks came from.",
 			"It cannot push code, merge, or change settings. You choose which repositories it sees when you install it on the next screen.",
 			delivery,
 		},
@@ -1082,7 +1117,8 @@ const maxWebhookBody = 5 << 20
 
 // webhookEvents are the deliveries the handler acts on; anything else is acknowledged
 // without reading the body.
-var webhookEvents = map[string]bool{"ping": true, "installation": true, "installation_repositories": true, "pull_request": true}
+var webhookEvents = map[string]bool{"ping": true, "installation": true, "installation_repositories": true,
+	"pull_request": true, "issues": true}
 
 func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 	c := s.github.current(r.Context())
@@ -1118,6 +1154,9 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 	case "installation", "installation_repositories":
 		s.github.Kick()
 		s.ok(w, r, http.StatusAccepted, map[string]any{"ok": true})
+		return
+	case "issues":
+		s.githubIssueEvent(w, r, body)
 		return
 	}
 	var ev struct {
