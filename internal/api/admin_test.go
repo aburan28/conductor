@@ -929,6 +929,9 @@ func TestSCIMEntraShapesAndGroups(t *testing.T) {
 		t.Errorf("after add = %v", g["members"])
 	}
 	g = patch(`{"Operations":[{"op":"Remove","path":"members","value":[{"value":"` + id + `"}]}]}`)
+	if len(g["members"].([]any)) != 1 {
+		t.Errorf("after removing one by value = %v", g["members"])
+	}
 	g = patch(`{"Operations":[{"op":"remove","path":"members[value eq \"` + string(h.bob.ID) + `\"]"}]}`)
 	if len(g["members"].([]any)) != 0 {
 		t.Errorf("after removals = %v", g["members"])

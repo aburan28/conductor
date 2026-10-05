@@ -187,7 +187,7 @@ func TestBrandingValidation(t *testing.T) {
 	invalid(t, Policy{Branding: Branding{AccentColor: "#ffff00"}}, "contrast ratio")
 	invalid(t, Policy{Branding: Branding{DisplayName: strings.Repeat("x", MaxDisplayName+1)}}, "display_name")
 	invalid(t, Policy{Branding: Branding{DisplayName: "two\nlines"}}, "one line")
-	invalid(t, Policy{Branding: Branding{LoginBanner: "evil ‮ override"}}, "plain text")
+	invalid(t, Policy{Branding: Branding{LoginBanner: "evil \u202e override"}}, "plain text")
 	invalid(t, Policy{Branding: Branding{LoginBanner: strings.Repeat("x", MaxLoginBanner+1)}}, "login_banner")
 	p := Policy{Branding: Branding{AccentColor: "#26A", LoginBanner: "Authorized use only.\nActivity is logged."}}
 	valid(t, p)
