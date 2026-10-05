@@ -148,14 +148,25 @@ Notification channels (README, "Notifications") make conductord send HTTP reques
 project maintainers choose, from inside your network. By default it reaches only public
 addresses over https: loopback, RFC 1918, link-local (including the cloud metadata address),
 CGNAT and other non-public ranges are refused on the address actually dialed, after DNS, and
-redirects are not followed. Requests go out directly, not through `HTTPS_PROXY`; allow
-outbound 443 from conductord to your chat provider.
+redirects are not followed. Requests go out directly, not through `HTTPS_PROXY`: allow
+outbound 443 from conductord to your chat provider, or name a proxy explicitly.
+
+**Through a proxy** (`--notify-proxy http://proxy.internal:3128`, or
+`CONDUCTOR_NOTIFY_PROXY`; http, https and socks5 proxies work) conductord connects only to the
+proxy, which may be on a private address. Because the address it dials is then the proxy's,
+it resolves each destination itself first and refuses it — without contacting the proxy, so
+no CONNECT to a private target is sent — if any address is not public. **Residual risk:** the
+proxy resolves the name again, and its answer can differ (another resolver, split-horizon DNS,
+or a record changed in between). If the proxy can reach your internal network, have it refuse
+private destinations too (Squid: `acl to_private dst 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+127.0.0.0/8 169.254.0.0/16 100.64.0.0/10` with `http_access deny to_private`).
 
 | Setting | Default | Flag |
 |---|---|---|
 | Relay poll interval (negative disables the relay) | 3s | `--notify-poll` |
 | Allow loopback and private destinations (a chat server on the LAN) | off | `--notify-allow-private-networks` |
 | Allow plain `http://` URLs (local testing) | off | `--notify-allow-http` |
+| Forward proxy for notification requests | none | `--notify-proxy` / `CONDUCTOR_NOTIFY_PROXY` |
 | Per-request timeout / channels sent to at once | 10s / 4 | |
 | Retries | backoff from 15s doubling to 1h; give up after 8 attempts or 24h | |
 

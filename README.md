@@ -861,8 +861,12 @@ conductor notify events             # what can be sent, and the defaults
 ```
 
 A channel sends the project's events to a Slack incoming webhook, a Discord webhook, or any
-HTTPS endpoint as signed JSON. By default it gets the moments a team acts on: work paused on a
-conflict (`task.status_changed:blocked_conflict`), territory someone was waiting for is free
+HTTPS endpoint as signed JSON. By default it gets the moments a team acts on: someone refused
+territory another task holds (`conflict.blocked`) or starting work that looks like a task
+already in flight (`conflict.suggest_join`) — each at most once per person, task and outcome
+every 15 minutes, however often an agent retries — a new medium-or-worse conflict in the
+merge-risk graph (`conflict.detected`, once while it stays open), work paused on a conflict
+(`task.status_changed:blocked_conflict`), territory someone was waiting for is free
 (`scope.released`, naming who was waiting), an agent stalled or lost its lease
 (`attempt.stalled`, `lease.expired`), a pull request merged, a task done or failed, the
 project budget crossing its downshift or pause threshold, and a teammate's login near or at
@@ -884,7 +888,10 @@ the API shows the host and last four characters. URLs must be `https`, and condu
 to connect to loopback, private, link-local and other non-public addresses (checked on the
 address actually dialed, after DNS), so a channel cannot be pointed at the control plane's own
 network. A self-hosted chat server on your LAN needs `conductord
---notify-allow-private-networks`; `--notify-allow-http` is for local testing only.
+--notify-allow-private-networks`; `--notify-allow-http` is for local testing only. Where
+conductord reaches the internet only through a proxy, pass `--notify-proxy URL` (or
+`CONDUCTOR_NOTIFY_PROXY`); destinations are still resolved and checked before the proxy is
+asked for them.
 
 **Delivery** is at least once — deduplicate on the `id` field (also `X-Conductor-Delivery`).
 A failing endpoint is retried with exponential backoff (15s doubling, at most an hour) and an
