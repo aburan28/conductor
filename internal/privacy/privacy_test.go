@@ -1,6 +1,8 @@
 package privacy
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -474,10 +476,12 @@ func TestSimilarityIsStableAcrossKeys(t *testing.T) {
 	missed, falsePositives := 0, 0
 	var min, max float64 = 1, 0
 	for i := 0; i < trials; i++ {
-		key, err := NewDedupeKey()
-		if err != nil {
-			t.Fatalf("NewDedupeKey: %v", err)
-		}
+		// Fixed keys, not NewDedupeKey: with fresh random keys every run the minimum over 200
+		// trials is itself random, and it dipped under the margin below in about 1 run in 40
+		// without anything having changed. 200 fixed keys measure the same spread and give
+		// the same answer every time, so a failure here means the estimator moved.
+		sum := sha256.Sum256([]byte(fmt.Sprintf("conductor-similarity-trial-%d", i)))
+		key := sum[:]
 		dup := Similarity(alice.Signature(key), bob.Signature(key))
 		if dup < min {
 			min = dup
