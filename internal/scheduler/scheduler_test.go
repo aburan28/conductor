@@ -319,6 +319,12 @@ func TestStallReportedOncePerEpisode(t *testing.T) {
 	if n := f.countEvents("attempt.stalled"); n != 1 {
 		t.Errorf("%d attempt.stalled events for one stall, want 1", n)
 	}
+	// A restarted scheduler and a second replica know it was already announced.
+	f.tick(f.scheduler("replica-a"))
+	f.tick(f.scheduler("replica-b"))
+	if n := f.countEvents("attempt.stalled"); n != 1 {
+		t.Errorf("%d attempt.stalled events after a restart and a second replica, want 1", n)
+	}
 
 	// It recovers, then stalls again: a new episode is reported.
 	f.exec(`UPDATE attempts SET last_event_at = now() WHERE id = $1::uuid`, c.Attempt.ID)
@@ -327,6 +333,25 @@ func TestStallReportedOncePerEpisode(t *testing.T) {
 	f.tick(s)
 	if n := f.countEvents("attempt.stalled"); n != 2 {
 		t.Errorf("%d attempt.stalled events after a second stall, want 2", n)
+	}
+
+	// Replicas ticking at the same moment announce a new stall once between them.
+	f.exec(`UPDATE attempts SET last_event_at = now() WHERE id = $1::uuid`, c.Attempt.ID)
+	f.tick(s)
+	f.exec(`UPDATE attempts SET last_event_at = now() - interval '5 minutes' WHERE id = $1::uuid`, c.Attempt.ID)
+	var wg sync.WaitGroup
+	for _, holder := range []string{"replica-a", "replica-b", "replica-c"} {
+		wg.Add(1)
+		go func(r *Scheduler) {
+			defer wg.Done()
+			if _, err := r.TickProject(f.ctx, f.project); err != nil {
+				t.Error(err)
+			}
+		}(f.scheduler(holder))
+	}
+	wg.Wait()
+	if n := f.countEvents("attempt.stalled"); n != 3 {
+		t.Errorf("%d attempt.stalled events after three replicas raced on a third stall, want 3", n)
 	}
 }
 

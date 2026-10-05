@@ -37,7 +37,7 @@ CREATE TABLE service_heartbeats (
 );
 
 -- ---------------------------------------------------------------------------
--- Budget alerts
+-- Budget and stall alerts
 -- ---------------------------------------------------------------------------
 
 -- The last budget threshold the scheduler announced for a project. An event is written only
@@ -47,6 +47,17 @@ CREATE TABLE budget_alert_levels (
     level      text NOT NULL CHECK (level IN ('', 'downshift', 'exhausted')),
     changed_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- Attempts the scheduler has announced as stalled. A row exists while the attempt stays
+-- silent and is removed when it recovers or ends, so each stall is announced once — not
+-- again after a restart, and not once per replica.
+CREATE TABLE attempt_stall_alerts (
+    attempt_id   uuid PRIMARY KEY REFERENCES attempts(id) ON DELETE CASCADE,
+    project_id   uuid NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    announced_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX attempt_stall_alerts_project ON attempt_stall_alerts (project_id);
 
 -- ---------------------------------------------------------------------------
 -- GitHub App

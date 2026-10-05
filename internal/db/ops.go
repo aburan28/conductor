@@ -182,6 +182,92 @@ func (s *Store) SetBudgetAlertLevel(ctx context.Context, orgID, projectID domain
 }
 
 // ---------------------------------------------------------------------------
+// Stall alerts
+// ---------------------------------------------------------------------------
+
+// liveAttemptStates are the attempt states in which a harness is expected to be producing
+// events (the same set StalledAttempts uses).
+const liveAttemptStates = `('queued','preparing_workspace','starting_harness','running',
+	'waiting_for_approval','waiting_for_input','paused_conflict')`
+
+// StalledAttempt is an attempt AnnounceStalls has just announced.
+type StalledAttempt struct {
+	AttemptID   domain.ID
+	TaskID      domain.ID
+	TaskRef     string
+	Harness     string
+	LastEventAt time.Time
+}
+
+// AnnounceStalls appends an attempt.stalled event for each live attempt in the project
+// that has been silent for longer than stallAfter and has not been announced yet, and
+// forgets attempts that have recovered or ended, so their next stall is announced again.
+//
+// What was announced is kept in attempt_stall_alerts rather than in the scheduler's
+// memory: a restart, or a second replica running the same pass, finds the stall already
+// announced. Replicas racing on one stall serialize on its primary key, and only the one
+// whose insert lands writes the event.
+func (s *Store) AnnounceStalls(ctx context.Context, orgID, projectID domain.ID, stallAfter time.Duration) ([]StalledAttempt, error) {
+	var out []StalledAttempt
+	err := s.Tx(ctx, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM attempt_stall_alerts s
+			 WHERE s.project_id = $1::uuid
+			   AND NOT EXISTS (
+			       SELECT 1 FROM attempts a
+			        WHERE a.id = s.attempt_id
+			          AND a.state IN `+liveAttemptStates+`
+			          AND a.last_event_at < now() - make_interval(secs => $2))`,
+			projectID, stallAfter.Seconds()); err != nil {
+			return err
+		}
+		rows, err := tx.Query(ctx, `
+			WITH announced AS (
+			    INSERT INTO attempt_stall_alerts (attempt_id, project_id)
+			    SELECT a.id, a.project_id FROM attempts a
+			     WHERE a.project_id = $1::uuid
+			       AND a.state IN `+liveAttemptStates+`
+			       AND a.last_event_at < now() - make_interval(secs => $2)
+			    ON CONFLICT (attempt_id) DO NOTHING
+			    RETURNING attempt_id)
+			SELECT a.id::text, a.task_id::text, t.ref, a.harness, a.last_event_at
+			  FROM announced n
+			  JOIN attempts a ON a.id = n.attempt_id
+			  JOIN tasks t ON t.id = a.task_id
+			 ORDER BY a.last_event_at`, projectID, stallAfter.Seconds())
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var st StalledAttempt
+			if err := rows.Scan(&st.AttemptID, &st.TaskID, &st.TaskRef, &st.Harness, &st.LastEventAt); err != nil {
+				rows.Close()
+				return err
+			}
+			out = append(out, st)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for _, st := range out {
+			if err := appendEvents(ctx, tx, orgID, projectID, "",
+				eventSpec{"attempt", st.AttemptID, "attempt.stalled", domain.VisibilityTeamSummary, map[string]any{
+					"task_ref": st.TaskRef, "harness": st.Harness,
+					"reason": "no harness event within the stall window",
+				}}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ---------------------------------------------------------------------------
 // Retention
 // ---------------------------------------------------------------------------
 

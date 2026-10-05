@@ -111,7 +111,6 @@ type Scheduler struct {
 
 	mu         sync.Mutex
 	lastDetect map[domain.ID]time.Time
-	stalled    map[domain.ID]bool
 	lastPrune  time.Time
 }
 
@@ -121,7 +120,6 @@ func New(store *db.Store, svc *coord.Service, opts Options) *Scheduler {
 		svc:        svc,
 		opts:       opts.withDefaults(),
 		lastDetect: map[domain.ID]time.Time{},
-		stalled:    map[domain.ID]bool{},
 	}
 }
 
@@ -355,52 +353,22 @@ func (s *Scheduler) TickProject(ctx context.Context, project domain.Project) (Ti
 	return report, nil
 }
 
-// detectStalls emits an event the first time an attempt goes quiet, and clears the flag when
-// it comes back. Emitting on every tick would bury the dashboard in duplicates.
+// detectStalls announces an attempt the first time it goes quiet, and again only after it
+// has recovered and gone quiet again: emitting on every tick would bury the dashboard in
+// duplicates. Which stalls were announced is kept in the database (db.AnnounceStalls), so
+// restarts and replicas do not announce them again either.
 func (s *Scheduler) detectStalls(ctx context.Context, project domain.Project) (int, error) {
 	stallAfter := project.Config.StalledTurnTimeout.OrDefault(900 * time.Second)
-	attempts, err := s.store.StalledAttempts(ctx, project.ID, stallAfter.String())
+	stalled, err := s.store.AnnounceStalls(ctx, project.OrganizationID, project.ID, stallAfter)
 	if err != nil {
 		return 0, err
 	}
-
-	current := map[domain.ID]bool{}
-	newly := 0
-	for _, a := range attempts {
-		current[a.ID] = true
-
-		s.mu.Lock()
-		already := s.stalled[a.ID]
-		s.stalled[a.ID] = true
-		s.mu.Unlock()
-
-		if already {
-			continue
-		}
-		newly++
-		task, err := s.store.GetTask(ctx, a.TaskID)
-		if err != nil {
-			continue
-		}
+	for _, a := range stalled {
 		s.opts.Logger.Warn("attempt stalled",
-			"task", task.Ref, "attempt", a.ID, "harness", a.Harness,
+			"task", a.TaskRef, "attempt", a.AttemptID, "harness", a.Harness,
 			"silent_for", time.Since(a.LastEventAt).Round(time.Second).String())
-		_ = s.store.AppendEvent(ctx, project.OrganizationID, project.ID, "",
-			"attempt", a.ID, "attempt.stalled", domain.VisibilityTeamSummary, map[string]any{
-				"task_ref": task.Ref, "harness": a.Harness,
-				"reason": "no harness event within the stall window",
-			})
 	}
-
-	// Forget attempts that recovered or ended, so a later stall is reported again.
-	s.mu.Lock()
-	for id := range s.stalled {
-		if !current[id] {
-			delete(s.stalled, id)
-		}
-	}
-	s.mu.Unlock()
-	return newly, nil
+	return len(stalled), nil
 }
 
 func (s *Scheduler) shouldDetect(projectID domain.ID) bool {
