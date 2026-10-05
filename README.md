@@ -850,6 +850,84 @@ resume simply falls back to the terminal chain above. The extension also adds
 `Conductor: Pause All Agent Sessions` and `Conductor: Resume All Agent Sessions` to the
 command palette.
 
+### Notifications: Slack, Discord, and webhooks
+
+```
+conductor notify add slack https://hooks.slack.com/services/T…/B…/… --name "#eng-agents"
+conductor notify add webhook https://ci.example.com/conductor      # prints its signing secret once
+conductor notify test <id>          # send a test message now
+conductor notify                    # channels and their delivery health
+conductor notify events             # what can be sent, and the defaults
+```
+
+A channel sends the project's events to a Slack incoming webhook, a Discord webhook, or any
+HTTPS endpoint as signed JSON. By default it gets the moments a team acts on: work paused on a
+conflict (`task.status_changed:blocked_conflict`), territory someone was waiting for is free
+(`scope.released`, naming who was waiting), an agent stalled or lost its lease
+(`attempt.stalled`, `lease.expired`), a pull request merged, a task done or failed, the
+project budget crossing its downshift or pause threshold, and a teammate's login near or at
+its usage limit (`quota.warning`, `quota.exhausted`). `--events` picks others from
+`conductor notify events`; `"*"` sends all of them. A channel hears about what happens after
+it is added, not the backlog. Channels are managed by maintainers, from the CLI, the API
+(`/v1/projects/{p}/notifications`), or the Notifications card in the dashboard's Settings.
+
+**What leaves.** A channel is project-wide, and Slack is not Conductor: every event goes
+through the same visibility projection the API applies for an ordinary project member, then
+narrower still for private work — an event about a private task says "a private task" and
+nothing else: no title, no ref, no paths or territory. Prompts and transcripts were never in
+events to begin with.
+
+**Credentials.** A Slack or Discord URL is the credential, and a webhook's signing secret is
+what its receiver trusts, so both are sealed in the database under conductord's secret key
+([docs/OPERATIONS.md](docs/OPERATIONS.md#the-secret-key)) and never returned after creation —
+the API shows the host and last four characters. URLs must be `https`, and conductord refuses
+to connect to loopback, private, link-local and other non-public addresses (checked on the
+address actually dialed, after DNS), so a channel cannot be pointed at the control plane's own
+network. A self-hosted chat server on your LAN needs `conductord
+--notify-allow-private-networks`; `--notify-allow-http` is for local testing only.
+
+**Delivery** is at least once — deduplicate on the `id` field (also `X-Conductor-Delivery`).
+A failing endpoint is retried with exponential backoff (15s doubling, at most an hour) and an
+event is given up after 8 failed attempts or 24 hours; a 4xx answer other than 408 or 429 is
+not retried. `conductor notify` shows each channel's last error.
+
+**Verifying a webhook.** Each request carries `X-Conductor-Timestamp` (Unix seconds) and
+`X-Conductor-Signature: sha256=<hex>`, an HMAC-SHA256 keyed with the whole secret (`whsec_…`)
+over the timestamp, a `.`, and the raw body. Check both, against the raw bytes before any JSON
+parsing, and refuse a timestamp more than five minutes off — that is what stops a captured
+request from being replayed.
+
+```python
+import hashlib, hmac, time
+
+def verify(secret: str, headers, body: bytes, tolerance: int = 300) -> bool:
+    ts = headers.get("X-Conductor-Timestamp", "")
+    sig = headers.get("X-Conductor-Signature", "")
+    if not ts.isdigit() or abs(time.time() - int(ts)) > tolerance:
+        return False
+    mac = hmac.new(secret.encode(), ts.encode() + b"." + body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(sig, "sha256=" + mac)
+```
+
+```go
+func verify(secret string, h http.Header, body []byte) bool {
+	ts := h.Get("X-Conductor-Timestamp")
+	sec, err := strconv.ParseInt(ts, 10, 64)
+	if err != nil || time.Since(time.Unix(sec, 0)).Abs() > 5*time.Minute {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(ts + "."))
+	mac.Write(body)
+	want := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+	return hmac.Equal([]byte(h.Get("X-Conductor-Signature")), []byte(want))
+}
+```
+
+The body is `{"id", "type", "project", "occurred_at", "subject", "private", "text", "url",
+"data"}`: `text` is a one-line summary, `data` the event's payload as a project member sees
+it, and `url` a dashboard link when conductord has a public `--public-url`.
+
 ---
 
 ## How it holds together
@@ -968,6 +1046,8 @@ Implemented and exercised by tests:
 - A single-page dashboard (no build step, no external requests) with task board, fleet and
   swarm views, live usage charts, the admission queue, conflict radar, and a per-tool
   integration guide.
+- Notifications to Slack, Discord, and signed webhooks, relayed from the transactional outbox
+  with retries, through the same privacy projection as the API.
 
 Not built, and where the design says it goes:
 

@@ -1796,6 +1796,20 @@ CREATE TABLE domain_events (
 
 Use an append-only domain event table plus an outbox in the same transaction as state changes. Build presence, dashboards, notifications, and analytics as projections. Do not require full event sourcing for every read path; current-state tables remain authoritative for efficient operations.
 
+### 23.4 Notifications
+
+Notifications are the outbox's consumer (`internal/notify`). A project has notification channels — a generic webhook (signed JSON), a Slack incoming webhook (Block Kit), or a Discord webhook — each subscribed to a list of event types from a fixed catalog of types the system actually emits; an entry may narrow `task.status_changed` to one target status (`task.status_changed:done`). Defaults favour what a team acts on: work paused on a conflict, territory freed for someone who was waiting, stalls and lost leases, merges, tasks done or failed, budget levels, and usage-limit warnings. Channels are managed by maintainers and up.
+
+**Relay.** conductord runs a relay goroutine (beside the scheduler, awaited on shutdown). Each pass claims up to a batch of due, undelivered outbox rows in projects that have a channel, with `FOR UPDATE SKIP LOCKED` and a committed hold (`next_attempt_at` moved past the pass's lifetime) rather than a transaction held across HTTP calls, so replicas split the backlog and a crashed relay's rows come due again. Each claimed event is sent to every channel that subscribes to it and existed when it occurred; channels are sent to in parallel up to a bound, each channel's events in order, every request under a timeout. Per-(event, channel) state in `notification_deliveries` makes a retry go only to the channels that have not had it. Delivery is at least once; receivers deduplicate by event id.
+
+**Failure.** Backoff belongs to the channel, because what fails is the endpoint: a failed send sets the channel's `retry_after` (base doubled per consecutive failure, capped), and its queued events wait for it instead of each being tried. An event is given up for a channel after a number of failed attempts, after a 4xx refusal (other than 408 and 429), or once it is older than the notification window; the row is then marked delivered so retention treats it normally. Outbox rows of projects without a channel are never claimed and are bounded by the undelivered retention cap, as before.
+
+**Privacy.** A channel is project-wide and its receiver is outside every access check, so an event leaves only through `coord.ProjectEvents` applied for a project observer with no relation to the work — never the owner's or the actor's view — and then narrower: an event about a private task carries only what happened (status, phase, outcome), rendered as "a private task", with no ref, title, objective, or paths, and none of the territory the dashboard shows members. Message text is built from that narrowed payload alone.
+
+**Credentials and network.** URLs and webhook secrets are sealed under the server's secret key (§25, OPERATIONS.md) and never returned after creation. Webhook requests carry `X-Conductor-Timestamp` and `X-Conductor-Signature: sha256=HMAC(secret, timestamp "." body)`, so a receiver can reject forgeries and replays. Destinations must be `https` and public: the dialer refuses loopback, private, link-local, CGNAT and other non-public addresses on the address actually connected to, after DNS, connects without an HTTP proxy (whose address would be the one checked), and follows no redirects. Operators can allow private networks and plain HTTP explicitly.
+
+**Not emitted, so not offered.** A blocked or `suggest_join` start-work check, and a freshly detected conflict edge, are recorded as intents and graph edges but not as domain events, so there is nothing for a channel to subscribe to; the conflict that pauses running work (`task.status_changed:blocked_conflict`) and the release that ends a wait (`scope.released`) are events, and are in the defaults.
+
 ---
 
 ## 24. Collaboration and authorization
