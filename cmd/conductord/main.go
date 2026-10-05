@@ -16,7 +16,9 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -29,6 +31,7 @@ import (
 	"github.com/adamburan/conductor/internal/coord"
 	"github.com/adamburan/conductor/internal/db"
 	"github.com/adamburan/conductor/internal/domain"
+	"github.com/adamburan/conductor/internal/githubapp"
 	"github.com/adamburan/conductor/internal/peer"
 	"github.com/adamburan/conductor/internal/scheduler"
 	"github.com/adamburan/conductor/internal/web"
@@ -75,6 +78,13 @@ func serve(args []string) error {
 		"DNS SRV record resolved on every tick to find mesh peers automatically, instead of a hand-maintained --peer per daemon (e.g. _conductor-mesh._tcp.mesh.internal)")
 	peerDNSServer := fs.String("peer-dns-server", envOr("CONDUCTOR_PEER_DNS_SERVER", ""),
 		"host:port of the DNS server used for --peer-discover-dns lookups (default: system DNS). For a laptop-local directory: 127.0.0.1:15353")
+	securityMode := fs.String("security-mode", envOr("CONDUCTOR_SECURITY_MODE", ""),
+		"local: this machine's owner can sign in without a token; enhanced: tokens only, everywhere. "+
+			"Unset: local when bound to loopback, enhanced otherwise, changeable with `conductor security`")
+	githubPoll := fs.Duration("github-poll", 2*time.Minute,
+		"how often the GitHub App re-checks open pull requests (negative disables polling)")
+	githubAPI := fs.String("github-api", envOr("CONDUCTOR_GITHUB_API", ""), "GitHub API base URL (GitHub Enterprise: https://HOST/api/v3)")
+	githubWeb := fs.String("github-web", envOr("CONDUCTOR_GITHUB_WEB", ""), "GitHub web base URL (GitHub Enterprise: https://HOST)")
 	verbose := fs.Bool("v", false, "verbose logging")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, `conductord — Conductor control plane
@@ -226,6 +236,40 @@ Binding 127.0.0.1 needs none of these.`, *addr)
 		}
 	}
 
+	// Local sign-in. A daemon only this machine can reach defaults to letting its owner in
+	// without a token; one reachable from the network defaults to tokens only. Either can be
+	// pinned with --security-mode, or switched at runtime with `conductor security`.
+	switch *securityMode {
+	case "", db.SecurityLocal, db.SecurityEnhanced:
+	default:
+		return fmt.Errorf("--security-mode must be local or enhanced, not %q", *securityMode)
+	}
+	defaultMode := db.SecurityEnhanced
+	if isLoopback(*addr) && !*behindProxy {
+		defaultMode = db.SecurityLocal
+	}
+
+	// The GitHub App. Credentials live beside the CLI's own (0600); with none saved the
+	// integration serves only its setup flow. GitHub can deliver webhooks only to a public
+	// URL; anywhere else the poller finds pull requests itself.
+	githubCreds, err := githubapp.DefaultPath()
+	if err != nil {
+		return err
+	}
+	webhookURL := ""
+	if *publicURL != "" && !isLoopbackURL(*publicURL) {
+		webhookURL = strings.TrimRight(*publicURL, "/") + "/github/webhook"
+	}
+	gh, err := api.NewGitHub(api.GitHubOptions{
+		CredentialsPath: githubCreds, API: *githubAPI, Web: *githubWeb,
+		BaseURL: selfEndpoint, WebhookURL: webhookURL, Poll: *githubPoll, Logger: logger,
+	})
+	if err != nil {
+		logger.Warn("github app credentials could not be loaded; run `conductor github setup` again", "path", githubCreds, "error", err)
+	} else if gh.Configured() {
+		logger.Info("github app ready", "mode", map[bool]string{true: "webhook", false: "polling"}[webhookURL != ""])
+	}
+
 	svc := coord.New(store)
 	server := api.New(store, svc, api.Options{
 		Logger:       logger,
@@ -235,7 +279,18 @@ Binding 127.0.0.1 needs none of these.`, *addr)
 		SelfEndpoint: selfEndpoint,
 		PeerName:     meshName,
 		PeerStatus:   peerStatus,
+		LocalLogin:   api.LocalLoginOptions{DefaultMode: defaultMode, ForcedMode: *securityMode},
+		GitHub:       gh,
 	})
+	go func() {
+		if err := gh.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Error("github poller exited", "error", err)
+		}
+	}()
+	if settings, err := store.GetServerSettings(ctx); err == nil {
+		mode := firstNonEmpty(*securityMode, settings.SecurityMode, defaultMode)
+		logger.Info("security mode", "mode", mode, "local_owner_set", settings.LocalOwnerID != "")
+	}
 
 	if !*noScheduler {
 		sched := scheduler.New(store, svc, scheduler.Options{
@@ -344,6 +399,7 @@ func bootstrap(args []string) error {
 	endpoint := fs.String("endpoint", envOr("CONDUCTOR_PUBLIC_URL", "http://localhost:8080"),
 		"control plane URL saved into this machine's login")
 	noLogin := fs.Bool("no-login", false, "do not write this machine's login file; print the token only")
+	owner := fs.Bool("owner", false, "make this principal the machine's owner even if another is already set (local sign-in acts as the owner)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -416,9 +472,28 @@ func bootstrap(args []string) error {
 	if err != nil {
 		return fmt.Errorf("project: %w", err)
 	}
+	// Record the repository the project governs, so the GitHub App can match pull requests
+	// to it. project.yaml wins; otherwise the checkout's own origin.
+	if project.CanonicalRemote == "" {
+		if remote := gitOrigin(repoPath); remote != "" {
+			if err := store.SetProjectRemote(ctx, project.ID, remote); err == nil {
+				project.CanonicalRemote = remote
+			}
+		}
+	}
 
 	if err := store.AddMember(ctx, project.ID, principal.ID, domain.Role(*role)); err != nil {
 		return fmt.Errorf("membership: %w", err)
+	}
+
+	// The first person to bootstrap a machine owns it: local sign-in (`conductor security`)
+	// acts as them. A later bootstrap for a teammate does not take that over unless --owner.
+	isOwner := false
+	if principal.Kind == domain.PrincipalHuman || principal.Kind == "" {
+		isOwner, err = store.SetLocalOwner(ctx, principal.ID, !*owner)
+		if err != nil {
+			return fmt.Errorf("owner: %w", err)
+		}
 	}
 
 	if bundle.Workflow.Raw != "" {
@@ -467,6 +542,9 @@ func bootstrap(args []string) error {
 		fmt.Printf("\nLogged in as %s — credentials saved to %s (mode 0600).\n", principal.Handle, path)
 	} else {
 		fmt.Println("\nThis machine was not logged in (--no-login).")
+	}
+	if isOwner {
+		fmt.Printf("%s owns this machine: the dashboard at %s signs them in without a token.\n", principal.Handle, *endpoint)
 	}
 
 	fmt.Printf(`
@@ -530,4 +608,27 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// isLoopbackURL reports whether a URL's host is loopback.
+func isLoopbackURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	h := u.Hostname()
+	if h == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
+}
+
+// gitOrigin returns the checkout's origin URL, or "".
+func gitOrigin(dir string) string {
+	out, err := exec.Command("git", "-C", dir, "remote", "get-url", "origin").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }

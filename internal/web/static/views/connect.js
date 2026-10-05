@@ -3,7 +3,7 @@ import { createApi } from '../lib/api.js';
 
 // The connect screen: paste a token, pick a project. The token is verified with /v1/whoami
 // before anything else loads, so a stale credential fails here rather than as a wall of 401s.
-export function renderConnect(root, { onConnect, error }) {
+export function renderConnect(root, { onConnect, error, note, token: initialToken }) {
   const token = h('input', { type: 'password', placeholder: 'cdt_…', autocomplete: 'off', spellcheck: false, 'aria-label': 'token' });
   const projectSel = h('select', { disabled: true }, h('option', { value: '' }, 'verify the token first'));
   const status = h('div', { class: 'hint', style: { minHeight: '18px' } }, error ? h('span', { class: 'risk-high' }, error) : '');
@@ -45,6 +45,8 @@ export function renderConnect(root, { onConnect, error }) {
       h('div', { class: 'btn-row' }, h('button', { class: 'btn primary', type: 'submit' }, 'Open dashboard'), h('a', { class: 'btn ghost', href: '/?demo=1' }, 'Try the demo'))),
     h('p', { class: 'hint', style: { marginTop: '12px' } }, 'Or open the link printed by:'),
     h('pre', {}, 'conductor dashboard'),
-    h('p', { class: 'hint' }, 'The token is kept in this browser only and sent to this origin only.')))));
-  token.focus();
+    note ? h('p', { class: 'hint' }, note) : null,
+    h('p', { class: 'hint' }, 'On the machine running conductord you are signed in automatically, unless it is in enhanced security mode. The token is kept in this browser only and sent to this origin only.')))));
+  if (initialToken) { token.value = initialToken; verify(); }
+  else token.focus();
 }

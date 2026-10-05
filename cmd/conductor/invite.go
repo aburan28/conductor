@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"net"
 	"net/url"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -148,11 +151,29 @@ Flags:
 	if loopback {
 		fmt.Fprintf(os.Stderr, `
 Warning: this link points at %s, which only reaches your own machine. A teammate on
-another computer cannot use it. Expose the control plane and re-run with the public URL:
+another computer cannot use it.
+`, joinEndpoint)
+		if ts, ok := detectTailscale(ctx); ok {
+			// The easy way to let someone across town in: publish the loopback daemon to the
+			// tailnet only, with Tailscale terminating TLS. Local sign-in stays local — requests
+			// arriving through the tailnet name are not from localhost and need the token.
+			fmt.Fprintf(os.Stderr, `
+Tailscale is running on this machine (%s). To let them in over your tailnet:
 
+  tailscale serve --bg %s
+  conductor invite %s --endpoint https://%s
+
+If they are not on your tailnet, share this machine with them from the Tailscale admin
+console first; nothing becomes reachable from the public internet.
+`, ts, listenPort(joinEndpoint), handle, ts)
+		} else {
+			fmt.Fprintf(os.Stderr, `Expose the control plane and re-run with the address they can reach:
+
+  tailscale serve --bg %s                     # simplest: your private tailnet only
   conductord --addr 0.0.0.0:8080 --tls-cert cert.pem --tls-key key.pem   # or --behind-proxy
-  conductor invite %s --endpoint https://your-host:8080
-`, joinEndpoint, handle)
+  conductor invite %s --endpoint https://your-host
+`, listenPort(joinEndpoint), handle)
+		}
 	}
 	fmt.Fprintln(os.Stderr, "\nThis link contains a bearer token. It is shown once and stored only as a hash.")
 	return nil
@@ -165,6 +186,8 @@ another computer cannot use it. Expose the control plane and re-run with the pub
 func cmdJoin(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("join", flag.ExitOnError)
 	runner := fs.Bool("runner", false, "start a runner immediately after joining")
+	integrate := fs.Bool("integrate", false, "connect every coding tool on this machine (Claude Code, Codex, OpenCode, …) without asking")
+	noIntegrate := fs.Bool("no-integrate", false, "do not offer to connect the coding tools on this machine")
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, `conductor join — accept an invite link and log in
@@ -227,6 +250,15 @@ Flags:
 	}
 	for _, p := range projects {
 		fmt.Printf("  %-24s %s\n", p.Slug, p.Role)
+	}
+	// Joining is the moment every tool on this machine should learn about the project; doing
+	// it by hand, tool by tool, is the friction that stops people using it. Ask once (yes by
+	// default), or not at all with --integrate / --no-integrate.
+	if !*noIntegrate && (*integrate || confirmDefaultYes("\nConnect the coding tools on this machine (Claude Code, Codex, OpenCode, …) to this project? [Y/n] ")) {
+		fmt.Println()
+		if err := cmdIntegrate(ctx, []string{"all", "--global"}); err != nil {
+			fmt.Fprintf(os.Stderr, "Tools not connected: %v\nRun `conductor integrate all --global` later, or `conductor integrate <tool>` inside a repository.\n", err)
+		}
 	}
 	printContributeGuidance()
 
@@ -417,4 +449,55 @@ func scaleHours(hours float64) time.Duration {
 		return time.Duration(-1 << 63)
 	}
 	return time.Duration(ns)
+}
+
+// detectTailscale reports this machine's MagicDNS name when Tailscale is installed and
+// connected. A variable so tests can stub it.
+var detectTailscale = func(ctx context.Context) (string, bool) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tailscale", "status", "--json").Output()
+	if err != nil {
+		return "", false
+	}
+	return parseTailscaleStatus(out)
+}
+
+// parseTailscaleStatus extracts the MagicDNS name from `tailscale status --json`.
+func parseTailscaleStatus(out []byte) (string, bool) {
+	var st struct {
+		BackendState string `json:"BackendState"`
+		Self         struct {
+			DNSName string `json:"DNSName"`
+		} `json:"Self"`
+	}
+	if json.Unmarshal(out, &st) != nil || st.BackendState != "Running" {
+		return "", false
+	}
+	name := strings.TrimSuffix(st.Self.DNSName, ".")
+	return name, name != ""
+}
+
+// listenPort is the port of a loopback endpoint, for `tailscale serve`.
+func listenPort(endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Port() == "" {
+		return "8080"
+	}
+	return u.Port()
+}
+
+// confirmDefaultYes asks a yes/no question on an interactive terminal, defaulting to yes. On
+// anything that is not a terminal (a script, CI) it answers no: a script must opt in.
+func confirmDefaultYes(prompt string) bool {
+	if !stdinIsTerminal() {
+		return false
+	}
+	fmt.Print(prompt)
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "", "y", "yes":
+		return true
+	}
+	return false
 }

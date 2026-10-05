@@ -147,3 +147,18 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
+
+func TestParseTailscaleStatus(t *testing.T) {
+	running := []byte(`{"BackendState":"Running","Self":{"DNSName":"laptop.tail1234.ts.net."}}`)
+	if name, ok := parseTailscaleStatus(running); !ok || name != "laptop.tail1234.ts.net" {
+		t.Errorf("running = %q %v", name, ok)
+	}
+	for _, bad := range []string{`{"BackendState":"NeedsLogin","Self":{"DNSName":"x.ts.net."}}`, `{"BackendState":"Running","Self":{}}`, `not json`} {
+		if _, ok := parseTailscaleStatus([]byte(bad)); ok {
+			t.Errorf("%s: reported a usable tailnet name", bad)
+		}
+	}
+	if listenPort("http://127.0.0.1:8721") != "8721" || listenPort("http://localhost") != "8080" {
+		t.Error("listenPort")
+	}
+}

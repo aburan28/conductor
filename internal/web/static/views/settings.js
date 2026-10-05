@@ -11,14 +11,15 @@ import { prefs } from '../lib/store.js';
 export default defineView({
   title: 'Settings',
   async load(ctx) {
-    const [project, members, tokens] = await settle([
+    const [project, members, tokens, security] = await settle([
       ctx.api.get(ctx.api.project(ctx.project)),
       ctx.api.get(ctx.api.project(ctx.project, '/members')),
       ctx.api.get('/v1/tokens'),
+      ctx.api.get('/v1/security'),
     ]);
-    return { project, members: (members && members.members) || [], tokens: (tokens && tokens.tokens) || [] };
+    return { project, members: (members && members.members) || [], tokens: (tokens && tokens.tokens) || [], security };
   },
-  draw({ project, members, tokens }, ctx, { refresh }) {
+  draw({ project, members, tokens, security }, ctx, { refresh }) {
     const cfg = (project && project.config) || {};
     const canAdmin = ['maintainer', 'project_admin', 'org_admin'].includes(ctx.role);
 
@@ -81,6 +82,28 @@ export default defineView({
         { key: 'act', label: '', sortable: false, render: t => t.revoked_at ? '' : h('button', { class: 'btn sm danger', onclick: () => revoke(t) }, 'Revoke') },
       ], rows: tokens }) : empty('No tokens listed.', 'conductor token create --save') });
 
+    const setMode = async mode => {
+      const tighten = mode === 'enhanced';
+      if (!await confirmModal({
+        title: tighten ? 'Require tokens everywhere?' : 'Allow local sign-in?',
+        message: tighten
+          ? 'Local sign-in turns off and every token it issued is revoked — including this dashboard\'s, if that is how you signed in. Use this on a machine other people can log in to.'
+          : 'The machine\'s owner will be signed in automatically from this machine, without a token. Only do this on a machine nobody else uses.',
+        confirmLabel: tighten ? 'Require tokens' : 'Allow local sign-in', kind: tighten ? 'primary' : 'danger' })) return;
+      try { await ctx.api.post('/v1/security', { security_mode: mode }); toast(tighten ? 'Enhanced security on' : 'Local sign-in on'); refresh(); }
+      catch (err) { toastError(err, 'Could not change the security mode'); }
+    };
+    const securityCard = security ? card({ title: 'Security', body: h('div', { class: 'stack' },
+      kv([['Mode', pill(security.security_mode === 'enhanced' ? 'ok' : 'info', security.security_mode)],
+        ['Set by', { flag: 'conductord --security-mode (pinned)', setting: 'saved choice', default: 'default for how conductord listens' }[security.mode_source] || security.mode_source],
+        ['Machine owner', security.owner ? security.owner + (security.you_are_owner ? ' (you)' : '') : 'none']]),
+      h('p', { class: 'hint' }, security.security_mode === 'enhanced'
+        ? 'Every client needs a token, on this machine and everywhere else.'
+        : 'The machine\'s owner is signed in automatically on this machine. Everyone else, everywhere else, still needs a token.'),
+      security.mode_source === 'flag' ? null : h('div', { class: 'btn-row' }, security.security_mode === 'enhanced'
+        ? (security.you_are_owner ? h('button', { class: 'btn', onclick: () => setMode('local') }, 'Allow local sign-in') : null)
+        : h('button', { class: 'btn primary', onclick: () => setMode('enhanced') }, 'Require tokens everywhere'))) }) : null;
+
     const budget = cfg.budget || {};
     const policyCard = card({ title: 'Project policy — from .conductor/', body: project ? kv([
       ['Default branch', project.default_branch], ['Repository', project.repo_path ? h('span', { class: 'mono' }, project.repo_path) : null],
@@ -105,6 +128,6 @@ export default defineView({
         h('li', {}, 'Duplicate detection compares HMAC\'d token sets under a per-tenant key; the server never sees either sentence.'),
         h('li', {}, 'This dashboard makes no external requests of any kind; a test enforces it.'))) });
 
-    return h('div', { class: 'stack', style: { gap: '20px' } }, h('div', { class: 'grid-2' }, connection, appearance), membersCard, tokensCard, policyCard, privacy);
+    return h('div', { class: 'stack', style: { gap: '20px' } }, h('div', { class: 'grid-2' }, connection, appearance), securityCard, membersCard, tokensCard, policyCard, privacy);
   },
 });

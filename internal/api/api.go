@@ -48,6 +48,10 @@ type Server struct {
 	peerName string
 	// peerStatus snapshots the peer link table; nil when peering is not configured.
 	peerStatus func() []peer.LinkStatus
+	// local configures sign-in without a token from this machine (local.go).
+	local LocalLoginOptions
+	// github is the GitHub App integration; nil when no app is configured (github.go).
+	github *GitHub
 }
 
 type Options struct {
@@ -65,6 +69,11 @@ type Options struct {
 	PeerName string
 	// PeerStatus returns the current peer link table. Nil disables reporting.
 	PeerStatus func() []peer.LinkStatus
+	// LocalLogin configures token-free sign-in from this machine. The zero value is
+	// enhanced mode: local sign-in off.
+	LocalLogin LocalLoginOptions
+	// GitHub is the GitHub App integration. Nil serves only the setup page.
+	GitHub *GitHub
 }
 
 func New(store *db.Store, svc *coord.Service, opts Options) *Server {
@@ -83,6 +92,8 @@ func New(store *db.Store, svc *coord.Service, opts Options) *Server {
 		self:        opts.SelfEndpoint,
 		peerName:    opts.PeerName,
 		peerStatus:  opts.PeerStatus,
+		local:       opts.LocalLogin,
+		github:      opts.GitHub,
 	}
 	s.routes()
 	return s
