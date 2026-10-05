@@ -7,7 +7,7 @@
 // domains, GitHub organizations). It never decides who that identity is in Conductor and
 // never mints a credential: internal/api maps the identity to a principal and issues an
 // ordinary bearer token, so every authorization rule that applies to a token applies to a
-// sign-in unchanged (DESIGN.md §25.8).
+// sign-in unchanged (DESIGN.md §25.7).
 //
 // ID tokens are verified with the standard library alone. The verification is small and
 // fully specified — a JWS signature under a key from the issuer's JWKS, and a handful of

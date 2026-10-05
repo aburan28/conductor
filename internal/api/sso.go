@@ -19,7 +19,7 @@ import (
 	"github.com/adamburan/conductor/internal/sso"
 )
 
-// Single sign-on (DESIGN.md §25.8).
+// Single sign-on (DESIGN.md §25.7).
 //
 // A sign-in through an identity provider ends the way every other sign-in does: with an
 // ordinary bearer token, named sso:<provider>. SSO is a token issuer and nothing more — it

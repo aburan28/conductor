@@ -1,4 +1,4 @@
--- Single sign-on (DESIGN.md §25.8): accounts at an external identity provider linked to
+-- Single sign-on (DESIGN.md §25.7): accounts at an external identity provider linked to
 -- principals, and the short-lived state of sign-ins in flight.
 
 -- An external account, named by its issuer and subject — never by email, which can be
