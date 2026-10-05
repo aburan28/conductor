@@ -31,13 +31,11 @@ func (p *githubProvider) Config() Config { return p.cfg }
 // web URL, so github.com and an Enterprise Server never share an id space.
 func (p *githubProvider) issuer() string { return p.cfg.WebURL }
 
-func (p *githubProvider) scopes() string {
-	scopes := "read:user user:email"
-	if len(p.cfg.Orgs) > 0 {
-		scopes += " read:org"
-	}
-	return scopes
-}
+// scopes asks for read:org always: organization membership is what both the provider's
+// org= restriction and an organization's allowed GitHub organizations check, and team
+// membership is what group → role mapping reads. It grants read access to the account's
+// memberships and nothing in any repository.
+func (p *githubProvider) scopes() string { return "read:user user:email read:org" }
 
 func (p *githubProvider) AuthCodeURL(_ context.Context, req AuthRequest) (string, error) {
 	q := url.Values{
@@ -120,10 +118,53 @@ func (p *githubProvider) Exchange(ctx context.Context, code, verifier, _ string,
 	if err := p.checkOrgs(ctx, tok.AccessToken); err != nil {
 		return Identity{}, err
 	}
+	orgs, teams, err := p.memberships(ctx, tok.AccessToken)
+	if err != nil {
+		return Identity{}, err
+	}
 	return Identity{
 		Provider: p.cfg.Name, Issuer: p.issuer(), Subject: strconv.FormatInt(user.ID, 10),
-		Email: email, Name: user.Name, Username: user.Login,
+		Email: email, Name: user.Name, Username: user.Login, Orgs: orgs, Groups: teams,
 	}, nil
+}
+
+// memberships lists the account's active organizations and its teams ("org/team-slug"),
+// one page of each: a hundred organizations or teams is past what mapping is meant for.
+// An organization that has not approved this OAuth App hides itself and its teams, which
+// is GitHub's answer, not an error.
+func (p *githubProvider) memberships(ctx context.Context, accessToken string) ([]string, []string, error) {
+	var ms []struct {
+		State        string `json:"state"`
+		Organization struct {
+			Login string `json:"login"`
+		} `json:"organization"`
+	}
+	if err := getJSON(ctx, p.opts.HTTPClient, p.cfg.APIURL+"/user/memberships/orgs?state=active&per_page=100",
+		accessToken, &ms); err != nil {
+		return nil, nil, fail(CodeUpstream, "GitHub organization memberships could not be listed", err)
+	}
+	orgs := []string{}
+	for _, m := range ms {
+		if m.State == "active" && m.Organization.Login != "" {
+			orgs = append(orgs, strings.ToLower(m.Organization.Login))
+		}
+	}
+	var ts []struct {
+		Slug         string `json:"slug"`
+		Organization struct {
+			Login string `json:"login"`
+		} `json:"organization"`
+	}
+	if err := getJSON(ctx, p.opts.HTTPClient, p.cfg.APIURL+"/user/teams?per_page=100", accessToken, &ts); err != nil {
+		return nil, nil, fail(CodeUpstream, "GitHub team memberships could not be listed", err)
+	}
+	teams := []string{}
+	for _, t := range ts {
+		if t.Slug != "" && t.Organization.Login != "" {
+			teams = append(teams, strings.ToLower(t.Organization.Login+"/"+t.Slug))
+		}
+	}
+	return orgs, teams, nil
 }
 
 // checkOrgs admits an active member of any allowed organization. A pending invitation is not
