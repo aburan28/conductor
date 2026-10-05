@@ -52,11 +52,7 @@ func main() {
 		return
 	}
 	if err := serve(os.Args[1:]); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		if errors.Is(err, flag.ErrHelp) {
-			return
-		}
-		fmt.Fprintln(os.Stderr, "conductord:", err)
-		os.Exit(1)
+		os.Exit(exitCode(err, os.Stderr))
 	}
 }
 
@@ -86,6 +82,28 @@ type serveConfig struct {
 	retention         db.RetentionPolicy
 	ops               api.OpsOptions
 	verbose           bool
+}
+
+// usageError is a command line flag could not parse. flag has already reported it, with
+// the usage text, so it is not printed again.
+type usageError struct{ err error }
+
+func (e usageError) Error() string { return e.err.Error() }
+func (e usageError) Unwrap() error { return e.err }
+
+// exitCode reports err the way the flag package's ExitOnError convention does — -h exits
+// 0, a flag that does not parse exits 2 (both already printed by flag) — and any other
+// failure on stderr with status 1.
+func exitCode(err error, stderr io.Writer) int {
+	var usage usageError
+	switch {
+	case errors.Is(err, flag.ErrHelp):
+		return 0
+	case errors.As(err, &usage):
+		return 2
+	}
+	fmt.Fprintln(stderr, "conductord:", err)
+	return 1
 }
 
 // parseServeConfig parses serve's flags, writing usage and parse errors to output.
@@ -170,7 +188,8 @@ Flags:
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
-		return nil, err
+		// flag has already printed the error and the usage text.
+		return nil, usageError{err}
 	}
 	if c.dsn == "" {
 		return nil, errors.New("no database configured: pass --dsn or set DATABASE_URL")

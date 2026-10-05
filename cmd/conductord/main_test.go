@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -8,6 +9,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -265,5 +268,59 @@ func TestRunServerListenFailure(t *testing.T) {
 	}
 	if ctx.Err() == nil {
 		t.Error("background work was not cancelled after the listener failed")
+	}
+}
+
+// TestMain lets a test run the real main() in a child process (runMain), so exit status and
+// stderr are observed exactly as an operator sees them.
+func TestMain(m *testing.M) {
+	if args := os.Getenv("CONDUCTORD_RUN_MAIN"); args != "" {
+		os.Args = append([]string{"conductord"}, strings.Fields(args)...)
+		main()
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+func runMain(t *testing.T, args string) (int, string) {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
+	cmd.Env = append(os.Environ(), "CONDUCTORD_RUN_MAIN="+args, "DATABASE_URL=", "CONDUCTOR_ADDR=")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	var exit *exec.ExitError
+	switch {
+	case err == nil:
+		return 0, stderr.String()
+	case errors.As(err, &exit):
+		return exit.ExitCode(), stderr.String()
+	default:
+		t.Fatal(err)
+		return 0, ""
+	}
+}
+
+// A flag that does not parse exits 2 and is reported once, as flag's ExitOnError did; -h
+// exits 0; a configuration error exits 1.
+func TestMainExitStatus(t *testing.T) {
+	code, stderr := runMain(t, "--no-such-flag")
+	if code != 2 {
+		t.Errorf("bad flag exited %d, want 2", code)
+	}
+	if n := strings.Count(stderr, "flag provided but not defined: -no-such-flag"); n != 1 {
+		t.Errorf("the flag error was printed %d times:\n%s", n, stderr)
+	}
+	if !strings.Contains(stderr, "Usage:") {
+		t.Errorf("no usage text:\n%s", stderr)
+	}
+
+	if code, stderr := runMain(t, "-h"); code != 0 || !strings.Contains(stderr, "Usage:") {
+		t.Errorf("-h exited %d:\n%s", code, stderr)
+	}
+
+	code, stderr = runMain(t, "--addr 127.0.0.1:0")
+	if code != 1 || strings.Count(stderr, "no database configured") != 1 || strings.Contains(stderr, "Usage:") {
+		t.Errorf("missing database exited %d:\n%s", code, stderr)
 	}
 }
