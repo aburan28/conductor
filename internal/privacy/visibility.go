@@ -60,6 +60,10 @@ type TaskView struct {
 	DependsOn          []string                     `json:"depends_on,omitempty"`
 	ModelAlias         string                       `json:"model_alias,omitempty"`
 	Harness            string                       `json:"harness,omitempty"`
+	// The pull request the work travels in. Anyone who can read the repository can already
+	// see it, so it is shared with the title rather than with artifacts.
+	PullRequestURL   string `json:"pull_request_url,omitempty"`
+	PullRequestState string `json:"pull_request_state,omitempty"`
 
 	// team_artifacts and above.
 	CommitSHA  string                    `json:"commit_sha,omitempty"`
@@ -128,6 +132,8 @@ func ProjectTask(v Viewer, t domain.Task, p TaskProjection) TaskView {
 		view.DependsOn = p.DependsOn
 		view.ModelAlias = t.ModelAlias
 		view.Harness = p.Harness
+		view.PullRequestURL = t.PullRequestURL
+		view.PullRequestState = t.PullRequestState
 	}
 
 	if self || t.Visibility.AtLeast(domain.VisibilityTeamArtifacts) {
@@ -520,6 +526,8 @@ var EventPayloadAllowlist = map[string]bool{
 	// Queue and swarm.
 	"ticket_id": true, "position": true, "queue_depth": true, "lane": true,
 	"granted": true, "expired": true, "labels": true, "provider": true, "priority": true,
+	// Pull request lifecycle and released-territory notices.
+	"pull_request": true, "waiting_task_ref": true,
 }
 
 // SanitizeEventPayload drops any key not on the allowlist. Returns the sanitized map and the

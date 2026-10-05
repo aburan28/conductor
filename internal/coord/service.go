@@ -97,11 +97,52 @@ type IntentDecision struct {
 	Advice string `json:"advice,omitempty"`
 }
 
-// CheckIntent evaluates duplicates and scope conflicts without changing anything.
+// CheckIntent evaluates duplicates and scope conflicts without changing any task, lease, or
+// reservation.
 //
 // This is the highest-value call in the system. An agent that runs it before editing cannot
 // cause a collision, and it costs one round trip.
+//
+// The one thing a blocked check does leave behind is a short-lived note that the caller is
+// waiting on that territory, so the release that frees it can say so (a `scope.released`
+// event naming them). Without it "wait for it" had nothing to wait on.
 func (s *Service) CheckIntent(ctx context.Context, c Caller, req IntentRequest) (IntentDecision, error) {
+	decision, err := s.evaluateIntent(ctx, c, req)
+	if err != nil {
+		return decision, err
+	}
+	if decision.Outcome == domain.OutcomeBlockConflict {
+		if err := s.noteWaiter(ctx, c, req, domain.ID(req.ExcludeTask)); err != nil {
+			return decision, err
+		}
+	}
+	return decision, nil
+}
+
+// noteWaiter records that the caller was refused territory, for notifyWaiters. It stores the
+// scopes asked for and nothing of the summary: the waiter is identified by who they are and
+// what they wanted to touch, which the conflict they just received already put on record.
+func (s *Service) noteWaiter(ctx context.Context, c Caller, req IntentRequest, taskID domain.ID) error {
+	if len(req.Scopes) == 0 {
+		return nil
+	}
+	_, err := s.Store.RecordIntent(ctx, domain.Intent{
+		ProjectID:   req.ProjectID,
+		SessionID:   req.SessionID,
+		PrincipalID: c.Principal.ID,
+		TaskID:      taskID,
+		Visibility:  domain.VisibilityPrivate,
+		Verb:        "wait",
+		Fingerprint: "waiting",
+		MinHash:     []int64{},
+		Scopes:      req.Scopes,
+		Outcome:     domain.OutcomeBlockConflict,
+	}, 15*time.Minute)
+	return err
+}
+
+// evaluateIntent is CheckIntent without the waiter note: the pure decision.
+func (s *Service) evaluateIntent(ctx context.Context, c Caller, req IntentRequest) (IntentDecision, error) {
 	project, err := s.Store.GetProject(ctx, req.ProjectID)
 	if err != nil {
 		return IntentDecision{}, err
@@ -184,9 +225,7 @@ func decide(duplicates []db.DuplicateCandidate, conflicts []db.ScopeConflict, cf
 			}
 		}
 		d.Reason = "scope conflict on " + blocker.ResourceKey
-		d.Advice = blocker.HolderOwner + " holds " + blocker.ResourceKey +
-			" for " + blocker.HolderTaskRef + " (" + string(blocker.HolderMode) +
-			"). Wait for it, split your scope, or join their task."
+		d.Advice = ConflictAdvice(blocker)
 		return d
 	}
 
@@ -198,6 +237,30 @@ func decide(duplicates []db.DuplicateCandidate, conflicts []db.ScopeConflict, cf
 			"). Proceed, but expect to coordinate on merge."
 	}
 	return d
+}
+
+// ConflictAdvice explains one blocking conflict in a sentence a person or agent can act on.
+//
+// Two holders look the same in the reservation table and mean different things. One is
+// editing the files right now: wait, split, or join. The other has finished and is waiting
+// for a merge: the files' new contents sit in an unmerged pull request, and the useful moves
+// are to wait for the merge, build on that branch, or go and review it. Saying "wait" in both
+// cases sent people to ping a teammate who was not doing anything.
+func ConflictAdvice(c db.ScopeConflict) string {
+	if c.PendingMerge() {
+		where := "an unmerged branch"
+		if c.HolderPullRequest != "" {
+			where = "an unmerged pull request (" + c.HolderPullRequest + ")"
+		}
+		return c.HolderOwner + "'s " + c.HolderTaskRef + " changed " + c.ResourceKey +
+			" and is waiting to merge (" + string(c.HolderStatus) + "); the new contents are in " +
+			where + ". The files stay reserved until it merges or the task is marked done " +
+			"(`conductor task done " + c.HolderTaskRef + "`) or cancelled. Wait for the merge, " +
+			"build on their branch, or review it."
+	}
+	return c.HolderOwner + " holds " + c.ResourceKey +
+		" for " + c.HolderTaskRef + " (" + string(c.HolderMode) +
+		"). Wait for it (you will get a scope.released event when it frees), split your scope, or join their task."
 }
 
 // fingerprint returns the intent fingerprint and MinHash signature, computing them under the
@@ -274,7 +337,7 @@ func (s *Service) StartWork(ctx context.Context, c Caller, req StartWorkRequest)
 		return StartWorkResult{}, err
 	}
 
-	decision, err := s.CheckIntent(ctx, c, req.IntentRequest)
+	decision, err := s.evaluateIntent(ctx, c, req.IntentRequest)
 	if err != nil {
 		return StartWorkResult{}, err
 	}
@@ -463,10 +526,19 @@ func (s *Service) ExpandScope(ctx context.Context, c Caller, fence domain.Fence,
 				!errors.Is(uerr, domain.ErrIllegalTransition) {
 				return ExpandScopeResult{}, uerr
 			}
+			// The paused attempt is now waiting on that territory; note it so the holder's
+			// release tells this task's owner to resume.
+			if werr := s.noteWaiter(ctx, c, IntentRequest{
+				ProjectID: projectID, Scopes: requests, SessionID: c.SessionID,
+			}, fence.TaskID); werr != nil {
+				return ExpandScopeResult{}, werr
+			}
 			advice := "Scope expansion blocked."
-			if len(conflicts) > 0 {
-				advice = conflicts[0].HolderOwner + " holds " + conflicts[0].ResourceKey +
-					" for " + conflicts[0].HolderTaskRef + ". Split, wait, or join."
+			for _, cf := range conflicts {
+				if cf.Outcome.Blocks() {
+					advice = ConflictAdvice(cf)
+					break
+				}
 			}
 			return ExpandScopeResult{
 				Outcome:   domain.OutcomeBlockConflict,

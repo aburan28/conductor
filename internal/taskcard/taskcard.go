@@ -134,6 +134,13 @@ func FromTask(
 			c.Artifacts = append(c.Artifacts, "Commit: "+attempt.CommitSHA)
 		}
 	}
+	if task.PullRequestURL != "" {
+		pr := "Pull request: " + task.PullRequestURL
+		if task.PullRequestState != "" {
+			pr += " (" + task.PullRequestState + ")"
+		}
+		c.Artifacts = append(c.Artifacts, pr)
+	}
 	if lease != nil {
 		c.Lease = &CardLease{
 			ID: lease.ID, FencingEpoch: lease.FencingEpoch, ExpiresAt: lease.ExpiresAt.UTC(),

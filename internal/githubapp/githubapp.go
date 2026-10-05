@@ -576,6 +576,26 @@ type PullRequest struct {
 	User struct {
 		Login string `json:"login"`
 	} `json:"user"`
+	// Merged and MergeCommitSHA say how a closed pull request ended: merged, or closed
+	// without merging. Both are present on the webhook payload and the single-PR endpoint.
+	Merged         bool   `json:"merged"`
+	MergeCommitSHA string `json:"merge_commit_sha"`
+}
+
+// GetPullRequest fetches one pull request, open or not. The poller uses it to learn how a
+// pull request it saw open has ended once it drops off the open list.
+func (c *Client) GetPullRequest(ctx context.Context, installationID int64, owner, repo string, number int) (PullRequest, error) {
+	tok, err := c.InstallationToken(ctx, installationID)
+	if err != nil {
+		return PullRequest{}, err
+	}
+	base, err := repoPath(owner, repo)
+	if err != nil {
+		return PullRequest{}, err
+	}
+	var out PullRequest
+	err = c.do(ctx, http.MethodGet, fmt.Sprintf("%s/pulls/%d", base, number), tok, nil, &out)
+	return out, err
 }
 
 // OpenPullRequests lists a repository's open pull requests, newest first (up to 100).

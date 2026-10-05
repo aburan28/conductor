@@ -97,6 +97,7 @@ func (s *Server) routes() {
 	s.queueRoutes(m)
 	s.localRoutes(m)
 	s.githubRoutes(m)
+	s.lifecycleRoutes(m)
 
 	// The mesh surface. /v1/peer/* is authenticated by the peer's mesh certificate (not a
 	// bearer token); /v1/peers is the same link table shown to project members.
@@ -443,6 +444,9 @@ type heartbeatSessionBody struct {
 	State   domain.SessionState `json:"state"`
 	Branch  string              `json:"branch"`
 	BaseSHA string              `json:"base_sha"`
+	// ChangedPaths is what the session's working tree differs in, paths only. It feeds the
+	// merge-risk graph for interactive sessions the way a runner's harvested diff does.
+	ChangedPaths []string `json:"changed_paths"`
 }
 
 func (s *Server) heartbeatSession(w http.ResponseWriter, r *http.Request, p domain.Principal) {
@@ -467,7 +471,8 @@ func (s *Server) heartbeatSession(w http.ResponseWriter, r *http.Request, p doma
 	}
 	updated, err := s.store.HeartbeatSession(r.Context(), db.HeartbeatSessionParams{
 		SessionID: session.ID, State: body.State, Branch: body.Branch, BaseSHA: body.BaseSHA,
-		TTL: project.Config.LeaseTTL.OrDefault(90 * time.Second),
+		TTL:          project.Config.LeaseTTL.OrDefault(90 * time.Second),
+		ChangedPaths: body.ChangedPaths,
 	})
 	if err != nil {
 		s.fail(w, r, err)
@@ -787,6 +792,7 @@ func (s *Server) getTaskCard(w http.ResponseWriter, r *http.Request, p domain.Pr
 	if task.Visibility == domain.VisibilityPrivate && owner.ID != caller.Principal.ID {
 		task.Title, task.Objective, task.ExternalRef = "(private)", "", ""
 		task.AcceptanceCriteria = nil
+		task.PullRequestURL = ""
 	}
 
 	reservations, err := s.store.ReservationsForTask(r.Context(), task.ID)
@@ -796,6 +802,10 @@ func (s *Server) getTaskCard(w http.ResponseWriter, r *http.Request, p domain.Pr
 	}
 	var attempt *domain.Attempt
 	if a, err := s.store.ActiveAttempt(r.Context(), task.ID); err == nil {
+		attempt = &a
+	} else if a, err := s.store.LatestAttempt(r.Context(), task.ID); err == nil {
+		// A finished task has no active attempt, and its branch and commit are the point of
+		// looking at it: without this the card said "not yet published" after a publish.
 		attempt = &a
 	}
 	var lease *domain.Lease
@@ -898,7 +908,7 @@ func (s *Server) claimTask(w http.ResponseWriter, r *http.Request, p domain.Prin
 		ReasoningEffort: body.ReasoningEffort,
 		Branch:          body.Branch, WorktreePath: body.WorktreePath, BaseCommitSHA: body.BaseSHA,
 		WorkflowSHA: project.WorkflowSHA, ProjectConfigSHA: project.ConfigSHA,
-		LeaseTTL: project.Config.LeaseTTL.OrDefault(90 * time.Second),
+		LeaseTTL: coord.ClaimLeaseTTL(project.Config, body.SessionID, body.RunnerID),
 		Scopes:   body.Scopes, ScopePolicy: config.ScopePolicyFrom(project.Config),
 		AllowWarnings:     body.AllowWarnings,
 		MemberTokenBudget: project.Config.Budget.MemberTokens,
@@ -944,7 +954,7 @@ func (s *Server) claimNext(w http.ResponseWriter, r *http.Request, p domain.Prin
 			Role: body.Role, Harness: firstNonEmpty(body.Harness, "cli"),
 			ModelAlias: body.ModelAlias, ReasoningEffort: body.ReasoningEffort,
 			WorkflowSHA: project.WorkflowSHA, ProjectConfigSHA: project.ConfigSHA,
-			LeaseTTL:    project.Config.LeaseTTL.OrDefault(90 * time.Second),
+			LeaseTTL:    coord.ClaimLeaseTTL(project.Config, body.SessionID, body.RunnerID),
 			ScopePolicy: config.ScopePolicyFrom(project.Config), AllowWarnings: true,
 			MemberTokenBudget: project.Config.Budget.MemberTokens,
 		},
