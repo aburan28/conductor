@@ -25,6 +25,7 @@ import (
 	"github.com/adamburan/conductor/internal/domain"
 	"github.com/adamburan/conductor/internal/githubapp"
 	"github.com/adamburan/conductor/internal/metrics"
+	"github.com/adamburan/conductor/internal/secretbox"
 )
 
 // The GitHub App integration.
@@ -62,6 +63,9 @@ type GitHubOptions struct {
 	// CredentialsPath is the credentials file conductord used before the app moved into the
 	// database. An app found there is imported once, when no app is stored yet.
 	CredentialsPath string
+	// SecretKey seals the app's private key and secrets before they are stored
+	// (github_secrets.go). Without one, an app can be neither set up nor imported.
+	SecretKey *secretbox.Source
 	// API and Web override api.github.com and github.com (GitHub Enterprise, tests).
 	API, Web string
 	// BaseURL is how a browser reaches this conductord; GitHub redirects back to it.
@@ -175,9 +179,9 @@ func (g *GitHub) sync(ctx context.Context, force bool) error {
 		return fmt.Errorf("read github app: %w", err)
 	}
 	if !found && g.fileFound {
-		data, err := json.Marshal(g.file)
+		data, err := sealCredentials(g.opts.SecretKey, g.file)
 		if err != nil {
-			return err
+			return fmt.Errorf("import github app: %w", err)
 		}
 		imported, err := g.store.ImportGitHubApp(ctx, data)
 		if err != nil {
@@ -193,8 +197,12 @@ func (g *GitHub) sync(ctx context.Context, force bool) error {
 	}
 	var base githubapp.Credentials
 	if found {
-		if err := json.Unmarshal(raw, &base); err != nil {
-			return fmt.Errorf("stored github app: %w", err)
+		var plaintext bool
+		if base, plaintext, err = openCredentials(g.opts.SecretKey, raw); err != nil {
+			return err
+		}
+		if plaintext {
+			g.reseal(ctx, raw, base)
 		}
 	}
 	creds, ok, err := githubapp.Overlay(base, g.opts.Getenv)
@@ -202,6 +210,22 @@ func (g *GitHub) sync(ctx context.Context, force bool) error {
 		return err
 	}
 	return g.use(creds, ok)
+}
+
+// reseal replaces a row stored before credentials were sealed with its sealed form, unless
+// another replica has changed the row since it was read. A failure leaves the plaintext row
+// working as before; the next refresh tries again.
+func (g *GitHub) reseal(ctx context.Context, old []byte, creds githubapp.Credentials) {
+	sealed, err := sealCredentials(g.opts.SecretKey, creds)
+	if err == nil {
+		var done bool
+		if done, err = g.store.ResealGitHubApp(ctx, old, sealed); err == nil && done {
+			g.logger.Info("github app secrets in the database are now sealed with this server's secret key")
+		}
+	}
+	if err != nil {
+		g.logger.Warn("could not seal the github app's stored secrets; they remain readable to anyone with a database backup", "error", err)
+	}
 }
 
 // current refreshes from the database if due and returns the client, nil when no app is
@@ -1006,7 +1030,7 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 		s.renderGitHubPage(w, http.StatusInternalServerError, githubPageData{Heading: "The app's key did not load", Paragraphs: []string{err.Error()}})
 		return
 	}
-	data, err := json.Marshal(creds)
+	data, err := sealCredentials(s.github.opts.SecretKey, creds)
 	if err == nil {
 		err = s.store.SaveGitHubApp(ctx, data)
 	}

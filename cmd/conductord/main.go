@@ -40,6 +40,7 @@ import (
 	"github.com/adamburan/conductor/internal/githubapp"
 	"github.com/adamburan/conductor/internal/peer"
 	"github.com/adamburan/conductor/internal/scheduler"
+	"github.com/adamburan/conductor/internal/secretbox"
 	"github.com/adamburan/conductor/internal/web"
 )
 
@@ -81,6 +82,8 @@ type serveConfig struct {
 	database          db.Options
 	retention         db.RetentionPolicy
 	ops               api.OpsOptions
+	secretKeyFile     string
+	secretKeyEnv      string
 	verbose           bool
 }
 
@@ -175,6 +178,10 @@ func parseServeConfig(args []string, output io.Writer) (*serveConfig, error) {
 	fs.IntVar(&c.ops.MaxStreams, "max-streams", 1000, "most concurrent event-stream connections")
 	fs.IntVar(&c.ops.MaxStreamsPerPrincipal, "max-streams-per-principal", 16, "most concurrent event-stream connections per principal")
 	fs.IntVar(&c.ops.MaxWebhookChecks, "max-webhook-checks", 8, "most pull request checks running at once on behalf of webhook deliveries")
+	fs.StringVar(&c.secretKeyFile, "secret-key-file", envOr(secretbox.EnvKeyFile, ""),
+		"key that seals secrets conductord stores in the database (the GitHub App's private key); created 0600 on first use. "+
+			"Every replica must use the same key. Default: secret.key in CONDUCTOR_STATE_DIR or ~/.conductor. "+
+			secretbox.EnvKey+" (the base64 key itself) takes precedence")
 	fs.BoolVar(&c.verbose, "v", false, "verbose logging")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), `conductord — Conductor control plane
@@ -193,6 +200,13 @@ Flags:
 	}
 	if c.dsn == "" {
 		return nil, errors.New("no database configured: pass --dsn or set DATABASE_URL")
+	}
+	c.secretKeyEnv = os.Getenv(secretbox.EnvKey)
+	if c.secretKeyFile == "" {
+		var err error
+		if c.secretKeyFile, err = secretbox.DefaultKeyPath(); err != nil {
+			return nil, fmt.Errorf("secret key file: %w", err)
+		}
 	}
 
 	for name, days := range map[string]int{"--retention-days": *eventsDays, "--audit-retention-days": *auditDays,
@@ -398,7 +412,8 @@ func serve(args []string) error {
 	}
 	gh, ghErr := api.NewGitHub(api.GitHubOptions{
 		CredentialsPath: githubCreds, API: cfg.githubAPI, Web: cfg.githubWeb,
-		BaseURL: selfEndpoint, WebhookURL: webhookURL, Poll: cfg.githubPoll, Logger: logger,
+		SecretKey: &secretbox.Source{Env: cfg.secretKeyEnv, Path: cfg.secretKeyFile},
+		BaseURL:   selfEndpoint, WebhookURL: webhookURL, Poll: cfg.githubPoll, Logger: logger,
 	})
 
 	ops := cfg.ops

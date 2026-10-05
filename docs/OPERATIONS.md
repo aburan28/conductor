@@ -145,8 +145,9 @@ Several conductord processes may share one database behind a load balancer. What
 agree on lives in Postgres:
 
 - claims, leases, reservations, tasks and events (transactional, `SKIP LOCKED` scheduling);
-- the scheduler's liveness heartbeat (outage recovery above) and the last budget alert
-  level per project, so neither a restart nor a second replica re-announces a crossing;
+- the scheduler's liveness heartbeat (outage recovery above), the last budget alert level
+  per project, and which stalled attempts were announced, so neither a restart nor a second
+  replica re-announces a budget crossing or a stall;
 - the GitHub App's credentials, pending setup links, and the check run posted on each
   commit. Polling is gated by an advisory lock, so one replica polls at a time and another
   takes over when it dies. An app set up through one replica is served by all within 15s.
@@ -166,17 +167,60 @@ What stays per process:
 - **Event-stream feeds and caps**, which are per process; the database load is one poll per
   watched project per replica.
 
-The GitHub App's private key and webhook secret are stored in the database (the
-`github_app` table) so every replica can sign as the app. Database backups therefore carry
-them; treat backups as secrets. `CONDUCTOR_GITHUB_APP_ID`, `CONDUCTOR_GITHUB_APP_PRIVATE_KEY`
-(or `_FILE`) and `CONDUCTOR_GITHUB_WEBHOOK_SECRET` still override the stored values field by
-field, for a deployment that injects the key from a secret store. A credentials file written
-by an older conductord (`~/.conductor/github-app.json`) is imported once, when the database
-has no app, and is not read after that.
+The GitHub App's credentials are stored in the database (the `github_app` table) so every
+replica can act as the app, with its private key, webhook secret and client secret sealed
+under the server's secret key (next section). Replicas must therefore share that key.
+`CONDUCTOR_GITHUB_APP_ID`, `CONDUCTOR_GITHUB_APP_PRIVATE_KEY` (or `_FILE`) and
+`CONDUCTOR_GITHUB_WEBHOOK_SECRET` still override the stored values field by field, for a
+deployment that injects the key from a secret store. A credentials file written by an older
+conductord (`~/.conductor/github-app.json`) is imported (sealed) once, when the database has
+no app, and is not read after that; delete it once the import is logged.
+
+## The secret key
+
+Secrets conductord keeps in Postgres — today, the GitHub App's private key, webhook secret
+and client secret — are sealed with AES-256-GCM under a 32-byte key that never goes into the
+database. A database dump, backup or restored copy is then useless for acting as the app
+without the key as well.
+
+Where the key comes from, first match wins:
+
+1. `CONDUCTOR_SECRET_KEY`: the key itself, base64 (`openssl rand -base64 32`). Use this to
+   inject it from a secret manager.
+2. `--secret-key-file PATH` or `CONDUCTOR_SECRET_KEY_FILE`.
+3. `secret.key` in `CONDUCTOR_STATE_DIR`, else `~/.conductor/secret.key`.
+
+A key file that does not exist is created (0600, in a 0700 directory) the first time
+something is sealed, so a server that never sets up the GitHub App never creates one.
+
+**Every replica must use the same key.** If a replica's key differs, it cannot unseal the
+stored app: it logs `the GitHub App's stored credentials cannot be unsealed`, naming the key
+the row was sealed with and its own, and serves no app; `/v1/github/status` shows it as not
+configured. Worse, if that replica creates the key file itself and someone runs setup
+through it, the other replicas lose the app. For more than one replica, generate the key once
+and give it to all of them (`CONDUCTOR_SECRET_KEY` from your secret store, or the same file
+mounted read-only), before the first setup.
+
+**Back the key up, separately from the database.** Keeping it in the same place as the dumps
+defeats the purpose.
+
+**If the key is lost**, the sealed credentials cannot be recovered, and nothing else is
+affected: tasks, leases, tokens and everything else are not sealed. Start conductord with a
+new key, then run `conductor github setup --replace` to create and install the app again (the
+old app can be deleted in GitHub's settings). The same applies when restoring a backup
+without its key.
+
+**Rotating the key** is the same procedure: switch every replica to the new key, then run
+setup again. There is no in-place re-encryption.
+
+Rows stored by a conductord older than this (plaintext secrets) keep working: the first
+server with a key that reads one seals it in place.
 
 ## Backup and restore
 
-Everything conductord knows is in Postgres. What is *not* in it: agents' worktrees (on
+Everything conductord knows is in Postgres, except the secret key that seals the GitHub
+App's secrets (above), which must be backed up separately. What is *not* in Postgres
+either: agents' worktrees (on
 each runner's disk), session resume records and checkpoints (`conductor backup`, on each
 user's machine), and CLI logins. Back those up where they live.
 

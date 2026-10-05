@@ -45,6 +45,19 @@ func (s *Store) ImportGitHubApp(ctx context.Context, credentials []byte) (bool, 
 	return tag.RowsAffected() == 1, nil
 }
 
+// ResealGitHubApp replaces the stored credentials with credentials only if the row still
+// holds old, and reports whether it did. It upgrades a row in place (sealing secrets written
+// before they were sealed) without overwriting an app another replica has stored since.
+func (s *Store) ResealGitHubApp(ctx context.Context, old, credentials []byte) (bool, error) {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE github_app SET credentials = $2, updated_at = now()
+		 WHERE singleton AND credentials = $1::jsonb`, old, credentials)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 // GitHubSetup is a pending manifest-flow setup.
 type GitHubSetup struct {
 	Org, Name string

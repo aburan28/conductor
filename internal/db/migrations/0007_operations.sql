@@ -63,8 +63,10 @@ CREATE INDEX attempt_stall_alerts_project ON attempt_stall_alerts (project_id);
 -- GitHub App
 -- ---------------------------------------------------------------------------
 
--- The app's credentials, so every replica serves the same app. This holds the app's private
--- key and webhook secret: database backups now carry them too (docs/OPERATIONS.md).
+-- The app's credentials, so every replica serves the same app. The private key, webhook
+-- secret and client secret are sealed (AES-256-GCM) under conductord's secret key, which is
+-- kept outside the database, so a backup of this table cannot act as the app
+-- (internal/api/github_secrets.go, docs/OPERATIONS.md).
 CREATE TABLE github_app (
     singleton   boolean PRIMARY KEY DEFAULT true CHECK (singleton),
     credentials jsonb NOT NULL,

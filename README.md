@@ -454,8 +454,10 @@ appears as "a private task", and a public repository gets no task references or 
 all. A pull request's own task is excluded only for a branch in the repository itself, never
 a fork's. The app asks for read access to contents and pull requests and write access to checks only. It
 cannot push, merge, or change settings. Its credentials are kept in Conductor's database, so
-every `conductord` sharing it serves the same app (an app saved by an older version in
-`~/.conductor/github-app.json` is imported once). `CONDUCTOR_GITHUB_APP_ID` /
+every `conductord` sharing it serves the same app, with the private key and secrets sealed
+under a key that is not in the database (`~/.conductor/secret.key`, `--secret-key-file`, or
+`CONDUCTOR_SECRET_KEY`; replicas must share it — see docs/OPERATIONS.md). An app saved by an
+older version in `~/.conductor/github-app.json` is imported once. `CONDUCTOR_GITHUB_APP_ID` /
 `CONDUCTOR_GITHUB_APP_PRIVATE_KEY(_FILE)` / `CONDUCTOR_GITHUB_WEBHOOK_SECRET` override the
 stored values. A changed result updates the commit's check run rather than adding another,
 and an unchanged one is not posted again after a restart. A conductord that GitHub cannot reach, such as a laptop,

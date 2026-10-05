@@ -2155,8 +2155,10 @@ Stateless API replicas are safe when all claim operations are transactional in P
 
 As built, conductord replicas share one database and need no leader election: scheduler
 steps use `SKIP LOCKED`, and everything else replicas must agree on is a row — the scheduler
-heartbeat (§27.1), the last budget alert level announced per project, the GitHub App's
-credentials and pending setups, and the check run posted per commit. The one singleton
+heartbeat (§27.1), the last budget alert level announced per project and the stalls already
+announced, the GitHub App's credentials (its secrets sealed with AES-256-GCM under a key kept
+outside the database, so a backup cannot act as the app) and pending setups, and the check
+run posted per commit. The one singleton
 duty, polling GitHub, runs under `pg_try_advisory_lock`, which Postgres releases if its
 holder dies. Two things stay per process: MCP HTTP sessions, which hold an agent's fence in
 memory and so need session affinity on `Mcp-Session-Id` at the load balancer, and the

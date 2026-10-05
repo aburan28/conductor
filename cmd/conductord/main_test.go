@@ -28,7 +28,8 @@ func clearEnv(t *testing.T) {
 		"CONDUCTOR_PUBLIC_URL", "CONDUCTOR_PEERS", "CONDUCTOR_PEER_CA", "CONDUCTOR_PEER_CERT", "CONDUCTOR_PEER_KEY",
 		"CONDUCTOR_PEER_DISCOVER_DNS", "CONDUCTOR_PEER_DNS_SERVER", "CONDUCTOR_SECURITY_MODE",
 		"CONDUCTOR_GITHUB_API", "CONDUCTOR_GITHUB_WEB", "CONDUCTOR_RETENTION_DAYS",
-		"CONDUCTOR_AUDIT_RETENTION_DAYS", "CONDUCTOR_METRICS_TOKEN"} {
+		"CONDUCTOR_AUDIT_RETENTION_DAYS", "CONDUCTOR_METRICS_TOKEN", "CONDUCTOR_SECRET_KEY",
+		"CONDUCTOR_SECRET_KEY_FILE", "CONDUCTOR_STATE_DIR"} {
 		t.Setenv(k, "")
 	}
 }
@@ -52,6 +53,24 @@ func TestServeConfigDefaults(t *testing.T) {
 	}
 	if c.ops.BodyTimeout != 30*time.Second || c.ops.MaxStreams != 1000 || c.ops.MaxStreamsPerPrincipal != 16 || c.ops.MetricsToken != "" {
 		t.Errorf("ops = %+v", c.ops)
+	}
+}
+
+func TestServeConfigSecretKey(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("CONDUCTOR_STATE_DIR", "/srv/conductor")
+	c, err := parseServeConfigQuiet([]string{"--dsn", "x"})
+	if err != nil || c.secretKeyFile != "/srv/conductor/secret.key" || c.secretKeyEnv != "" {
+		t.Errorf("default key = %q %q %v", c.secretKeyFile, c.secretKeyEnv, err)
+	}
+	t.Setenv("CONDUCTOR_SECRET_KEY_FILE", "/run/secrets/key")
+	if c, err = parseServeConfigQuiet([]string{"--dsn", "x"}); err != nil || c.secretKeyFile != "/run/secrets/key" {
+		t.Errorf("env key file = %q %v", c.secretKeyFile, err)
+	}
+	t.Setenv("CONDUCTOR_SECRET_KEY", "a2V5")
+	if c, err = parseServeConfigQuiet([]string{"--dsn", "x", "--secret-key-file", "/etc/k"}); err != nil ||
+		c.secretKeyFile != "/etc/k" || c.secretKeyEnv != "a2V5" {
+		t.Errorf("flag key file = %q %q %v", c.secretKeyFile, c.secretKeyEnv, err)
 	}
 }
 

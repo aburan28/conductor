@@ -22,6 +22,7 @@ import (
 	"github.com/adamburan/conductor/internal/db"
 	"github.com/adamburan/conductor/internal/domain"
 	"github.com/adamburan/conductor/internal/githubapp"
+	"github.com/adamburan/conductor/internal/secretbox"
 )
 
 // fakeGitHub serves the slice of GitHub's API the integration uses: the manifest conversion,
@@ -157,7 +158,9 @@ func TestGitHubAppEndToEnd(t *testing.T) {
 	}
 
 	credsPath := filepath.Join(t.TempDir(), "github-app.json")
-	integration, err := NewGitHub(GitHubOptions{CredentialsPath: credsPath, API: gh.URL, Web: "https://github.example", Poll: -1,
+	// Every replica shares one secret key, as a deployment must.
+	sharedKey := testSecretKey(t)
+	integration, err := NewGitHub(GitHubOptions{CredentialsPath: credsPath, SecretKey: sharedKey, API: gh.URL, Web: "https://github.example", Poll: -1,
 		Getenv: func(string) string { return "" }})
 	if err != nil {
 		t.Fatal(err)
@@ -166,7 +169,7 @@ func TestGitHubAppEndToEnd(t *testing.T) {
 	defer srv.Close()
 	integration.opts.BaseURL = srv.URL
 	// A second replica over the same database, with its own integration and no file.
-	replica, err := NewGitHub(GitHubOptions{API: gh.URL, Web: "https://github.example", Poll: -1,
+	replica, err := NewGitHub(GitHubOptions{SecretKey: sharedKey, API: gh.URL, Web: "https://github.example", Poll: -1,
 		Getenv: func(string) string { return "" }})
 	if err != nil {
 		t.Fatal(err)
@@ -206,9 +209,15 @@ func TestGitHubAppEndToEnd(t *testing.T) {
 	if _, err := os.Stat(credsPath); !os.IsNotExist(err) {
 		t.Errorf("the callback wrote a local credentials file (%v); the app belongs in the database", err)
 	}
-	if raw, found, err := h.store.GitHubApp(ctx); err != nil || !found || !strings.Contains(string(raw), `"slug": "conductor-test"`) {
-		// Not the raw row: it holds the app's private key.
+	stored, found, err := h.store.GitHubApp(ctx)
+	if err != nil || !found || !strings.Contains(string(stored), `"slug": "conductor-test"`) || !strings.Contains(string(stored), `"sealed"`) {
 		t.Fatalf("stored app found=%v err=%v", found, err)
+	}
+	// The row names the app but holds none of its secrets in the clear.
+	for _, secret := range []string{"PRIVATE KEY", `"whsec"`, `"cs"`, `"pem"`} {
+		if strings.Contains(string(stored), secret) {
+			t.Errorf("the stored app row contains %s in plaintext", secret)
+		}
 	}
 	if !replica.Configured() {
 		t.Fatal("the replica that took the callback is not configured")
@@ -326,7 +335,7 @@ func TestGitHubAppEndToEnd(t *testing.T) {
 	if err := replica.pollOnce(ctx); err != nil {
 		t.Fatalf("poll on the replica: %v", err)
 	}
-	restarted, _ := NewGitHub(GitHubOptions{API: gh.URL, Poll: -1, Getenv: func(string) string { return "" }})
+	restarted, _ := NewGitHub(GitHubOptions{SecretKey: sharedKey, API: gh.URL, Poll: -1, Getenv: func(string) string { return "" }})
 	_ = New(h.store, coord.New(h.store), Options{GitHub: restarted})
 	if err := restarted.Refresh(ctx); err != nil {
 		t.Fatal(err)
@@ -462,7 +471,8 @@ func TestGitHubAppImportsLegacyFileOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	noEnv := func(string) string { return "" }
-	g, err := NewGitHub(GitHubOptions{CredentialsPath: legacy, Poll: -1, Getenv: noEnv})
+	sealKey := testSecretKey(t)
+	g, err := NewGitHub(GitHubOptions{CredentialsPath: legacy, SecretKey: sealKey, Poll: -1, Getenv: noEnv})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -474,13 +484,17 @@ func TestGitHubAppImportsLegacyFileOnce(t *testing.T) {
 	if err := h.store.Pool().QueryRow(ctx, `SELECT source, credentials->>'slug' FROM github_app`).Scan(&source, &slug); err != nil || source != "imported" || slug != "legacy" {
 		t.Fatalf("after import: source=%q slug=%q err=%v", source, slug, err)
 	}
+	var sealed, hasPEM bool
+	if err := h.store.Pool().QueryRow(ctx, `SELECT credentials ? 'sealed', credentials ? 'pem' FROM github_app`).Scan(&sealed, &hasPEM); err != nil || !sealed || hasPEM {
+		t.Errorf("the imported app is not sealed: sealed=%v pem=%v err=%v", sealed, hasPEM, err)
+	}
 
 	// Another host still has an older file; the database's app wins.
 	other := filepath.Join(dir, "other.json")
 	if err := githubapp.Save(other, githubapp.Credentials{AppID: 99, Slug: "stale", PrivateKeyPEM: pemKey}); err != nil {
 		t.Fatal(err)
 	}
-	g2, _ := NewGitHub(GitHubOptions{CredentialsPath: other, Poll: -1, Getenv: noEnv})
+	g2, _ := NewGitHub(GitHubOptions{CredentialsPath: other, SecretKey: sealKey, Poll: -1, Getenv: noEnv})
 	_ = New(h.store, coord.New(h.store), Options{GitHub: g2})
 	if err := g2.Refresh(ctx); err != nil {
 		t.Fatal(err)
@@ -525,5 +539,97 @@ func TestGitHubPollerIsExclusive(t *testing.T) {
 	}
 	if outcome, err := g.pollExclusive(ctx, time.Minute); outcome != "skipped" || err != nil {
 		t.Errorf("poll right after another replica's = %s %v", outcome, err)
+	}
+}
+
+func testSecretKey(t *testing.T) *secretbox.Source {
+	t.Helper()
+	return &secretbox.Source{Path: filepath.Join(t.TempDir(), "secret.key")}
+}
+
+func testAppPEM(t *testing.T) string {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
+}
+
+// A row stored before secrets were sealed is still served, and is sealed in place.
+func TestGitHubAppLegacyPlaintextRowIsSealed(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	keepGitHubApp(t, h.store)
+	plain, _ := json.Marshal(githubapp.Credentials{AppID: 51, Slug: "plain", PrivateKeyPEM: testAppPEM(t), WebhookSecret: "legacy-whsec"})
+	if err := h.store.SaveGitHubApp(ctx, plain); err != nil {
+		t.Fatal(err)
+	}
+	g, err := NewGitHub(GitHubOptions{SecretKey: testSecretKey(t), Poll: -1, Getenv: func(string) string { return "" }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = New(h.store, coord.New(h.store), Options{GitHub: g})
+	if err := g.Refresh(ctx); err != nil {
+		t.Fatalf("reading a plaintext row: %v", err)
+	}
+	if c := g.appClient(); c == nil || c.Credentials().Slug != "plain" || c.Credentials().WebhookSecret != "legacy-whsec" {
+		t.Fatalf("plaintext row served %+v", c)
+	}
+	raw, _, _ := h.store.GitHubApp(ctx)
+	if !strings.Contains(string(raw), `"sealed"`) || strings.Contains(string(raw), "legacy-whsec") || strings.Contains(string(raw), "PRIVATE KEY") {
+		t.Error("the plaintext row was not sealed after it was read")
+	}
+	// And the sealed row reads back the same app.
+	if err := g.Refresh(ctx); err != nil || g.appClient().Credentials().WebhookSecret != "legacy-whsec" {
+		t.Errorf("sealed row read back: %v", err)
+	}
+}
+
+// A replica with a different key (or none) cannot read the app, and says what to do.
+func TestGitHubAppWrongKey(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	keepGitHubApp(t, h.store)
+	right := testSecretKey(t)
+	sealed, err := sealCredentials(right, githubapp.Credentials{AppID: 61, Slug: "sealed", PrivateKeyPEM: testAppPEM(t), WebhookSecret: "w"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.SaveGitHubApp(ctx, sealed); err != nil {
+		t.Fatal(err)
+	}
+	rightKey, _ := right.Get(false)
+
+	for name, src := range map[string]*secretbox.Source{
+		"another key":  testSecretKey(t),
+		"missing file": {Path: filepath.Join(t.TempDir(), "absent.key")},
+	} {
+		if name == "another key" {
+			if _, err := src.Get(true); err != nil {
+				t.Fatal(err)
+			}
+		}
+		g, _ := NewGitHub(GitHubOptions{SecretKey: src, Poll: -1, Getenv: func(string) string { return "" }})
+		_ = New(h.store, coord.New(h.store), Options{GitHub: g})
+		err := g.Refresh(ctx)
+		if err == nil {
+			t.Errorf("%s: the app opened", name)
+			continue
+		}
+		for _, want := range []string{"cannot be unsealed", rightKey.ID(), "same secret key", "conductor github setup --replace"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%s: error lacks %q: %v", name, want, err)
+			}
+		}
+		if g.Configured() {
+			t.Errorf("%s: an unreadable app counts as configured", name)
+		}
+	}
+	// The key that sealed it still opens it.
+	g, _ := NewGitHub(GitHubOptions{SecretKey: right, Poll: -1, Getenv: func(string) string { return "" }})
+	_ = New(h.store, coord.New(h.store), Options{GitHub: g})
+	if err := g.Refresh(ctx); err != nil || !g.Configured() {
+		t.Errorf("the right key: %v", err)
 	}
 }
