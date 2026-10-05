@@ -618,6 +618,9 @@ stateDiagram-v2
     verifying --> done: checks pass and no review required
     review_required --> running: changes requested
     review_required --> merging: approved
+    verifying --> ready: sent back after the attempt ended
+    review_required --> ready: sent back from review
+    merging --> ready: pull request closed unmerged
     merging --> done: merged/published
     running --> failed: terminal policy or retry exhaustion
     ready --> cancelled
@@ -729,6 +732,34 @@ On expiration:
 - prevent stale result publication with the old epoch.
 
 The old worktree is retained for recovery; it is not automatically destroyed.
+
+### 10.5 Who renews a lease, and when territory is released
+
+A lease is renewed by whoever is demonstrably still working it:
+
+- a runner, on its progress heartbeat;
+- a session: every session heartbeat renews every live lease bound to that session and held
+  by the session's own principal. The `conductor wrap` sidecar heartbeats every 20 seconds, so
+  an interactive claim lives exactly as long as its session. A lease that has already expired
+  is not revived;
+- an MCP gateway, in the background: the stdio gateway for as long as its process (the
+  harness session) runs, an HTTP gateway session while its client has called within 15
+  minutes. Never a model tool call.
+
+A claim made with no session or runner behind it (`conductor task claim` in a plain shell)
+gets a ten-minute window, recorded against the checkout it was made in. `conductor wrap` in
+that checkout adopts it on start (same principal, not carried by another live session).
+
+Territory follows the work, not the attempt. A task that finishes into `verifying`,
+`review_required`, or `merging` keeps its reservations as a pending-merge hold: its changes sit
+in an unmerged branch, and the next claimant is told so (the conflict carries the holder's
+status and pull request). A terminal transition — `done`, `cancelled`, `failed`, or a merged
+pull request — ends any live lease and releases the reservations in the same transaction. A
+pull request closed without merging sends a waiting task back to `ready` and releases its hold.
+
+When reservations are released, anyone refused that territory in the last 15 minutes (a
+blocked check, start-work, or scope expansion leaves a short-lived waiting note) is named in a
+`scope.released` event, so "wait for it" has something to wait on.
 
 ---
 

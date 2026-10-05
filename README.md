@@ -365,7 +365,10 @@ conductor worker --dry-run succeed --once -v
 
 The built-in fake harness claims a task, creates a worktree, edits a file, runs your required
 checks, commits, and submits evidence — exercising every coordination path with a deterministic
-stand-in for a model.
+stand-in for a model. The task ends in `verifying`: the work is finished but not merged, so it
+keeps `README.md` reserved. `conductor task show T-1` shows the branch and commit; once that
+branch is merged, `conductor task done T-1` completes the task and frees the file (with the
+GitHub App linked, the merge does it for you).
 
 Or run the scripted demo, which reproduces the scenario above end to end:
 
@@ -381,6 +384,8 @@ make e2e
 conductor check --summary "…" --scope dir:internal/api    # before you edit. exit 3 = stop
 conductor task claim --next                               # take work and its territory
 conductor wrap claude                                     # register a session + heartbeat, then launch
+conductor task done T-42                                  # it merged: close it and free its files
+conductor task reopen T-42                                # review wants changes: back to the queue
 conductor serve qwen                                      # local vLLM for OpenCode (also: flash, glm53)
 conductor wrap opencode --model vllm/qwen3.8-27b
 conductor presence --watch                                # who is live, on what
@@ -412,6 +417,34 @@ conductor queue                                           # the admission line w
 ```
 
 Every command takes `--json`.
+
+### The loop, start to finish
+
+1. **Check.** `conductor check` (or the agent's `conductor_check_conflicts`) says whether
+   anyone holds what you are about to touch. A blocked check leaves a short note that you are
+   waiting; when the holder lets go, a `scope.released` event names you.
+2. **Claim.** `conductor task claim T-42 --scope path:…` takes the task and its territory. Run
+   inside a wrapped session (or by an agent through `coord_start_work`), the claim is bound to
+   that session. From a plain shell it is recorded against the checkout and waits up to ten
+   minutes for a session to take it over.
+3. **Wrap.** `conductor wrap claude` registers the session and adopts any claim made in the
+   same checkout. Its heartbeat (every 20 seconds) keeps the session **and every claim it
+   holds** alive for as long as it runs, and reports which paths the working tree has touched
+   (paths only), so merge-risk detection sees interactive work too. When the session ends,
+   the claim lapses one lease TTL later and the reconciler releases it. An MCP gateway keeps
+   the claim it took alive the same way, without the model spending a token on it.
+4. **Work.** The pre-edit hook blocks an edit to a file someone else holds. The first edit of
+   a file outside your own claim reserves it under the claim (`--auto-reserve`, the default
+   `conductor integrate` installs) and tells the agent so; a session with no claim is
+   reminded that its edits reserve nothing.
+5. **Publish.** `coord_publish_result` records the commit, the changed paths, and each
+   validation command with its exit code; `coord_finish_work` moves the task to `verifying`.
+6. **Merge.** Finished work keeps its territory while it waits to merge — anyone who checks
+   one of its files is told the change is in an unmerged pull request, not that someone is
+   editing. When the pull request merges, the task is done and its files are free: the
+   GitHub App does this from the merge webhook (or by polling), and `conductor task done`
+   does it by hand. A pull request closed without merging sends a waiting task back to
+   `ready` and releases its hold; `conductor task reopen` sends work back but keeps it.
 
 ### Sharing with someone by text
 
@@ -461,6 +494,15 @@ polls open pull requests every two minutes (`--github-poll`). One started with a
 `--public-url` receives signed webhooks at `/github/webhook`. The check is `neutral` when
 there is an overlap, so it informs a reviewer without blocking a merge unless branch
 protection requires it.
+
+The app also closes the loop. A pull request is linked to its task when its branch is one an
+attempt recorded or follows the `agent/<task-ref>/attempt-<n>` convention (branches in the
+repository itself only, never a fork's); `conductor task show` and the dashboard show the
+link. When a linked pull request **merges**, the task moves to `done` — from wherever its work
+stood, ending a still-live claim — and its reserved files are released. When one is **closed
+without merging**, a task that was waiting on it goes back to `ready` and drops its hold, and a
+task still being worked is left alone. Without webhooks, the poller notices a merge when a
+pull request it saw open drops off the open list.
 
 ### Connecting your coding tool
 
@@ -746,9 +788,10 @@ migration lane, table, API route, symbol), and acquisition takes a per-project a
 check-then-insert cannot interleave. Without it, two agents each see a clear field and both
 plant a flag.
 
-**Merge risk from observed diffs.** Runners report the paths git says changed, so the conflict
-graph is built from what agents are *doing*, not only what they declared. That is what turns a
-merge-time disaster into a minute-five warning.
+**Merge risk from observed diffs.** Runners report the paths git says changed, and so does the
+`conductor wrap` heartbeat for interactive sessions, so the conflict graph is built from what
+agents and people are *doing*, not only what they declared. That is what turns a merge-time
+disaster into a minute-five warning.
 
 ---
 
@@ -784,8 +827,9 @@ Implemented and exercised by tests:
   against drive-by pages, DNS rebinding, and proxies, with an enhanced security mode that
   requires tokens everywhere and revokes what local sign-in issued.
 - A GitHub App created in one click through GitHub's manifest flow. It posts a "Conductor"
-  check run on each pull request that overlaps reserved or in-flight work, by webhook or by
-  polling when GitHub cannot reach the daemon.
+  check run on each pull request that overlaps reserved or in-flight work, links the pull
+  request to its task, and completes the task when it merges — by webhook, or by polling when
+  GitHub cannot reach the daemon.
 - Session portability: `conductor checkpoint` bundles a session's native transcript, working
   tree, and a harness-neutral continuation into one file — taken periodically by `conductor
   wrap`, by Claude Code and OpenCode hooks, at shutdown, and on an agent's own `coord_checkpoint`
@@ -834,10 +878,14 @@ Not built, and where the design says it goes:
   rather than binding the bidirectional JSON-RPC App Server.
 - **OIDC** (§25.1). Authentication is bearer tokens hashed at rest; there is no identity
   provider integration.
-- **Merge queue, PR integration, tracker sync, symbol/tree-sitter indexing** (§29, §30 phase 5).
-- **Codex model ids** are still empty in `.conductor/models.yaml` until an operator names a
-  verified Codex model. **OpenCode** is wired to local vLLM: Qwen 3.8 27B, GLM-5.3-Flash, and
-  GLM-5.3 (`conductor serve qwen|flash|glm53`, then `conductor wrap opencode --model vllm/…`).
+- **Merge queue, tracker sync, symbol/tree-sitter indexing** (§29, §30 phase 5). Pull requests
+  are integrated as far as the check run and merge-to-done above; nothing queues or performs
+  merges.
+- **Codex** is profiled as `gpt-5.3-codex` in `.conductor/models.yaml` but left disabled until
+  someone verifies it against their account; its `exec --json` stream adapter is tested against
+  fixture transcripts built from Codex's documented event schema, not a live run. **OpenCode**
+  is wired to local vLLM: Qwen 3.8 27B, GLM-5.3-Flash, and GLM-5.3 (`conductor serve
+  qwen|flash|glm53`, then `conductor wrap opencode --model vllm/…`).
 
 One deliberate deviation from the design document: it recommends TypeScript (§28.1). This is
 Go, at the repository owner's direction. The tradeoff is real — the Claude Agent SDK and
