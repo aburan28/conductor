@@ -7,19 +7,22 @@ import { openModal, confirmModal } from '../components/modal.js';
 import { toast, toastError } from '../components/toast.js';
 import { fmtDate, relTime } from '../lib/format.js';
 import { prefs } from '../lib/store.js';
+import { loadNotifications, notificationsCard } from './notifications-card.js';
 
 export default defineView({
   title: 'Settings',
   async load(ctx) {
-    const [project, members, tokens, security] = await settle([
+    const [project, members, tokens, security, notifications] = await settle([
       ctx.api.get(ctx.api.project(ctx.project)),
       ctx.api.get(ctx.api.project(ctx.project, '/members')),
       ctx.api.get('/v1/tokens'),
       ctx.api.get('/v1/security'),
+      // Channels are a maintainer's to manage; nobody else is asked for them.
+      ['maintainer', 'project_admin', 'org_admin'].includes(ctx.role) ? loadNotifications(ctx) : Promise.resolve(null),
     ]);
-    return { project, members: (members && members.members) || [], tokens: (tokens && tokens.tokens) || [], security };
+    return { project, members: (members && members.members) || [], tokens: (tokens && tokens.tokens) || [], security, notifications };
   },
-  draw({ project, members, tokens, security }, ctx, { refresh }) {
+  draw({ project, members, tokens, security, notifications }, ctx, { refresh }) {
     const cfg = (project && project.config) || {};
     const canAdmin = ['maintainer', 'project_admin', 'org_admin'].includes(ctx.role);
 
@@ -134,6 +137,6 @@ export default defineView({
         h('li', {}, 'Duplicate detection compares HMAC\'d token sets under a per-tenant key; the server never sees either sentence.'),
         h('li', {}, 'This dashboard makes no external requests of any kind; a test enforces it.'))) });
 
-    return h('div', { class: 'stack', style: { gap: '20px' } }, h('div', { class: 'grid-2' }, connection, appearance), securityCard, membersCard, tokensCard, policyCard, privacy);
+    return h('div', { class: 'stack', style: { gap: '20px' } }, h('div', { class: 'grid-2' }, connection, appearance), securityCard, membersCard, notificationsCard(notifications, ctx, refresh), tokensCard, policyCard, privacy);
   },
 });
