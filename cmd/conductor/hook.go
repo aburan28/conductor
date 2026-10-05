@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/adamburan/conductor/internal/checkpoint"
 	"github.com/adamburan/conductor/internal/client"
 	"github.com/adamburan/conductor/internal/config"
 	"github.com/adamburan/conductor/internal/coord"
@@ -38,7 +39,7 @@ const hookTimeout = 5 * time.Second
 
 func cmdHook(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: conductor hook <pre-tool|session-start|session-end>")
+		return errors.New("usage: conductor hook <pre-tool|session-start|session-end|checkpoint>")
 	}
 	switch args[0] {
 	case "pre-tool":
@@ -47,6 +48,8 @@ func cmdHook(ctx context.Context, args []string) error {
 		return hookSessionStart(ctx, args[1:])
 	case "session-end":
 		return hookSessionEnd(ctx, args[1:])
+	case "checkpoint":
+		return hookCheckpoint(ctx, args[1:])
 	default:
 		return fmt.Errorf("unknown hook event %q", args[0])
 	}
@@ -455,6 +458,9 @@ func hookSessionStart(ctx context.Context, args []string) error {
 // hookSessionEnd closes a bare session's presence record. A session launched through
 // `conductor wrap` is closed by the wrapper itself and is left alone here.
 func hookSessionEnd(ctx context.Context, args []string) error {
+	// The transcript is complete now: the last checkpoint of this session, forced past the
+	// rate limit but still skipped when nothing changed.
+	hookCheckpointFromStdin(ctx, true)
 	sessionID := os.Getenv("CONDUCTOR_SESSION_ID")
 	if sessionID == "" {
 		return nil
@@ -484,4 +490,54 @@ func trimLines(s string, n int) string {
 		return strings.Join(lines, "\n")
 	}
 	return strings.Join(lines[:n], "\n") + "\n…"
+}
+
+// hookCheckpoint is the Stop / PreCompact hook: checkpoint this session so it can continue
+// elsewhere. It is rate-limited and skips unchanged sessions inside the checkpoint package,
+// and like every hook it fails open — a checkpoint that could not be taken is one line on
+// stderr, never a blocked turn. Only the session id, cwd, and event name are read from the
+// hook payload; the transcript is located from those, not from a path the payload names.
+func hookCheckpoint(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("hook checkpoint", flag.ContinueOnError)
+	harness := fs.String("harness", "", "harness that fired the hook (default: claude, or CONDUCTOR_HARNESS)")
+	force := fs.Bool("force", false, "ignore the rate limit (still skips an unchanged session)")
+	if err := fs.Parse(args); err != nil {
+		return nil
+	}
+	if *harness != "" {
+		os.Setenv("CONDUCTOR_HARNESS", *harness)
+	}
+	hookCheckpointFromStdin(ctx, *force)
+	return nil
+}
+
+func hookCheckpointFromStdin(ctx context.Context, force bool) {
+	if checkpoint.Disabled(os.Getenv) {
+		return
+	}
+	in, err := readHookInput(os.Stdin, stdinIsTerminal())
+	if err != nil {
+		return
+	}
+	cwd := in.Cwd
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+	harness := checkpoint.NormalizeHarness(firstNonEmptyString(os.Getenv("CONDUCTOR_HARNESS"), "claude"))
+	reason := checkpoint.ReasonHook
+	if in.HookEventName != "" {
+		reason = checkpoint.ReasonHook + ":" + in.HookEventName
+		if in.HookEventName == "PreCompact" || in.HookEventName == "SessionEnd" {
+			force = true
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
+	_, err = checkpoint.Capture(ctx, checkpoint.Request{
+		Harness: harness, Cwd: cwd, SessionID: in.SessionID, Since: time.Now().Add(-30 * 24 * time.Hour),
+		Reason: reason, Force: force, Conductor: conductorRefFromEnv(),
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "conductor: checkpoint not taken: %v\n", err)
+	}
 }

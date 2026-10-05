@@ -2030,6 +2030,36 @@ record whose process is gone using the harness's own conversation-resume invocat
 
 ---
 
+### 27.8 Session portability
+
+§27.7 reopens a conversation where its harness keeps it: this machine, this login, this
+working directory. Three situations need the conversation somewhere else — the account hits
+its usage limit mid-task, the instance is reclaimed with the transcript on its disk, or one
+harness planned work another should finish — and `conductor checkpoint` covers them.
+
+A checkpoint is one file (gzip tar, `.ckpt`) with four layers: the harness's native
+transcript verbatim (Claude Code's per-session directory of subagent transcripts included),
+the working tree as a git bundle of unpushed commits plus a binary patch plus the untracked
+files, a harness-neutral `CONTINUATION.md` distilled from the conversation, and a manifest
+with a hash for every member. The same harness resumes the same conversation from the
+native layer — `claude --resume <path>`, `codex resume <id>`, `opencode import` — under
+whichever state directory (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME`) and so
+whichever login the user names; a different harness starts from the continuation.
+
+Checkpoints are taken by the `conductor wrap` sidecar on an interval and on the way down,
+by the Claude Code `Stop`/`PreCompact` hooks and the OpenCode `session.idle` plugin event
+for bare sessions, by `conductor sessions save all` (and so the shutdown hook), and by an
+agent's own `coord_checkpoint` call. Each dedupes on a content fingerprint.
+
+The privacy boundary (§6, §12.4) is unchanged: a checkpoint holds the conversation, so it
+is written only by the CLI on the user's machine, never by or through the control plane.
+`coord_checkpoint` is honoured only by the stdio gateway, which runs beside the harness;
+the HTTP gateway refuses it. A checkpoint leaves the machine only as a file the user moves,
+or sealed (AES-256-GCM under a passphrase) in the user's own bucket — `conductor checkpoint
+push` refuses plaintext. `docs/PORTABILITY.md` has the format and per-harness mechanics.
+
+---
+
 ## 28. Deployment design
 
 ### 28.1 Single EC2 / personal deployment

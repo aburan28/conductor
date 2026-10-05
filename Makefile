@@ -41,7 +41,8 @@ fmt:
 unit:
 	$(GO) test ./internal/domain/... ./internal/selector/... ./internal/privacy/... \
 	          ./internal/router/... ./internal/resource/... ./internal/harness/... \
-	          ./internal/taskcard/... ./internal/config/... ./internal/localstate/...
+	          ./internal/taskcard/... ./internal/config/... ./internal/localstate/... \
+	          ./internal/checkpoint/...
 
 # Full suite. When Docker is available, bring up the local Postgres first so
 # the integration tests actually run; otherwise unset DATABASE_URL so they

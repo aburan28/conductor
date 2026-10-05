@@ -6,14 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
+	"time"
 
+	"github.com/adamburan/conductor/internal/checkpoint"
 	"github.com/adamburan/conductor/internal/client"
 	"github.com/adamburan/conductor/internal/coord"
 	"github.com/adamburan/conductor/internal/domain"
 )
 
-// The tool set is intentionally short (DESIGN.md §18). Nine tools, each mapping to one API
-// call. `conductor_check_conflicts` is separated out from `coord_start_work` because it is
+// The tool set is intentionally short (DESIGN.md §18). Twelve tools, each mapping to one API
+// call — except coord_checkpoint, which is local to the machine the agent runs on. `conductor_check_conflicts` is separated out from `coord_start_work` because it is
 // the one an agent should reach for reflexively before editing — the cheapest possible call
 // that prevents the most expensive possible mistake.
 func toolDefinitions() []map[string]any {
@@ -206,6 +209,20 @@ func toolDefinitions() []map[string]any {
 			},
 		},
 		{
+			"name": "coord_checkpoint",
+			"description": "Checkpoint this session so the work can continue elsewhere: on another machine, under another " +
+				"account after a usage limit, or in a different coding agent. Bundles your transcript and the working tree " +
+				"into a file on this machine only; nothing is uploaded or shared with the team. Call it when you reach a " +
+				"milestone or suspect you are near a limit, with a note on where the work stands.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"note": map[string]any{"type": "string",
+						"description": "Where the work stands and what comes next, for whoever resumes it."},
+				},
+			},
+		},
+		{
 			"name": "coord_project_status",
 			"description": "Who is working on what right now, plus open conflicts. Shows tasks, owners, scopes, and " +
 				"branches. Never shows anyone's prompts or model output.",
@@ -243,6 +260,8 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		return s.capabilities(ctx, raw)
 	case "coord_delegate":
 		return s.delegate(ctx, raw)
+	case "coord_checkpoint":
+		return s.checkpointTool(ctx, raw)
 	case "coord_project_status":
 		return s.projectStatus(ctx)
 	default:
@@ -667,4 +686,57 @@ func (s *Server) requireFence() error {
 		return errors.New("no active claim: call coord_start_work first, or run inside a Conductor attempt")
 	}
 	return nil
+}
+
+// checkpointTool takes a local checkpoint of the session the gateway is running inside.
+// Only the stdio gateway can: it runs on the same machine as the harness and sees the same
+// filesystem. Over HTTP the gateway lives in the control plane, which must never hold a
+// transcript, so the tool explains where to run it instead. Nothing from the checkpoint —
+// not the note, not the path's contents — is sent to the API.
+func (s *Server) checkpointTool(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args struct {
+		Note string `json:"note"`
+	}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &args); err != nil {
+			return nil, err
+		}
+	}
+	if !s.local {
+		return nil, errors.New("checkpoints are taken on the machine running the session, not by the control plane: " +
+			"run `conductor checkpoint capture --note \"…\"` in the session's directory, or mount the stdio gateway (conductor-mcp)")
+	}
+	if checkpoint.Disabled(os.Getenv) {
+		return nil, errors.New("checkpoints are disabled here (CONDUCTOR_CHECKPOINT=off)")
+	}
+	cwd, _ := os.Getwd()
+	harness := checkpoint.NormalizeHarness(os.Getenv("CONDUCTOR_HARNESS"))
+	if harness == "" {
+		switch {
+		case os.Getenv("CLAUDECODE") != "" || os.Getenv("CLAUDE_CODE_ENTRYPOINT") != "":
+			harness = "claude"
+		case os.Getenv("CODEX_SANDBOX") != "" || os.Getenv("CODEX_HOME") != "":
+			harness = "codex"
+		default:
+			harness = "claude"
+		}
+	}
+	res, err := checkpoint.Capture(ctx, checkpoint.Request{
+		Harness: harness, Cwd: cwd, Since: time.Now().Add(-30 * 24 * time.Hour),
+		Reason: checkpoint.ReasonAgent, Note: args.Note, Force: true,
+		Conductor: checkpoint.ConductorRef{Project: s.project, SessionID: string(s.session), Task: s.fence.TaskID},
+	})
+	if err != nil {
+		return nil, err
+	}
+	m := res.Manifest
+	return jsonResult(map[string]any{
+		"checkpoint_id": m.ID,
+		"harness":       m.Harness,
+		"session_id":    m.SessionID,
+		"path":          res.Path,
+		"skipped":       res.Skipped,
+		"resume":        "conductor checkpoint resume " + checkpoint.ShortID(m.ID) + "  (add --account <name> for another login, --harness <claude|codex|opencode> for another agent)",
+		"privacy":       "stored on this machine only; nothing was sent to the team",
+	}), nil
 }

@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/adamburan/conductor/internal/checkpoint"
 	"github.com/adamburan/conductor/internal/client"
 	"github.com/adamburan/conductor/internal/coord"
 	"github.com/adamburan/conductor/internal/domain"
@@ -887,6 +888,7 @@ func cmdWrap(ctx context.Context, args []string) error {
 	cmd.Env = append(os.Environ(),
 		"CONDUCTOR_SESSION_ID="+session.ID,
 		"CONDUCTOR_PROJECT="+ref,
+		"CONDUCTOR_HARNESS="+tool,
 	)
 
 	// Token usage. The harness writes its own usage log as it runs; this sidecar reads that
@@ -924,6 +926,17 @@ func cmdWrap(ctx context.Context, args []string) error {
 	}
 	if err := localstate.Save(rec); err != nil {
 		fmt.Fprintf(os.Stderr, "conductor: pause/resume unavailable for this session: %v\n", err)
+	}
+
+	// Portability. The sidecar checkpoints the conversation and the working tree every
+	// few minutes into ~/.conductor/checkpoints, so a usage limit, a dead machine, or a
+	// change of harness is a `conductor checkpoint resume` away. Local only; off with
+	// CONDUCTOR_CHECKPOINT=off.
+	var checkpointer *wrapCheckpointer
+	if !checkpoint.Disabled(os.Getenv) {
+		checkpointer = newWrapCheckpointer(tool, cwd, cmd.Process.Pid,
+			checkpoint.ConductorRef{Project: ref, SessionID: session.ID})
+		go checkpointer.run(heartbeatCtx, checkpoint.IntervalFromEnv(os.Getenv))
 	}
 
 	// SIGUSR1 pauses: SIGSTOP to the child only, so this sidecar keeps running and the shell
@@ -984,6 +997,9 @@ func cmdWrap(ctx context.Context, args []string) error {
 		keep := sig != syscall.SIGINT
 		if keep {
 			outcome.Store(outcomeKeep)
+			if checkpointer != nil {
+				checkpointer.final(checkpoint.ReasonSignal)
+			}
 			if err := localstate.KeepForResume(rec); err != nil {
 				fmt.Fprintf(os.Stderr, "conductor: could not save this session for resume: %v\n", err)
 			} else {
@@ -1035,6 +1051,16 @@ func cmdWrap(ctx context.Context, args []string) error {
 		_ = localstate.Remove(rec.ID)
 	}
 	stopHeartbeat()
+	if checkpointer != nil && outcome.Load() != outcomeKeep {
+		// The harness has finished writing its transcript: one last bundle, so the session
+		// is portable even if nothing changed in the last interval.
+		checkpointer.final(checkpoint.ReasonExit)
+	}
+	if checkpointer != nil {
+		if line := checkpointer.exitLine(); line != "" {
+			fmt.Fprintln(os.Stderr, line)
+		}
+	}
 	if collector != nil {
 		// The harness has finished writing; report the tail, on a context that survives Ctrl-C.
 		flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)

@@ -105,8 +105,8 @@ func TestHTTPSessionIsRequiredAfterInitialize(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Result.Tools) != 11 {
-		t.Errorf("tools/list returned %d tools, want 11", len(resp.Result.Tools))
+	if len(resp.Result.Tools) != 12 {
+		t.Errorf("tools/list returned %d tools, want 12", len(resp.Result.Tools))
 	}
 }
 

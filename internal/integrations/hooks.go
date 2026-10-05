@@ -21,8 +21,16 @@ var claudeHooks = []struct {
 }{
 	{"PreToolUse", "Edit|Write|MultiEdit|NotebookEdit", HookCommand + " pre-tool", 15},
 	{"SessionStart", "", HookCommand + " session-start", 15},
-	{"SessionEnd", "", HookCommand + " session-end", 10},
+	{"SessionEnd", "", HookCommand + " session-end", 30},
+	// Portability: a checkpoint after each turn (rate-limited and skipped when nothing
+	// changed) and one right before compaction, when the transcript is at its richest.
+	{"Stop", "", HookCommand + " checkpoint", 30},
+	{"PreCompact", "", HookCommand + " checkpoint", 30},
 }
+
+// optionalHookEvents are events older Claude Code builds do not have; their absence does
+// not make an integration "not installed".
+var optionalHookEvents = map[string]bool{"SessionEnd": true, "Stop": true, "PreCompact": true}
 
 // mergeClaudeHooks installs (or with remove, uninstalls) Conductor's hooks in a Claude Code
 // settings object, leaving every hook that is not ours exactly where it was.
@@ -92,8 +100,8 @@ func claudeHooksInstalled(settings map[string]any) bool {
 		return false
 	}
 	for _, h := range claudeHooks {
-		if h.Event == "SessionEnd" {
-			continue // optional: older Claude Code builds have no such event
+		if optionalHookEvents[h.Event] {
+			continue
 		}
 		found := false
 		for _, g := range toSlice(hooks[h.Event]) {
