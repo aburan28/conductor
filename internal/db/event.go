@@ -34,11 +34,11 @@ type eventSpec struct {
 // that describes a claim that did not commit would drive dashboards and integrations into a
 // state the ledger never had.
 //
-// Nothing consumes outbox_events yet. The planned consumer is a notifications relay
-// (outbound webhooks, Slack) that reads undelivered rows and sets delivered_at; the rows are
-// written now so it starts with history rather than from its install date. Until it ships,
-// retention (Store.Prune) bounds the table: delivered rows go after the event retention
-// window, undelivered rows after a longer cap.
+// The consumer of outbox_events is the notifications relay (internal/notify): it claims the
+// undelivered rows of projects that have a notification channel, sends them, and sets
+// delivered_at. Retention (Store.Prune) bounds the table: delivered rows go after the event
+// retention window, and undelivered rows — those of projects with no channel, which the relay
+// never claims — after a longer cap.
 func appendEvents(ctx context.Context, tx pgx.Tx, orgID, projectID, actor domain.ID, specs ...eventSpec) error {
 	for _, spec := range specs {
 		payload, dropped := privacy.SanitizeEventPayload(spec.payload)

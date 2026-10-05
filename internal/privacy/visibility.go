@@ -548,6 +548,8 @@ var EventPayloadAllowlist = map[string]bool{
 	"granted": true, "expired": true, "labels": true, "provider": true, "priority": true,
 	// Pull request lifecycle and released-territory notices.
 	"pull_request": true, "waiting_task_ref": true,
+	// The second task of a conflict edge (conflict.detected).
+	"with_task_ref": true,
 }
 
 // SanitizeEventPayload drops any key not on the allowlist. Returns the sanitized map and the

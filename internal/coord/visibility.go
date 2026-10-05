@@ -41,6 +41,9 @@ var (
 		"position": true, "queue_depth": true, "lane": true, "granted": true, "expired": true,
 		"visibility": true, "count": true, "priority": true, "expires_at": true,
 		"fencing_epoch": true, "dropped_keys": true,
+		// The other task of a conflict edge (conflict.detected): its ref, which the conflict
+		// radar already shows every member.
+		"with_task_ref": true,
 	}
 	// eventKeysSummary is what team_summary adds: the summary-level description of the work
 	// and its execution identity, as privacy.ProjectTask publishes for the task itself.

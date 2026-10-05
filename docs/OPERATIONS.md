@@ -52,7 +52,8 @@ unless they fail. A recovered panic is logged at Error with its stack.
 On SIGTERM or SIGINT, conductord:
 
 1. stops the scheduler, the GitHub poller and peer links, ends open event streams, and
-   cancels background webhook checks;
+   cancels background webhook checks; the notification relay sends nothing new and finishes
+   recording the requests already in flight (each bounded by a 10s timeout);
 2. stops accepting connections and lets in-flight requests finish;
 3. waits for all of that, then closes its database pool and exits.
 
@@ -119,9 +120,11 @@ table per pass, so a large backlog drains over several passes):
 aggregate (sequence numbers continue from it, and consumers detect a gap by them), and an
 event whose outbox row is still waiting for delivery inside the undelivered window.
 
-The outbox is written in the same transaction as every event, for a notifications relay
-(outbound webhooks, Slack) that will read undelivered rows and mark them delivered. Until it
-ships nothing delivers them, and the undelivered window is what bounds the table.
+The outbox is written in the same transaction as every event. The notification relay
+(`--notify-poll`, every 3s by default) claims the undelivered rows of projects that have a
+notification channel, sends them, and marks them delivered — including rows it gives up on
+after retries, so a dead endpoint does not hold events past their window. Rows of projects
+with no channel are never claimed; the undelivered window is what bounds them.
 
 ## HTTP limits
 
@@ -139,6 +142,39 @@ and is cleared once the body has been read. Event streams on one project share o
 poll per second, however many are open. A stream past the caps gets 503 with `Retry-After`; a
 webhook past the pool is acknowledged and its pull request is picked up by the next poll.
 
+## Outbound notifications
+
+Notification channels (README, "Notifications") make conductord send HTTP requests to URLs
+project maintainers choose, from inside your network. By default it reaches only public
+addresses over https: loopback, RFC 1918, link-local (including the cloud metadata address),
+CGNAT and other non-public ranges are refused on the address actually dialed, after DNS, and
+redirects are not followed. Requests go out directly, not through `HTTPS_PROXY`: allow
+outbound 443 from conductord to your chat provider, or name a proxy explicitly.
+
+**Through a proxy** (`--notify-proxy http://proxy.internal:3128`, or
+`CONDUCTOR_NOTIFY_PROXY`; http, https and socks5 proxies work) conductord connects only to the
+proxy, which may be on a private address. Because the address it dials is then the proxy's,
+it resolves each destination itself first and refuses it — without contacting the proxy, so
+no CONNECT to a private target is sent — if any address is not public. **Residual risk:** the
+proxy resolves the name again, and its answer can differ (another resolver, split-horizon DNS,
+or a record changed in between). If the proxy can reach your internal network, have it refuse
+private destinations too (Squid: `acl to_private dst 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+127.0.0.0/8 169.254.0.0/16 100.64.0.0/10` with `http_access deny to_private`).
+
+| Setting | Default | Flag |
+|---|---|---|
+| Relay poll interval (negative disables the relay) | 3s | `--notify-poll` |
+| Allow loopback and private destinations (a chat server on the LAN) | off | `--notify-allow-private-networks` |
+| Allow plain `http://` URLs (local testing) | off | `--notify-allow-http` |
+| Forward proxy for notification requests | none | `--notify-proxy` / `CONDUCTOR_NOTIFY_PROXY` |
+| Per-request timeout / channels sent to at once | 10s / 4 | |
+| Retries | backoff from 15s doubling to 1h; give up after 8 attempts or 24h | |
+
+Give every replica the same notification flags: the one that handles a request validates the
+URL, and whichever claims an event sends it. `conductor_notifications_total{kind,outcome}`
+counts sends (`delivered`, `retry`, `failed`, `expired`) and
+`conductor_notify_relay_errors_total` counts failed passes.
+
 ## Running more than one replica
 
 Several conductord processes may share one database behind a load balancer. What they
@@ -148,6 +184,9 @@ agree on lives in Postgres:
 - the scheduler's liveness heartbeat (outage recovery above), the last budget alert level
   per project, and which stalled attempts were announced, so neither a restart nor a second
   replica re-announces a budget crossing or a stall;
+- notification channels and which events each has been sent: the relay claims outbox rows
+  with `SKIP LOCKED`, so replicas split the backlog and each event goes to a channel once
+  (receivers should still deduplicate by event id: delivery is at least once);
 - the GitHub App's credentials, pending setup links, and the check run posted on each
   commit. Polling is gated by an advisory lock, so one replica polls at a time and another
   takes over when it dies. An app set up through one replica is served by all within 15s.
@@ -178,8 +217,8 @@ no app, and is not read after that; delete it once the import is logged.
 
 ## The secret key
 
-Secrets conductord keeps in Postgres — today, the GitHub App's private key, webhook secret
-and client secret — are sealed with AES-256-GCM under a 32-byte key that never goes into the
+Secrets conductord keeps in Postgres — the GitHub App's private key, webhook secret and
+client secret, and each notification channel's URL and signing secret — are sealed with AES-256-GCM under a 32-byte key that never goes into the
 database. A database dump, backup or restored copy is then useless for acting as the app
 without the key as well.
 
@@ -191,7 +230,8 @@ Where the key comes from, first match wins:
 3. `secret.key` in `CONDUCTOR_STATE_DIR`, else `~/.conductor/secret.key`.
 
 A key file that does not exist is created (0600, in a 0700 directory) the first time
-something is sealed, so a server that never sets up the GitHub App never creates one.
+something is sealed, so a server that never sets up the GitHub App or a notification channel
+never creates one.
 
 **Every replica must use the same key.** If a replica's key differs, it cannot unseal the
 stored app: it logs `the GitHub App's stored credentials cannot be unsealed`, naming the key
@@ -207,8 +247,9 @@ defeats the purpose.
 **If the key is lost**, the sealed credentials cannot be recovered, and nothing else is
 affected: tasks, leases, tokens and everything else are not sealed. Start conductord with a
 new key, then run `conductor github setup --replace` to create and install the app again (the
-old app can be deleted in GitHub's settings). The same applies when restoring a backup
-without its key.
+old app can be deleted in GitHub's settings), and re-add notification channels
+(`conductor notify remove` / `add`): until then each send fails with "cannot unseal", shown
+as the channel's last error. The same applies when restoring a backup without its key.
 
 **Rotating the key** is the same procedure: switch every replica to the new key, then run
 setup again. There is no in-place re-encryption.
