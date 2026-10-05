@@ -411,7 +411,7 @@ func checkpointResume(ctx context.Context, args []string) error {
 	force := fs.Bool("force", false, "restore over uncommitted changes and replace an installed transcript")
 	noWorkspace := fs.Bool("no-workspace", false, "leave the working tree alone; only the conversation is restored")
 	printOnly := fs.Bool("print", false, "prepare everything and print the launch command instead of running it")
-	wrap := fs.Bool("wrap", false, "launch through `conductor wrap`, so the session is registered and keeps checkpointing (default when the checkpoint came from a wrapped session)")
+	wrap := fs.Bool("wrap", false, "launch through 'conductor wrap', so the session is registered and keeps checkpointing (default when the checkpoint came from a wrapped session)")
 	noWrap := fs.Bool("no-wrap", false, "launch the harness directly")
 	asJSON := fs.Bool("json", false, "machine-readable output (implies --print)")
 	fs.Usage = func() {

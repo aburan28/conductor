@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/adamburan/conductor/internal/db"
@@ -191,6 +192,7 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request, p domain.Pr
 	if body.Name == "" {
 		body.Name = "cli"
 	}
+	body.Name = localLineage(r, body.Name)
 	token, err := s.store.CreateToken(r.Context(), p.ID, body.Name, body.TTL.Std())
 	if err != nil {
 		s.fail(w, r, err)
@@ -254,6 +256,7 @@ func (s *Server) resetToken(w http.ResponseWriter, r *http.Request, p domain.Pri
 	if body.Name == "" {
 		body.Name = "cli"
 	}
+	body.Name = localLineage(r, body.Name)
 	token, revoked, err := s.store.ResetTokens(r.Context(), p.ID, body.Name, body.TTL.Std())
 	if err != nil {
 		s.fail(w, r, err)
@@ -268,3 +271,14 @@ func (s *Server) resetToken(w http.ResponseWriter, r *http.Request, p domain.Pri
 
 // tokenTTLDefault bounds a human's credential when none is specified by the caller.
 const tokenTTLDefault = 90 * 24 * time.Hour
+
+// localLineage keeps a token minted by a local-sign-in token inside local sign-in: it is
+// named "local:…" too, so enhanced mode disables and revokes it along with its parent. A
+// local session must not be a way to mint a credential that outlives the decision to
+// require tokens.
+func localLineage(r *http.Request, name string) string {
+	if strings.HasPrefix(tokenName(r), db.LocalTokenPrefix) && !strings.HasPrefix(name, db.LocalTokenPrefix) {
+		return db.LocalTokenPrefix + name
+	}
+	return name
+}

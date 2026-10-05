@@ -344,11 +344,17 @@ MESH_PIDS="$MESH_PIDS $!"
   --peer-key "$MESH_CERTS/mesh-b/key.pem" --peer "mesh-a=https://127.0.0.1:$MESH_PORT" \
   >"$WORK/mesh-b.log" 2>&1 &
 MESH_PIDS="$MESH_PIDS $!"
-sleep 2
 
 MESH_A="https://127.0.0.1:$MESH_PORT"
-# The link table shows mesh-b as up, with the identity its certificate carries.
-PEERS=$(curl -sf --cacert "$MESH_CERTS/ca.pem" -H "Authorization: Bearer $ALICE_TOKEN" "$MESH_A/v1/peers")
+# The link table shows mesh-b as up, with the identity its certificate carries. Each daemon
+# probes once at start and then every 10s; the two start together, so the first probe can
+# land before the other one listens. Wait out one probe interval rather than sampling once.
+PEERS=""
+for _ in $(seq 1 30); do
+  PEERS=$(curl -sf --cacert "$MESH_CERTS/ca.pem" -H "Authorization: Bearer $ALICE_TOKEN" "$MESH_A/v1/peers" || true)
+  echo "$PEERS" | grep -q '"state": *"up"' && break
+  sleep 0.5
+done
 echo "$PEERS" | grep -q '"state": *"up"'     || fail "peer link did not come up: $PEERS"
 echo "$PEERS" | grep -q '"name": *"mesh-b"' || fail "peer did not report its mesh identity: $PEERS"
 

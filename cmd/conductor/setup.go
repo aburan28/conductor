@@ -5,9 +5,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/adamburan/conductor/internal/client"
 	"github.com/adamburan/conductor/internal/config"
@@ -126,7 +128,7 @@ func ensureManagedBlock(path string) error {
 func cmdLogin(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("login", flag.ExitOnError)
 	endpoint := fs.String("endpoint", "", "control plane URL")
-	token := fs.String("token", "", "bearer token from `conductord bootstrap`")
+	token := fs.String("token", "", "bearer token (not needed on the machine running conductord)")
 	project := fs.String("project", "", "default project id or slug")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -142,8 +144,25 @@ func cmdLogin(ctx context.Context, args []string) error {
 	if *project != "" {
 		creds.Project = *project
 	}
+	if *token == "" && isLoopbackEndpoint(creds.Endpoint) {
+		// Logging in on the machine that runs the control plane needs no token at all.
+		local := creds
+		local.Token = ""
+		saved, err := localSignInAndSave(local)
+		if err == nil {
+			fmt.Printf("Logged in as %s at %s\n", saved.Handle, saved.Endpoint)
+			if saved.Project != "" {
+				fmt.Printf("Default project: %s\n", saved.Project)
+			}
+			return nil
+		}
+		if creds.Token == "" {
+			return fmt.Errorf("local sign-in failed: %w\n(pass --token, from `conductord bootstrap` or a teammate's `conductor invite`)", err)
+		}
+		// Otherwise re-verify the token already saved, against the endpoint and project given.
+	}
 	if creds.Token == "" {
-		return errors.New("no token: pass --token (get one from `conductord bootstrap`)")
+		return errors.New("no token: pass --token (get one from `conductord bootstrap` or a teammate's `conductor invite`)")
 	}
 
 	saved, projects, err := connectAndSave(ctx, creds)
@@ -276,8 +295,31 @@ func cmdDashboard(args []string) error {
 		return err
 	}
 	creds := client.LoadCredentials()
+	// On this machine, in local security mode, the dashboard signs its owner in by itself:
+	// print the plain address, with no credential in it to leak.
+	if isLoopbackEndpoint(creds.Endpoint) && os.Getenv("CONDUCTOR_NO_LOCAL_LOGIN") == "" {
+		var st struct {
+			Available bool `json:"local_login_available"`
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := client.New(creds.Endpoint, "").Get(ctx, "/v1/local/status", &st)
+		cancel()
+		if err == nil && st.Available {
+			link := strings.TrimRight(creds.Endpoint, "/") + "/"
+			if creds.Project != "" || *project != "" {
+				link += "#project=" + url.QueryEscape(firstNonEmptyString(*project, creds.Project))
+			}
+			fmt.Println(link)
+			fmt.Fprintln(os.Stderr, "\nOpen it on this machine; you are signed in automatically.")
+			return nil
+		}
+	}
 	if creds.Token == "" {
-		return errors.New("not logged in: run `conductor login --token …`")
+		_, signed, err := mustClient()
+		if err != nil {
+			return err
+		}
+		creds = signed
 	}
 	ref, err := projectRef(*project, creds)
 	if err != nil {

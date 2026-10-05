@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/adamburan/conductor/internal/client"
 )
@@ -78,6 +79,8 @@ Execution
   conductor sessions list            saved, paused, and running sessions on this machine
   conductor sessions export          the project's whole session history, as JSON
   conductor backup push|pull|status  copy this machine's resume records to/from S3
+  conductor security [local|enhanced] sign in without a token on this machine, or require tokens everywhere
+  conductor github setup|link|status create the GitHub App, link a repo, see what it checks
   conductor checkpoint capture       snapshot a session: transcript + working tree, portable
   conductor checkpoint resume <id>   continue it here, under another login (--account), or in another harness
   conductor checkpoint list|export|push|pull  move checkpoints between machines, as a file or sealed via S3
@@ -132,6 +135,10 @@ func main() {
 		err = cmdBackup(ctx, args)
 	case "checkpoint":
 		err = cmdCheckpoint(ctx, args)
+	case "security":
+		err = cmdSecurity(ctx, args)
+	case "github":
+		err = cmdGitHub(ctx, args)
 	case "inbox":
 		err = cmdInbox(ctx, args)
 	case "check":
@@ -226,9 +233,41 @@ func emit(v any) error {
 func mustClient() (*client.Client, client.Credentials, error) {
 	api, creds := client.FromEnvironment()
 	if creds.Token == "" {
+		// On the machine running the control plane there is nothing to log in with: ask it
+		// for a token for its owner. Works only from loopback against a daemon in local
+		// security mode; otherwise fall through to the usual instruction.
+		if signed, err := localSignInAndSave(creds); err == nil {
+			return client.New(signed.Endpoint, signed.Token), signed, nil
+		} else if !errors.Is(err, errNotLocal) {
+			return nil, creds, fmt.Errorf("not logged in, and local sign-in failed: %w\n(run `conductor login --token …`)", err)
+		}
 		return nil, creds, errors.New("not logged in: run `conductor login --token …`")
 	}
 	return api, creds, nil
+}
+
+// errNotLocal means local sign-in was not attempted because the endpoint is not this machine.
+var errNotLocal = errors.New("endpoint is not on this machine")
+
+// localSignInAndSave obtains a token for the machine's owner from a local control plane and
+// saves it as this machine's login, exactly as `conductor login` would.
+func localSignInAndSave(creds client.Credentials) (client.Credentials, error) {
+	if !isLoopbackEndpoint(creds.Endpoint) || os.Getenv("CONDUCTOR_NO_LOCAL_LOGIN") != "" {
+		return creds, errNotLocal
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	session, err := client.LocalSignIn(ctx, creds.Endpoint, "cli")
+	if err != nil {
+		return creds, err
+	}
+	creds.Token = session.Token
+	saved, _, err := connectAndSave(ctx, creds)
+	if err != nil {
+		return creds, err
+	}
+	fmt.Fprintf(os.Stderr, "Signed in on this machine as %s (no token needed locally; `conductor security enhanced` turns this off).\n", saved.Handle)
+	return saved, nil
 }
 
 func projectRef(override string, creds client.Credentials) (string, error) {

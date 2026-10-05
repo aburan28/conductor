@@ -95,6 +95,8 @@ func (s *Server) routes() {
 	s.inspectRoutes(m)
 	s.mcpRoutes(m)
 	s.queueRoutes(m)
+	s.localRoutes(m)
+	s.githubRoutes(m)
 
 	// The mesh surface. /v1/peer/* is authenticated by the peer's mesh certificate (not a
 	// bearer token); /v1/peers is the same link table shown to project members.

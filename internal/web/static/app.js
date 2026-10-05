@@ -86,6 +86,14 @@ async function boot() {
     enter();
     return;
   }
+  if (!s.token) {
+    // On the machine running conductord, in local security mode, the owner is signed in
+    // without a token. Anywhere else the request is refused and the token form appears with
+    // the server's reason.
+    const local = await localSignIn();
+    if (local.token) return adoptToken(local.token);
+    if (!s.project) return showConnect(undefined, local.note);
+  }
   if (!s.token || !s.project) return showConnect();
   try {
     const who = await api.get('/v1/whoami');
@@ -97,14 +105,51 @@ async function boot() {
     if (mine) prefs.set('role', mine.role);
     enter();
   } catch (err) {
-    if (err.status === 401) showConnect('Your saved token was not accepted. Sign in again.');
-    else showConnect(err.message);
+    if (err.status === 401) {
+      // A locally issued token is revoked when the server switches to enhanced mode; if
+      // local sign-in is still allowed, just sign in again.
+      const local = await localSignIn();
+      if (local.token) return adoptToken(local.token);
+      showConnect('Your saved token was not accepted. Sign in again.', local.note);
+    } else showConnect(err.message);
   }
 }
 
-function showConnect(error) {
+// localSignIn asks this server for a token for its owner. It returns { token } or { note },
+// the server's explanation of why not, to show on the sign-in screen.
+async function localSignIn() {
+  try {
+    const out = await createApi({}).post('/v1/local/session', { client: 'dashboard' });
+    return { token: out.token };
+  } catch (err) {
+    return { note: err.status === 0 ? '' : err.message };
+  }
+}
+
+// adoptToken verifies a token and either enters the project (when the choice is obvious) or
+// hands it to the connect screen to pick one.
+async function adoptToken(token) {
+  prefs.set('token', token);
+  api = createApi({ token });
+  store.set({ token });
+  const s = store.get();
+  try {
+    const who = await api.get('/v1/whoami');
+    const projects = who.projects || [];
+    const want = s.project || (projects.length === 1 ? projects[0].slug : '');
+    const mine = projects.find(p => p.slug === want || p.id === want);
+    if (!mine) return showConnect(undefined, undefined, token);
+    prefs.set('project', mine.slug); prefs.set('handle', who.principal.handle); prefs.set('projects', projects); prefs.set('role', mine.role);
+    store.set({ project: mine.slug, handle: who.principal.handle, role: mine.role, projects });
+    enter();
+  } catch (err) {
+    showConnect(err.message);
+  }
+}
+
+function showConnect(error, note, token) {
   renderConnect(app, {
-    error,
+    error, note, token,
     onConnect: ({ token, project, handle, projects }) => {
       prefs.set('token', token); prefs.set('project', project); prefs.set('handle', handle); prefs.set('projects', projects);
       const mine = (projects || []).find(p => p.slug === project);

@@ -1833,6 +1833,15 @@ Do not solve privacy only with task-level rows; enforce visibility at serializat
 - CLI/session adapters: short-lived device/session token scoped to one user and project.
 - Runners: mTLS or workload identity with short-lived JWTs.
 - AWS deployment: IAM roles for service accounts and instance profiles where practical.
+- The machine's owner, on the machine running the control plane: local sign-in. The first
+  principal bootstrapped on a daemon is recorded as its owner (`server_settings`). In
+  `local` security mode, `POST /v1/local/session` mints an ordinary bearer token for that
+  owner. It does so only for a request from loopback, with a loopback Host header (DNS
+  rebinding), a JSON body (cross-site forms), a same-origin `Origin` when present, and no
+  sign of a reverse proxy: not `--behind-proxy`, no forwarding headers, not HTTP/1.0. No other endpoint gains ambient authentication. `enhanced` mode
+  disables it and revokes the tokens it issued. A loopback-only daemon defaults to `local`;
+  a reachable one defaults to `enhanced`. Tightening is open to any project admin, loosening
+  only to the owner, and `--security-mode` pins either.
 
 ### 25.2 Secrets
 

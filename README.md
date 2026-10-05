@@ -243,6 +243,44 @@ conductor dashboard                          # prints a ready-to-open link
 make down                                    # stop the control plane (make db-down also stops Postgres)
 ```
 
+### Signing in on your own machine needs no token
+
+Open `http://127.0.0.1:8080` and you are in. On the machine that runs `conductord`, its owner
+(whoever first ran `conductord bootstrap` there) is signed in automatically. The dashboard,
+the CLI, and the macOS app call `POST /v1/local/session` and get an ordinary token without
+anyone pasting one. Delete `~/.conductor/credentials` and the next `conductor` command signs
+itself back in.
+
+Only that one endpoint changed; every other request still needs a token. It answers only a
+request that:
+
+- arrives on loopback, from a daemon that is not behind a proxy;
+- names `localhost` or `127.0.0.1` as its Host, which defeats DNS rebinding;
+- sends a JSON body, which a cross-site form cannot;
+- if it carries a browser `Origin`, carries this same origin;
+- came through no proxy: forwarding headers (`X-Forwarded-For`, `Forwarded`, `Via`, …) or
+  HTTP/1.0, which is how a stock nginx talks to its upstream, refuse it.
+
+If you put a reverse proxy in front of a loopback-bound `conductord`, pass `--behind-proxy`
+(which turns local sign-in off) or run `conductor security enhanced`. Do the same before
+forwarding the port at the TCP level (`ssh -R`, `socat`, `kubectl port-forward`): such
+forwarders add no headers, so nothing distinguishes their traffic from local traffic.
+Loopback also cannot tell apart two OS users on one machine.
+
+A token issued by local sign-in works only while local sign-in is allowed. In enhanced
+mode it is rejected, revoked or not, and so is any token it was used to mint. That is what **enhanced
+security mode** is for:
+
+```bash
+conductor security               # which mode, who owns the machine
+conductor security enhanced      # tokens only, everywhere; revokes every token local sign-in issued
+conductor security local         # back to automatic sign-in (the owner only)
+```
+
+A daemon listening on loopback defaults to `local`; one reachable from a network defaults to
+`enhanced`. `conductord --security-mode` pins either. Any project admin can tighten the mode;
+only the owner can loosen it. The same switch is on the dashboard's Settings page.
+
 ### Manual, or on another repository
 
 ```bash
@@ -362,6 +400,8 @@ conductor sessions install-hook                          # capture every session
 conductor backup push | pull | status                    # copy this machine's resume records to/from S3
 conductor checkpoint capture --note "tests pass"         # snapshot a session: transcript + working tree, portable
 conductor checkpoint resume 9a474a --account work        # continue it under another login, or --harness codex
+conductor security [local|enhanced]                       # sign in without a token on this machine, or tokens only
+conductor github setup | link | status                    # a "Conductor" check on every pull request
 conductor integrate cursor                                # wire a coding tool to this project (MCP + hooks)
 conductor route T-42                                      # what would this route to, and why — before spending a token
 conductor dispatch T-42                                   # send work to a model by policy, through the queue
@@ -372,6 +412,55 @@ conductor queue                                           # the admission line w
 ```
 
 Every command takes `--json`.
+
+### Sharing with someone by text
+
+`conductor invite` makes one link: endpoint, project, and token, with the token in the URL
+fragment so it never reaches a server log. Text it; they run `conductor join "<link>"` or just
+open it in a browser. `conductor join` then offers to connect every coding tool on their
+machine in one step (`--integrate` / `--no-integrate` to decide in advance).
+
+A link to `127.0.0.1` only reaches you. When Tailscale is running, `conductor invite` prints
+the two commands that let someone in over your tailnet, and nothing else:
+
+```bash
+tailscale serve --bg 8080
+conductor invite brother --endpoint https://your-mac.tailnet.ts.net
+```
+
+Requests through the tailnet name are not local, so they need the token in the link; local
+sign-in stays yours.
+
+### GitHub: a check on every pull request
+
+Conductor knows which files every in-flight task holds. With its GitHub App installed, each
+pull request on a linked repository gets a **Conductor** check run. The check says whether the
+pull request changes files that other open work has reserved, or has already changed itself.
+It names the overlapping file, the task, and its owner. It never names the task's title,
+because anyone who can read the repository sees the check.
+
+```bash
+conductor github setup          # opens one page with one button: GitHub creates the app
+conductor github install        # pick the repositories
+conductor github link           # inside a checkout: this project is that repository (bootstrap does it too)
+conductor github status         # the app, where it is installed, what is linked
+conductor github check acme/widgets#12   # check one pull request now
+```
+
+The app is the machine owner's: only they can create it (`--replace` to swap it out), and only
+projects in their organization can be linked, so another tenant on a shared control plane can
+neither take the app over nor read a repository through it. In a check run, a private task
+appears as "a private task", and a public repository gets no task references or owners at
+all. A pull request's own task is excluded only for a branch in the repository itself, never
+a fork's. The app asks for read access to contents and pull requests and write access to checks only. It
+cannot push, merge, or change settings. Its credentials stay on the machine running
+`conductord` (`~/.conductor/github-app.json`, mode 0600), or come from
+`CONDUCTOR_GITHUB_APP_ID` / `CONDUCTOR_GITHUB_APP_PRIVATE_KEY(_FILE)` /
+`CONDUCTOR_GITHUB_WEBHOOK_SECRET`. A conductord that GitHub cannot reach, such as a laptop,
+polls open pull requests every two minutes (`--github-poll`). One started with a public
+`--public-url` receives signed webhooks at `/github/webhook`. The check is `neutral` when
+there is an overlap, so it informs a reviewer without blocking a merge unless branch
+protection requires it.
 
 ### Connecting your coding tool
 
@@ -691,6 +780,12 @@ Implemented and exercised by tests:
 - Machine-local pause/resume: `conductor pause` freezes every interactive agent session on
   the machine and `conductor resume` revives them — in place, or in freshly opened terminals
   on each harness's own conversation-resume invocation.
+- Token-free local sign-in for the machine's owner (dashboard, CLI, macOS app), guarded
+  against drive-by pages, DNS rebinding, and proxies, with an enhanced security mode that
+  requires tokens everywhere and revokes what local sign-in issued.
+- A GitHub App created in one click through GitHub's manifest flow. It posts a "Conductor"
+  check run on each pull request that overlaps reserved or in-flight work, by webhook or by
+  polling when GitHub cannot reach the daemon.
 - Session portability: `conductor checkpoint` bundles a session's native transcript, working
   tree, and a harness-neutral continuation into one file — taken periodically by `conductor
   wrap`, by Claude Code and OpenCode hooks, at shutdown, and on an agent's own `coord_checkpoint`
@@ -727,6 +822,10 @@ Implemented and exercised by tests:
   integration guide.
 
 Not built, and where the design says it goes:
+
+- **The macOS app.** Planned in [docs/MACOS_APP.md](docs/MACOS_APP.md): a menu bar app that
+  runs the daemon and a private Postgres for you, signs you in automatically, and shares
+  invites through Messages.
 
 - **Planner and reviewer services** (§14, §15.3). The contracts, validation rules, and
   `reviewer.*` routing are in place; nothing yet invokes a model to decompose an objective or
