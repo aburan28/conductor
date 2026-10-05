@@ -506,9 +506,9 @@ protocol revisions `2024-11-05` through `2025-06-18`, with per-session ids and t
 auth every other client uses — the gateway holds no private path into the store, over either
 transport.
 
-Twelve tools: `conductor_check_conflicts`, `coord_start_work`, `coord_get_work`,
+Thirteen tools: `conductor_check_conflicts`, `coord_start_work`, `coord_get_work`,
 `coord_expand_scope`, `coord_report_progress`, `coord_publish_result`, `coord_finish_work`,
-`coord_handoff`, `coord_delegate`, `coord_capabilities`, `coord_checkpoint`,
+`coord_handoff`, `coord_delegate`, `coord_capabilities`, `coord_checkpoint`, `coord_quota`,
 `coord_project_status`. Heartbeats are
 deliberately *not* an MCP tool — a model should never spend tokens telling the server it is
 still alive. And where a harness supports pre-edit hooks, `conductor integrate` installs
@@ -699,6 +699,32 @@ works only in the stdio gateway, on the session's own machine; the HTTP gateway,
 in the control plane, refuses it. [docs/PORTABILITY.md](docs/PORTABILITY.md) has the bundle
 format and the per-harness mechanics.
 
+### Usage limits: warned before a login runs out
+
+```
+conductor quota                          # every login × tool × window: used, resets in, source
+conductor quota statusline install       # record Claude Code's documented 5h / weekly limits
+conductor quota suggest                  # the resume command for the login with the most room
+```
+
+Subscription logins — Claude Pro/Max, a ChatGPT plan in Codex, a Cursor plan — stop the session
+when a rolling window runs out. Conductor reads what each tool exposes about those windows on
+your machine: Claude Code's status line payload (a documented `rate_limits` object, recorded by
+a shim that chains to your own status line so nothing visible changes) and its "limit reached ·
+resets …" transcript records; the `rate_limits` Codex writes into every rollout; and, only if
+you hand it your session cookie, Cursor's undocumented usage-summary endpoint. Logins are named
+by their state directory (`~/.claude-work` is `work`), never by email or token.
+
+At 80% (warn) and 95% (critical) — `CONDUCTOR_QUOTA_WARN` / `_CRITICAL`, or `quota:` in
+`.conductor/project.yaml` — the `conductor wrap` sidecar raises the level once per window: a
+desktop notification, a `quota.warning` / `quota.exhausted` event, and at critical an immediate
+checkpoint plus the exact `conductor checkpoint resume … --account / --harness …` command for
+the login or tool with the most headroom. Agents can check their own headroom with
+`coord_quota`. Readings are visible only to their owner; teammates see how many of the team's
+logins are near their limit, nothing more. `CONDUCTOR_QUOTA=off` disables it all.
+[docs/USAGE_LIMITS.md](docs/USAGE_LIMITS.md) has every source, its classification, and the
+research behind it.
+
 **VS Code:** integrated terminals are ordinary ptys, so pausing and in-place resume already
 work there. Reopening a *closed* session into VS Code needs the companion extension in
 [`integrations/vscode`](integrations/vscode) — VS Code offers no command-line way to open an
@@ -808,7 +834,7 @@ Implemented and exercised by tests:
   Windsurf, VS Code, Zed, Gemini CLI): MCP config plus, where supported, pre-edit hooks that
   run the conflict check before every edit and block on a hard conflict.
 - MCP over Streamable HTTP served by `conductord` itself, so an HTTP-capable client connects
-  with a bearer token and no local binary — the same twelve tools as the stdio gateway
+  with a bearer token and no local binary — the same thirteen tools as the stdio gateway
   (all but `coord_checkpoint`, which only the stdio gateway can honour, since it runs on
   the harness's own machine).
 - Repository dispatch policy: named lanes, ordered model ladders, `when`-gated candidates, and

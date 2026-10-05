@@ -281,6 +281,7 @@ func cmdDoctor(ctx context.Context, args []string) error {
 	if len(absent) > 0 {
 		fmt.Printf("  %-11s %s\n", "not found", strings.Join(absent, ", "))
 	}
+	printQuotaDoctor(ctx)
 	return nil
 }
 

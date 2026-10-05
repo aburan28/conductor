@@ -162,7 +162,7 @@ const (
 
 // ReadCodex returns the latest reading of every window of the login in codexHome.
 func ReadCodex(codexHome, account string, now time.Time) []Snapshot {
-	files := codexRecentRollouts(filepath.Join(codexHome, "sessions"), now.Add(-codexMaxAge))
+	files := codexRecentRollouts(filepath.Join(codexHome, "sessions"), now)
 	var all []Snapshot
 	for _, path := range files {
 		all = append(all, readTail(path, func(r io.Reader) []Snapshot { return CodexSnapshots(r, account) })...)
@@ -173,24 +173,32 @@ func ReadCodex(codexHome, account string, now time.Time) []Snapshot {
 	return Latest(all)
 }
 
-func codexRecentRollouts(root string, since time.Time) []string {
+// codexRecentRollouts lists the newest rollouts under the day directories Codex files them in
+// (sessions/YYYY/MM/DD), opening only the last codexMaxAge of days so a long history is never
+// walked on every sidecar tick. A rollout resumed from an older day is still read while its
+// day is in range; beyond that its window has long since reset anyway.
+func codexRecentRollouts(root string, now time.Time) []string {
+	since := now.Add(-codexMaxAge)
 	type file struct {
 		path string
 		mod  time.Time
 	}
 	var files []file
-	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	for day := since.UTC().Truncate(24 * time.Hour); !day.After(now.UTC().Add(24 * time.Hour)); day = day.Add(24 * time.Hour) {
+		dir := filepath.Join(root, day.Format("2006"), day.Format("01"), day.Format("02"))
+		entries, err := os.ReadDir(dir)
 		if err != nil {
-			return nil // unreadable or missing: no reading, not an error
+			continue // a day with no sessions, or no Codex at all: no reading, not an error
 		}
-		if d.IsDir() || !strings.HasPrefix(d.Name(), "rollout-") || !strings.HasSuffix(d.Name(), ".jsonl") {
-			return nil
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasPrefix(e.Name(), "rollout-") || !strings.HasSuffix(e.Name(), ".jsonl") {
+				continue
+			}
+			if info, err := e.Info(); err == nil && !info.ModTime().Before(since) {
+				files = append(files, file{filepath.Join(dir, e.Name()), info.ModTime()})
+			}
 		}
-		if info, err := d.Info(); err == nil && !info.ModTime().Before(since) {
-			files = append(files, file{path, info.ModTime()})
-		}
-		return nil
-	})
+	}
 	sort.Slice(files, func(i, j int) bool { return files[i].mod.After(files[j].mod) })
 	if len(files) > codexMaxFiles {
 		files = files[:codexMaxFiles]

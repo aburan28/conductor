@@ -623,3 +623,42 @@ func TestCollectAsksCursorOnlyWhenOptedInAndCaches(t *testing.T) {
 		t.Error("SkipNetwork still called out")
 	}
 }
+
+func TestCursorFailureIsReportedNotFatal(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CONDUCTOR_STATE_DIR", filepath.Join(home, ".conductor"))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"renamed":{"everything":true}}`)) // the endpoint changed shape
+	}))
+	defer srv.Close()
+	now := mustTime(t, "2026-10-05T10:00:00Z")
+	opts := Options{
+		Getenv: func(k string) string {
+			if k == "CONDUCTOR_QUOTA_CURSOR_COOKIE" {
+				return "c"
+			}
+			return ""
+		},
+		Now: func() time.Time { return now }, Home: home, Machine: "box",
+		HTTPClient: srv.Client(), CursorURL: srv.URL,
+	}
+	cursorStatus := func(res Result) CollectorStatus {
+		for _, c := range res.Collectors {
+			if c.Name == "cursor-usage-summary" {
+				return c
+			}
+		}
+		t.Fatal("no cursor collector status")
+		return CollectorStatus{}
+	}
+	res := Collect(context.Background(), opts)
+	if st := cursorStatus(res); !st.Enabled || !strings.Contains(st.Error, "unrecognised") || len(res.Snapshots) != 0 {
+		t.Errorf("status = %+v, snapshots = %+v", st, res.Snapshots)
+	}
+	// A pass that stays on the machine still says why Cursor has no reading.
+	opts.SkipNetwork = true
+	if st := cursorStatus(Collect(context.Background(), opts)); !strings.Contains(st.Error, "unrecognised") {
+		t.Errorf("offline status lost the last error: %+v", st)
+	}
+}

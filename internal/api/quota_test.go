@@ -74,7 +74,7 @@ func TestQuotaIsVisibleOnlyToItsOwner(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("own quota = %d", code)
 	}
-	var mine QuotaView
+	var mine quota.View
 	if err := json.Unmarshal(body, &mine); err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestQuotaIsVisibleOnlyToItsOwner(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("team quota = %d %s", code, body)
 	}
-	var team TeamQuota
+	var team quota.TeamView
 	if err := json.Unmarshal(body, &team); err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestQuotaEventsAreRaisedOncePerWindowPerLevel(t *testing.T) {
 
 	// The stored reading is the newest one, not the late one.
 	_, body := h.do(h.aliceTok, http.MethodGet, "/v1/quota", nil)
-	var view QuotaView
+	var view quota.View
 	_ = json.Unmarshal(body, &view)
 	if len(view.Snapshots) != 1 || *view.Snapshots[0].UsedPercent != 81 {
 		t.Errorf("stored = %+v", view.Snapshots)

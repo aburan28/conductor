@@ -119,6 +119,7 @@ func cmdStatus(ctx context.Context, args []string) error {
 			printPresence(p)
 		}
 	}
+	printQuotaStatus(ctx, api, ref)
 	return nil
 }
 
@@ -938,6 +939,7 @@ func cmdWrap(ctx context.Context, args []string) error {
 			checkpoint.ConductorRef{Project: ref, SessionID: session.ID})
 		go checkpointer.run(heartbeatCtx, checkpoint.IntervalFromEnv(os.Getenv))
 	}
+	startQuotaWatch(heartbeatCtx, api, ref, session.ID, tool, cwd, cmd.Process.Pid)
 
 	// SIGUSR1 pauses: SIGSTOP to the child only, so this sidecar keeps running and the shell
 	// never reclaims the terminal — which is what lets SIGCONT later hand the keyboard

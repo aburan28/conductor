@@ -105,8 +105,9 @@ func TestHTTPSessionIsRequiredAfterInitialize(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Result.Tools) != 12 {
-		t.Errorf("tools/list returned %d tools, want 12", len(resp.Result.Tools))
+	// Over HTTP the session lists the whole tool set; its size is TestToolListIsSmallAndDocumented's concern.
+	if want := len(toolDefinitions()); len(resp.Result.Tools) != want {
+		t.Errorf("tools/list returned %d tools, want %d", len(resp.Result.Tools), want)
 	}
 }
 

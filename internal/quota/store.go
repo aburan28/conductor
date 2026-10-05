@@ -48,8 +48,7 @@ func snapshotFile(dir string, s Snapshot) string {
 	return filepath.Join(dir, "snapshots", hex.EncodeToString(sum[:12])+".json")
 }
 
-// Save records readings, each replacing the previous reading of its window unless that one
-// is newer.
+// Save records readings, each replacing the previous reading of its window when it is newer.
 func Save(snaps []Snapshot) error {
 	dir, err := Dir()
 	if err != nil {
@@ -60,7 +59,9 @@ func Save(snaps []Snapshot) error {
 	}
 	for _, s := range snaps {
 		path := snapshotFile(dir, s)
-		if prev, ok := readSnapshot(path); ok && prev.ObservedAt.After(s.ObservedAt) {
+		// An older reading never replaces a newer one, and the same reading is not rewritten
+		// on every sidecar tick.
+		if prev, ok := readSnapshot(path); ok && !s.ObservedAt.After(prev.ObservedAt) {
 			continue
 		}
 		body, err := json.Marshal(storedSnapshot{Snapshot: s, StateDir: s.StateDir})

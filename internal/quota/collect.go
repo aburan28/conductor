@@ -49,6 +49,7 @@ type CollectorStatus struct {
 	Name     string     `json:"name"`
 	Harness  string     `json:"harness"`
 	Kind     SourceKind `json:"source_kind"`
+	Account  string     `json:"account,omitempty"`
 	Enabled  bool       `json:"enabled"`
 	Readings int        `json:"readings"`
 	Newest   *time.Time `json:"newest,omitempty"`
@@ -105,43 +106,56 @@ func Collect(ctx context.Context, opts Options) Result {
 	for _, dir := range AccountDirs("codex", o.Home, o.Getenv) {
 		dir := dir
 		run(CollectorStatus{Name: "codex-rollout", Harness: "codex", Kind: KindLocalFile, Enabled: true,
-			Note: AccountLabel("codex", dir, o.Home)}, func() ([]Snapshot, error) {
+			Account: AccountLabel("codex", dir, o.Home)}, func() ([]Snapshot, error) {
 			return ReadCodex(dir, AccountLabel("codex", dir, o.Home), now), nil
 		})
 	}
 	for _, dir := range AccountDirs("claude", o.Home, o.Getenv) {
 		dir := dir
 		run(CollectorStatus{Name: "claude-transcript", Harness: "claude", Kind: KindLocalFile, Enabled: true,
-			Note: AccountLabel("claude", dir, o.Home)}, func() ([]Snapshot, error) {
+			Account: AccountLabel("claude", dir, o.Home)}, func() ([]Snapshot, error) {
 			return ReadClaudeTranscripts(dir, AccountLabel("claude", dir, o.Home), now), nil
 		})
 	}
 
 	stored := Load(now)
 	cursor := CollectorStatus{Name: "cursor-usage-summary", Harness: "cursor", Kind: KindUndocumented}
-	if cookie := CursorCookie(o.Getenv); cookie != "" && !o.SkipNetwork {
-		cursor.Enabled = true
-		account := strings.TrimSpace(o.Getenv("CONDUCTOR_QUOTA_CURSOR_ACCOUNT"))
-		if account == "" {
-			account = "default"
-		}
-		due := true
-		for _, s := range stored {
-			if s.Harness == "cursor" && s.Account == account && s.Machine == o.Machine && now.Sub(s.ObservedAt) < cursorRefresh {
-				due = false
-			}
-		}
-		if due {
-			run(cursor, func() ([]Snapshot, error) {
-				return FetchCursor(ctx, o.HTTPClient, o.CursorURL, cookie, account, now)
-			})
-		} else {
-			cursor.Note = "cached; asked at most every " + cursorRefresh.String()
-			res.Collectors = append(res.Collectors, cursor)
-		}
-	} else {
+	switch cookie := CursorCookie(o.Getenv); {
+	case cookie == "":
 		cursor.Note = "opt-in: set CONDUCTOR_QUOTA_CURSOR_COOKIE (undocumented endpoint)"
 		res.Collectors = append(res.Collectors, cursor)
+	default:
+		cursor.Enabled = true
+		cursor.Account = strings.TrimSpace(o.Getenv("CONDUCTOR_QUOTA_CURSOR_ACCOUNT"))
+		if cursor.Account == "" {
+			cursor.Account = "default"
+		}
+		due := !o.SkipNetwork
+		for _, s := range stored {
+			if s.Harness == "cursor" && s.Account == cursor.Account && s.Machine == o.Machine {
+				cursor.Readings++
+				if t := s.ObservedAt; cursor.Newest == nil || t.After(*cursor.Newest) {
+					cursor.Newest = &t
+				}
+				if now.Sub(s.ObservedAt) < cursorRefresh {
+					due = false
+				}
+			}
+		}
+		if !due {
+			// Not asked this pass (cached, or a pass that stays on the machine): report the
+			// outcome of the last ask, so a vanished endpoint shows up in `conductor doctor`.
+			cursor.Error = lastCursorError()
+			res.Collectors = append(res.Collectors, cursor)
+			break
+		}
+		cursor.Readings, cursor.Newest = 0, nil
+		account := cursor.Account
+		run(cursor, func() ([]Snapshot, error) {
+			snaps, err := FetchCursor(ctx, o.HTTPClient, o.CursorURL, cookie, account, now)
+			recordCursorError(err)
+			return snaps, err
+		})
 	}
 
 	for i := range fresh {
@@ -233,4 +247,33 @@ func AccountDirs(harness, home string, getenv func(string) string) []string {
 		}
 	}
 	return out
+}
+
+// The outcome of the last Cursor ask is kept beside the store, so a pass that does not ask
+// can still say the endpoint is failing.
+func recordCursorError(err error) {
+	dir, derr := Dir()
+	if derr != nil {
+		return
+	}
+	path := filepath.Join(dir, "cursor-error")
+	if err == nil {
+		_ = os.Remove(path)
+		return
+	}
+	if os.MkdirAll(dir, 0o700) == nil {
+		_ = writeAtomic(path, []byte(err.Error()))
+	}
+}
+
+func lastCursorError() string {
+	dir, err := Dir()
+	if err != nil {
+		return ""
+	}
+	body, err := os.ReadFile(filepath.Join(dir, "cursor-error"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(body))
 }

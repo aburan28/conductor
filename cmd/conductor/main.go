@@ -45,6 +45,7 @@ Coordination
   conductor budget                   the team's token budget for this window
   conductor usage                    tokens and cost over time, by day, harness, model, or person
   conductor usage sync               report this machine's unwrapped sessions
+  conductor quota                    how close each subscription login is to its usage limit
   conductor budget share <who> <n>   give a teammate part of your allowance
 
 Work
@@ -149,6 +150,8 @@ func main() {
 		err = cmdBudget(ctx, args)
 	case "usage":
 		err = cmdUsage(ctx, args)
+	case "quota":
+		err = cmdQuota(ctx, args)
 	case "task":
 		err = cmdTask(ctx, args)
 	case "scope":

@@ -267,6 +267,7 @@ Flags:
 	}
 	printBuckets(buckets)
 	fmt.Printf("\nReported %d hourly bucket(s) since %s to %s.\n", out.Recorded, from.Local().Format("2006-01-02 15:04"), ref)
+	reportLocalQuota(ctx, api, ref)
 	return nil
 }
 

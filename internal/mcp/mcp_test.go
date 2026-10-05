@@ -83,8 +83,10 @@ func call(t *testing.T, s *Server, tool string, args map[string]any) (string, bo
 func TestToolListIsSmallAndDocumented(t *testing.T) {
 	tools := toolDefinitions()
 
-	// DESIGN.md §4.9: too many tools waste context and make selection less reliable.
-	if len(tools) > 12 {
+	// DESIGN.md §4.9: too many tools waste context and make selection less reliable. The
+	// ceiling moved from twelve to thirteen for coord_quota, the one read an agent needs to
+	// checkpoint before a usage limit cuts it off (docs/USAGE_LIMITS.md).
+	if len(tools) > 13 {
 		t.Errorf("%d tools exposed; the design calls for a minimal surface", len(tools))
 	}
 

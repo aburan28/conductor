@@ -111,32 +111,14 @@ func (s *Server) recordQuota(w http.ResponseWriter, r *http.Request, p domain.Pr
 	s.ok(w, r, http.StatusOK, report)
 }
 
-// QuotaRow is one reading as its owner sees it, with the level it stands at now.
-type QuotaRow struct {
-	quota.Snapshot
-	Level quota.Level `json:"level"`
-}
-
-// QuotaView is the owner's view of their logins.
-type QuotaView struct {
-	Thresholds quota.Thresholds `json:"thresholds"`
-	Snapshots  []QuotaRow       `json:"snapshots"`
-	Logins     []quota.Login    `json:"logins"`
-}
-
-func (s *Server) quotaView(r *http.Request, p domain.Principal) (QuotaView, error) {
+func (s *Server) quotaView(r *http.Request, p domain.Principal) (quota.View, error) {
 	snaps, err := s.store.ListQuota(r.Context(), p.ID)
 	if err != nil {
-		return QuotaView{}, err
+		return quota.View{}, err
 	}
-	now := time.Now().UTC()
-	th := quota.DefaultThresholds
-	view := QuotaView{Thresholds: th, Snapshots: make([]QuotaRow, 0, len(snaps))}
-	for _, q := range snaps {
-		view.Snapshots = append(view.Snapshots, QuotaRow{Snapshot: q, Level: th.Level(q, now)})
-	}
-	view.Logins = quota.Logins(snaps, th, now)
-	return view, nil
+	// The server does not know each person's thresholds; the defaults classify here, and
+	// the CLI reclassifies with the owner's own.
+	return quota.NewView(snaps, quota.DefaultThresholds, time.Now().UTC()), nil
 }
 
 // getQuota returns the caller's own readings, from every machine they reported from. There
@@ -148,17 +130,6 @@ func (s *Server) getQuota(w http.ResponseWriter, r *http.Request, p domain.Princ
 		return
 	}
 	s.ok(w, r, http.StatusOK, view)
-}
-
-// TeamQuota is everything a project member learns about other people's logins: counts.
-type TeamQuota struct {
-	Project     string `json:"project"`
-	WindowHours int    `json:"window_hours"`
-	Logins      int    `json:"logins"`     // logins of project members reported recently
-	NearLimit   int    `json:"near_limit"` // at or above the warning threshold, exhausted included
-	Exhausted   int    `json:"exhausted"`
-	// Mine is the caller's own view, so one request serves the dashboard card.
-	Mine QuotaView `json:"mine"`
 }
 
 // teamQuotaWindow is how recent a reading must be to count: a day covers anyone who worked
@@ -187,7 +158,7 @@ func (s *Server) getProjectQuota(w http.ResponseWriter, r *http.Request, p domai
 			worst[row.Login] = lvl
 		}
 	}
-	out := TeamQuota{Project: project.Slug, WindowHours: int(teamQuotaWindow / time.Hour), Logins: len(worst)}
+	out := quota.TeamView{Project: project.Slug, WindowHours: int(teamQuotaWindow / time.Hour), Logins: len(worst)}
 	for _, lvl := range worst {
 		if lvl.Rank() >= quota.LevelWarning.Rank() {
 			out.NearLimit++

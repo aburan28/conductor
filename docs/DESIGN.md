@@ -2067,6 +2067,13 @@ the HTTP gateway refuses it. A checkpoint leaves the machine only as a file the 
 or sealed (AES-256-GCM under a passphrase) in the user's own bucket — `conductor checkpoint
 push` refuses plaintext. `docs/PORTABILITY.md` has the format and per-harness mechanics.
 
+Usage limits are what most often strand a session, so the sidecar also watches them
+(`docs/USAGE_LIMITS.md`): it reads each subscription login's rolling-window state from what
+the tool exposes locally, reports it under the principal's own name (`quota_snapshots`, read
+back only by that principal; project members see counts), raises `quota.warning` /
+`quota.exhausted` once per window per level, and at the critical threshold takes a checkpoint
+at once and prints the resume command for the login or harness with the most headroom.
+
 ---
 
 ## 28. Deployment design

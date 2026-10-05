@@ -158,7 +158,8 @@ export CONDUCTOR_QUOTA_CURSOR_COOKIE='<WorkosCursorSessionToken value from curso
 
 With either present, `conductor quota` and the wrap sidecar ask
 `cursor.com/api/usage-summary` at most once every five minutes, with a five-second timeout,
-and record the plan's `totalPercentUsed` against the billing cycle. Every Cursor reading is
+and record the plan's `totalPercentUsed` against the billing cycle, under the login label
+`CONDUCTOR_QUOTA_CURSOR_ACCOUNT` (default `default`). Every Cursor reading is
 labelled `undocumented` in the CLI, the API and the dashboard. If the endpoint moves or
 changes shape the collector reports nothing and says why in `conductor doctor`. Tests use
 a local fixture server; nothing in the test suite calls Cursor.
@@ -236,8 +237,8 @@ things act on them:
 
   ```
   Conductor: claude login "default" is at 96% of its 5h window (resets 15:40).
-  Checkpoint 9a474a saved. Continue on the login with the most headroom:
-    conductor checkpoint resume 9a474a --account work        # claude "work": 12% used
+    Checkpoint 9a474a saved. Continue on claude "work" (12% used):
+      conductor checkpoint resume 9a474a --account work
   ```
 
   Headroom is 100 minus the highest window of a login. The same tool on another account is
