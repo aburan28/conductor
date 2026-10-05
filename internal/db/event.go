@@ -98,7 +98,10 @@ func insertEventWithSequence(
 				 WHERE aggregate_type = $1 AND aggregate_id = $2::uuid
 				 ORDER BY sequence_number DESC LIMIT 1`,
 				spec.aggregateType, spec.aggregateID); err == nil {
-				return sp.Commit(ctx)
+				if err = sp.Commit(ctx); err == nil {
+					eventsWritten.Inc(spec.eventType)
+				}
+				return err
 			}
 		}
 		_ = sp.Rollback(ctx)
