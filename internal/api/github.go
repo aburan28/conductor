@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -23,6 +24,7 @@ import (
 	"github.com/adamburan/conductor/internal/db"
 	"github.com/adamburan/conductor/internal/domain"
 	"github.com/adamburan/conductor/internal/githubapp"
+	"github.com/adamburan/conductor/internal/metrics"
 )
 
 // The GitHub App integration.
@@ -49,10 +51,16 @@ import (
 //     never carries a task title or summary. Private tasks appear as "a private task", a
 //     public repository gets no names at all, and a file another attempt has already changed
 //     is attributed only for tasks shared at team_artifacts or above.
+//
+// Replicas: everything the integration must agree on lives in Postgres — the app's
+// credentials, pending setups (GitHub's callback can land on any replica), and which check
+// run was posted on which commit with what result. Polling is gated by an advisory lock, so
+// one replica polls at a time and another takes over if it dies.
 
 // GitHubOptions configures the integration.
 type GitHubOptions struct {
-	// CredentialsPath is where the app's credentials are kept (0600).
+	// CredentialsPath is the credentials file conductord used before the app moved into the
+	// database. An app found there is imported once, when no app is stored yet.
 	CredentialsPath string
 	// API and Web override api.github.com and github.com (GitHub Enterprise, tests).
 	API, Web string
@@ -74,23 +82,29 @@ type GitHub struct {
 	logger *slog.Logger
 	kick   chan struct{}
 
-	mu       sync.Mutex
-	client   *githubapp.Client
-	setups   map[string]*githubSetup
-	posted   map[string]string // owner/repo@sha → fingerprint of the last check posted
-	lastPoll time.Time
-	lastErr  string
+	mu     sync.Mutex
+	client *githubapp.Client
+	loaded string // fingerprint of the credentials client was built from
+	synced time.Time
+	// file is the legacy credentials file's content, imported into the database once.
+	file      githubapp.Credentials
+	fileFound bool
+	holder    string
 }
 
-type githubSetup struct {
-	org, name string
-	by        domain.ID
-	expires   time.Time
-	used      bool
-}
+// credsRefresh bounds how long a replica keeps serving an app another replica has replaced.
+const credsRefresh = 15 * time.Second
 
-// NewGitHub loads any saved credentials. A missing file is not an error: the integration
-// then serves only its setup flow. A file that exists but cannot sign is reported.
+// pollerLock names the advisory lock that makes one replica the poller.
+const pollerLock = "conductor/github-poller"
+
+var githubPolls = metrics.Default.NewCounter("conductor_github_polls_total",
+	"GitHub pull request polls, by outcome (ok, error, skipped: another replica polled or holds the poller).", "outcome")
+
+// NewGitHub reads the legacy credentials file and the environment. Until the store is
+// attached (Refresh), that is the app it serves; from then on, the database's. A missing
+// file is not an error: the integration then serves only its setup flow. A file that exists
+// but cannot sign is reported.
 func NewGitHub(opts GitHubOptions) (*GitHub, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
@@ -98,20 +112,105 @@ func NewGitHub(opts GitHubOptions) (*GitHub, error) {
 	if opts.Getenv == nil {
 		opts.Getenv = os.Getenv
 	}
+	host, _ := os.Hostname()
 	g := &GitHub{opts: opts, logger: opts.Logger, kick: make(chan struct{}, 1),
-		setups: map[string]*githubSetup{}, posted: map[string]string{}}
-	creds, ok, err := githubapp.Load(opts.CredentialsPath, opts.Getenv)
+		holder: host + ":" + strconv.Itoa(os.Getpid())}
+	file, found, err := githubapp.LoadFile(opts.CredentialsPath)
 	if err != nil {
 		return g, err
 	}
-	if ok {
-		c, err := githubapp.New(opts.API, creds)
-		if err != nil {
-			return g, err
-		}
-		g.client = c
+	g.file, g.fileFound = file, found
+	creds, ok, err := githubapp.Overlay(file, opts.Getenv)
+	if err != nil {
+		return g, err
 	}
-	return g, nil
+	return g, g.use(creds, ok)
+}
+
+// use makes creds the app this integration acts as.
+func (g *GitHub) use(creds githubapp.Credentials, ok bool) error {
+	sum := ""
+	if ok {
+		data, _ := json.Marshal(creds)
+		h := sha256.Sum256(data)
+		sum = hex.EncodeToString(h[:])
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if sum == g.loaded {
+		return nil
+	}
+	if !ok {
+		g.client, g.loaded = nil, ""
+		return nil
+	}
+	c, err := githubapp.New(g.opts.API, creds)
+	if err != nil {
+		return err
+	}
+	g.client, g.loaded = c, sum
+	return nil
+}
+
+// Refresh loads the app from the database, importing the legacy file first if the database
+// has none, then applies the environment's overrides. conductord calls it once at startup;
+// afterwards the integration refreshes itself at most every credsRefresh, so a replica picks
+// up an app another replica set up.
+func (g *GitHub) Refresh(ctx context.Context) error { return g.sync(ctx, true) }
+
+func (g *GitHub) sync(ctx context.Context, force bool) error {
+	if g.store == nil {
+		return nil
+	}
+	g.mu.Lock()
+	if !force && time.Since(g.synced) < credsRefresh {
+		g.mu.Unlock()
+		return nil
+	}
+	g.synced = time.Now()
+	g.mu.Unlock()
+
+	raw, found, err := g.store.GitHubApp(ctx)
+	if err != nil {
+		return fmt.Errorf("read github app: %w", err)
+	}
+	if !found && g.fileFound {
+		data, err := json.Marshal(g.file)
+		if err != nil {
+			return err
+		}
+		imported, err := g.store.ImportGitHubApp(ctx, data)
+		if err != nil {
+			return fmt.Errorf("import github app: %w", err)
+		}
+		if imported {
+			g.logger.Info("github app credentials imported into the database; every replica now serves this app and the file is no longer read",
+				"path", g.opts.CredentialsPath)
+		}
+		if raw, found, err = g.store.GitHubApp(ctx); err != nil {
+			return fmt.Errorf("read github app: %w", err)
+		}
+	}
+	var base githubapp.Credentials
+	if found {
+		if err := json.Unmarshal(raw, &base); err != nil {
+			return fmt.Errorf("stored github app: %w", err)
+		}
+	}
+	creds, ok, err := githubapp.Overlay(base, g.opts.Getenv)
+	if err != nil {
+		return err
+	}
+	return g.use(creds, ok)
+}
+
+// current refreshes from the database if due and returns the client, nil when no app is
+// configured. A failed refresh keeps the app already loaded.
+func (g *GitHub) current(ctx context.Context) *githubapp.Client {
+	if err := g.sync(ctx, false); err != nil {
+		g.logger.Warn("github app refresh failed", "error", err)
+	}
+	return g.appClient()
 }
 
 // Configured reports whether an app's credentials are loaded.
@@ -153,19 +252,16 @@ func (g *GitHub) Run(ctx context.Context) error {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	var last time.Time
+	// The first poll, and one after a kick, may follow another replica's closely; a timed
+	// poll defers to one any replica ran within half an interval.
+	minGap := minKickInterval
 	for {
-		if g.Configured() && g.store != nil {
+		if c := g.current(ctx); c != nil && g.store != nil {
 			last = time.Now()
 			pollCtx, cancel := context.WithTimeout(ctx, interval)
-			err := g.pollOnce(pollCtx)
+			outcome, err := g.pollExclusive(pollCtx, minGap)
 			cancel()
-			g.mu.Lock()
-			g.lastPoll = time.Now().UTC()
-			g.lastErr = ""
-			if err != nil {
-				g.lastErr = err.Error()
-			}
-			g.mu.Unlock()
+			githubPolls.Inc(outcome)
 			if err != nil && ctx.Err() == nil {
 				g.logger.Warn("github poll failed", "error", err)
 			}
@@ -175,12 +271,43 @@ func (g *GitHub) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-t.C:
+			minGap = interval / 2
 		case <-g.kick:
 			if time.Since(last) < minKickInterval {
 				goto wait
 			}
+			minGap = minKickInterval
 		}
 	}
+}
+
+// pollExclusive polls unless another replica holds the poller lock or polled within minGap,
+// and records the outcome in the shared heartbeat that /v1/ready and /v1/github/status read.
+func (g *GitHub) pollExclusive(ctx context.Context, minGap time.Duration) (string, error) {
+	outcome := "skipped"
+	_, err := g.store.TryExclusive(ctx, pollerLock, func(ctx context.Context) error {
+		hb, found, err := g.store.GetHeartbeat(ctx, db.ComponentGitHubPoller)
+		if err != nil {
+			return err
+		}
+		if found && time.Since(hb.LastRunAt) < minGap {
+			return nil
+		}
+		pollErr := g.pollOnce(ctx)
+		outcome = "ok"
+		msg := ""
+		if pollErr != nil {
+			outcome, msg = "error", pollErr.Error()
+		}
+		if err := g.store.RecordHeartbeat(context.WithoutCancel(ctx), db.ComponentGitHubPoller, g.holder, msg); err != nil {
+			g.logger.Warn("record github poll failed", "error", err)
+		}
+		return pollErr
+	})
+	if err != nil && outcome == "skipped" {
+		outcome = "error"
+	}
+	return outcome, err
 }
 
 // maxPullsPerRepo bounds one poll's work on a busy repository.
@@ -403,28 +530,39 @@ func (g *GitHub) checkPull(ctx context.Context, installationID int64, owner, rep
 	}
 
 	title, summary, text := renderPullReport(rep)
-	fingerprint := rep.Conclusion + "\x00" + text
-	key := rep.Repository + "@" + pr.Head.SHA
-	g.mu.Lock()
-	same := g.posted[key] == fingerprint
-	g.mu.Unlock()
-	if same {
-		return rep, nil
-	}
-	if err := c.PostCheckRun(ctx, installationID, owner, repo, githubapp.CheckRun{
-		HeadSHA: pr.Head.SHA, Conclusion: rep.Conclusion, Title: title, Summary: summary, Text: text,
-		ExternalID: "conductor:" + rep.Repository + "#" + strconv.Itoa(pr.Number),
-	}); err != nil {
+	sum := sha256.Sum256([]byte(rep.Conclusion + "\x00" + text))
+	fingerprint := hex.EncodeToString(sum[:])
+	// What was last posted on this commit is in the database, so a restart, a second
+	// replica, or the webhook and the poller seeing the same commit do not post it again.
+	prev, found, err := g.store.GitHubCheckRun(ctx, rep.Repository, pr.Head.SHA)
+	if err != nil {
 		return rep, err
 	}
-	g.mu.Lock()
-	if len(g.posted) >= maxPostedChecks {
-		// Forget everything rather than track recency: the cost is one repeated check run per
-		// open pull request, once.
-		g.posted = map[string]string{}
+	if found && prev.Fingerprint == fingerprint {
+		return rep, nil
 	}
-	g.posted[key] = fingerprint
-	g.mu.Unlock()
+	run := githubapp.CheckRun{
+		HeadSHA: pr.Head.SHA, Conclusion: rep.Conclusion, Title: title, Summary: summary, Text: text,
+		ExternalID: "conductor:" + rep.Repository + "#" + strconv.Itoa(pr.Number),
+	}
+	// A changed result replaces the run on that commit rather than stacking another; a run
+	// deleted on GitHub's side is created afresh.
+	runID := prev.ID
+	if found && prev.ID != 0 {
+		err = c.UpdateCheckRun(ctx, installationID, owner, repo, prev.ID, run)
+		var apiErr *githubapp.APIError
+		if errors.As(err, &apiErr) && apiErr.NotFound() {
+			runID, err = c.PostCheckRun(ctx, installationID, owner, repo, run)
+		}
+	} else {
+		runID, err = c.PostCheckRun(ctx, installationID, owner, repo, run)
+	}
+	if err != nil {
+		return rep, err
+	}
+	if err := g.store.SaveGitHubCheckRun(ctx, rep.Repository, pr.Head.SHA, db.CheckRunRecord{ID: runID, Fingerprint: fingerprint}); err != nil {
+		g.logger.Warn("record github check run failed", "repo", rep.Repository, "sha", pr.Head.SHA, "error", err)
+	}
 	rep.Posted = true
 	for _, p := range projects {
 		count := 0
@@ -489,9 +627,6 @@ func dedupeOverlaps(in []pullOverlap) []pullOverlap {
 }
 
 const maxReportRows = 60
-
-// maxPostedChecks bounds the memory of which commits were already checked.
-const maxPostedChecks = 20000
 
 // who renders the task cell of a report row.
 func (o pullOverlap) who() (task, owner string) {
@@ -624,20 +759,20 @@ func (s *Server) githubStatus(w http.ResponseWriter, r *http.Request, p domain.P
 		return
 	}
 	out["available"] = true
-	g.mu.Lock()
 	out["mode"] = "polling"
 	if g.opts.WebhookURL != "" {
 		out["mode"] = "webhook"
 		out["webhook_url"] = g.opts.WebhookURL
 	}
-	if !g.lastPoll.IsZero() {
-		out["last_poll"] = g.lastPoll
+	// The last poll by whichever replica holds the poller.
+	if hb, found, err := s.store.GetHeartbeat(r.Context(), db.ComponentGitHubPoller); err == nil && found {
+		out["last_poll"] = hb.LastRunAt.UTC()
+		if hb.LastError != "" {
+			out["last_error"] = hb.LastError
+		}
 	}
-	if g.lastErr != "" {
-		out["last_error"] = g.lastErr
-	}
-	c := g.client
-	g.mu.Unlock()
+	c := g.current(r.Context())
+	out["configured"] = c != nil
 	if c != nil {
 		creds := c.Credentials()
 		out["app"] = map[string]any{"id": creds.AppID, "slug": creds.Slug, "name": creds.Name, "owner": creds.Owner, "html_url": creds.HTMLURL}
@@ -690,7 +825,7 @@ func (s *Server) githubStartSetup(w http.ResponseWriter, r *http.Request, p doma
 		s.fail(w, r, err)
 		return
 	}
-	if s.github.Configured() && !body.Replace {
+	if s.github.current(r.Context()) != nil && !body.Replace {
 		s.ok(w, r, http.StatusConflict, ErrorBody{Code: "already_configured",
 			Error: "a GitHub App is already connected; pass replace (conductor github setup --replace) to create a new one in its place"})
 		return
@@ -708,15 +843,14 @@ func (s *Server) githubStartSetup(w http.ResponseWriter, r *http.Request, p doma
 	}
 	state := randomState()
 	g := s.github
-	g.mu.Lock()
 	now := time.Now()
-	for k, v := range g.setups {
-		if now.After(v.expires) {
-			delete(g.setups, k)
-		}
+	// In the database, not this process: GitHub's callback may reach another replica.
+	if err := s.store.CreateGitHubSetup(r.Context(), hashState(state), db.GitHubSetup{
+		Org: body.Org, Name: name, By: p.ID, ExpiresAt: now.Add(time.Hour),
+	}); err != nil {
+		s.fail(w, r, err)
+		return
 	}
-	g.setups[state] = &githubSetup{org: body.Org, name: name, by: p.ID, expires: now.Add(time.Hour)}
-	g.mu.Unlock()
 	s.ok(w, r, http.StatusCreated, map[string]any{
 		"setup_url":  strings.TrimRight(s.githubBase(), "/") + "/github/setup?state=" + state,
 		"expires_at": now.Add(time.Hour).UTC(), "name": name, "org": body.Org,
@@ -752,18 +886,23 @@ func (s *Server) githubBase() string {
 	return s.self
 }
 
+// hashState is how a setup state is stored: the state itself is a bearer secret in a URL.
+func hashState(state string) string {
+	sum := sha256.Sum256([]byte(state))
+	return hex.EncodeToString(sum[:])
+}
+
 // takeSetup validates a setup state; consume marks it used.
-func (g *GitHub) takeSetup(state string, consume bool) (*githubSetup, bool) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	st, ok := g.setups[state]
-	if !ok || st.used || time.Now().After(st.expires) {
-		return nil, false
+func (g *GitHub) takeSetup(ctx context.Context, state string, consume bool) (db.GitHubSetup, bool) {
+	if state == "" || g.store == nil {
+		return db.GitHubSetup{}, false
 	}
-	if consume {
-		st.used = true
+	st, ok, err := g.store.GitHubSetupByState(ctx, hashState(state), consume)
+	if err != nil {
+		g.logger.Warn("github setup lookup failed", "error", err)
+		return db.GitHubSetup{}, false
 	}
-	return st, true
+	return st, ok
 }
 
 var githubPage = template.Must(template.New("page").Parse(`<!doctype html>
@@ -797,7 +936,7 @@ func (s *Server) renderGitHubPage(w http.ResponseWriter, status int, d githubPag
 }
 
 func (s *Server) githubSetupPage(w http.ResponseWriter, r *http.Request) {
-	st, ok := s.github.takeSetup(r.URL.Query().Get("state"), false)
+	st, ok := s.github.takeSetup(r.Context(), r.URL.Query().Get("state"), false)
 	if !ok {
 		s.renderGitHubPage(w, http.StatusNotFound, githubPageData{
 			Heading:    "This setup link has expired",
@@ -807,15 +946,15 @@ func (s *Server) githubSetupPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	manifest, err := githubapp.Manifest(githubapp.ManifestOptions{
-		Name: st.name, BaseURL: s.githubBase(), WebhookURL: s.github.opts.WebhookURL,
+		Name: st.Name, BaseURL: s.githubBase(), WebhookURL: s.github.opts.WebhookURL,
 	})
 	if err != nil {
 		s.renderGitHubPage(w, http.StatusInternalServerError, githubPageData{Heading: "Could not build the app manifest", Paragraphs: []string{err.Error()}})
 		return
 	}
 	owner := "your GitHub account"
-	if st.org != "" {
-		owner = "the " + st.org + " organisation"
+	if st.Org != "" {
+		owner = "the " + st.Org + " organisation"
 	}
 	delivery := "This Conductor is not reachable from the internet, so it will poll GitHub for pull requests every couple of minutes instead of receiving webhooks."
 	if s.github.opts.WebhookURL != "" {
@@ -824,12 +963,12 @@ func (s *Server) githubSetupPage(w http.ResponseWriter, r *http.Request) {
 	s.renderGitHubPage(w, http.StatusOK, githubPageData{
 		Heading: "Connect Conductor to GitHub",
 		Paragraphs: []string{
-			"This creates a GitHub App named “" + st.name + "” owned by " + owner + ". It can read repository contents and pull requests, and write one thing: a “Conductor” check run saying whether a pull request touches files other in-flight work has reserved.",
+			"This creates a GitHub App named “" + st.Name + "” owned by " + owner + ". It can read repository contents and pull requests, and write one thing: a “Conductor” check run saying whether a pull request touches files other in-flight work has reserved.",
 			"It cannot push code, merge, or change settings. You choose which repositories it sees when you install it on the next screen.",
 			delivery,
 		},
 		Form: &struct{ Action, Manifest, Button string }{
-			Action:   githubapp.ManifestFormURL(s.github.opts.Web, st.org, r.URL.Query().Get("state")),
+			Action:   githubapp.ManifestFormURL(s.github.opts.Web, st.Org, r.URL.Query().Get("state")),
 			Manifest: string(manifest), Button: "Create the GitHub App",
 		},
 	})
@@ -837,7 +976,7 @@ func (s *Server) githubSetupPage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 	state, code := r.URL.Query().Get("state"), r.URL.Query().Get("code")
-	st, ok := s.github.takeSetup(state, true)
+	st, ok := s.github.takeSetup(r.Context(), state, true)
 	if !ok || code == "" {
 		s.renderGitHubPage(w, http.StatusBadRequest, githubPageData{
 			Heading:    "This setup link is not valid",
@@ -847,7 +986,7 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The person who started the setup must still own the machine when it completes.
-	if settings, err := s.store.GetServerSettings(r.Context()); err != nil || settings.LocalOwnerID != st.by {
+	if settings, err := s.store.GetServerSettings(r.Context()); err != nil || settings.LocalOwnerID != st.By {
 		s.renderGitHubPage(w, http.StatusForbidden, githubPageData{
 			Heading:    "Setup was started by someone who no longer owns this machine",
 			Paragraphs: []string{"Ask the machine's owner to start again with:"},
@@ -863,25 +1002,30 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 		s.renderGitHubPage(w, http.StatusBadGateway, githubPageData{Heading: "GitHub did not hand over the app", Paragraphs: []string{err.Error()}})
 		return
 	}
-	if err := githubapp.Save(s.github.opts.CredentialsPath, creds); err != nil {
-		s.renderGitHubPage(w, http.StatusInternalServerError, githubPageData{Heading: "Could not save the app's credentials", Paragraphs: []string{err.Error()}})
-		return
-	}
-	client, err := githubapp.New(s.github.opts.API, creds)
-	if err != nil {
+	if err := creds.Validate(); err != nil {
 		s.renderGitHubPage(w, http.StatusInternalServerError, githubPageData{Heading: "The app's key did not load", Paragraphs: []string{err.Error()}})
 		return
 	}
-	s.github.mu.Lock()
-	s.github.client = client
-	s.github.posted = map[string]string{}
-	s.github.mu.Unlock()
+	data, err := json.Marshal(creds)
+	if err == nil {
+		err = s.store.SaveGitHubApp(ctx, data)
+	}
+	if err != nil {
+		s.logger.Error("save github app failed", "request_id", requestID(r), "error", err)
+		s.renderGitHubPage(w, http.StatusInternalServerError, githubPageData{Heading: "Could not save the app's credentials",
+			Paragraphs: []string{"Conductor could not write them to its database. Start again with:"}, Code: "conductor github setup"})
+		return
+	}
+	if err := s.github.Refresh(ctx); err != nil {
+		s.renderGitHubPage(w, http.StatusInternalServerError, githubPageData{Heading: "The app's key did not load", Paragraphs: []string{err.Error()}})
+		return
+	}
 	s.github.Kick()
 	s.logger.Info("github app created", "app", creds.Slug, "owner", creds.Owner)
 	s.renderGitHubPage(w, http.StatusOK, githubPageData{
 		Heading: "Created " + creds.Name,
 		Paragraphs: []string{
-			"Conductor saved the app's credentials on this machine (" + s.github.opts.CredentialsPath + ", readable only by you).",
+			"Conductor saved the app's credentials in its database, so every conductord sharing it serves this app.",
 			"Last step: install it on the repositories Conductor coordinates.",
 		},
 		Link: &struct{ Href, Text string }{Href: creds.InstallURL(s.github.opts.Web), Text: "Install on repositories"},
@@ -909,7 +1053,7 @@ const maxWebhookBody = 5 << 20
 var webhookEvents = map[string]bool{"ping": true, "installation": true, "installation_repositories": true, "pull_request": true}
 
 func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
-	c := s.github.appClient()
+	c := s.github.current(r.Context())
 	if c == nil {
 		http.NotFound(w, r)
 		return
@@ -999,7 +1143,7 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 
 // githubCheckNow checks one pull request on demand: `conductor github check owner/repo#12`.
 func (s *Server) githubCheckNow(w http.ResponseWriter, r *http.Request, p domain.Principal) {
-	c := s.github.appClient()
+	c := s.github.current(r.Context())
 	if c == nil {
 		s.ok(w, r, http.StatusConflict, ErrorBody{Code: "not_configured", Error: "no GitHub App is configured; run `conductor github setup`"})
 		return

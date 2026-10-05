@@ -27,12 +27,13 @@ import (
 // fakeGitHub serves the slice of GitHub's API the integration uses: the manifest conversion,
 // installations, one repository with one pull request, and check-run creation.
 type fakeGitHubAPI struct {
-	t      *testing.T
-	repo   string // unique per run: the database is shared across runs and packages
-	pem    string
-	mu     sync.Mutex
-	checks []map[string]any
-	files  []string
+	t       *testing.T
+	repo    string // unique per run: the database is shared across runs and packages
+	pem     string
+	mu      sync.Mutex
+	checks  []map[string]any
+	updates []map[string]any
+	files   []string
 }
 
 func (f *fakeGitHubAPI) handler() http.Handler {
@@ -86,7 +87,40 @@ func (f *fakeGitHubAPI) handler() http.Handler {
 		w.WriteHeader(http.StatusCreated)
 		write(w, map[string]any{"id": len(f.checks)})
 	})
+	m.HandleFunc("PATCH /repos/acme/{repo}/check-runs/{id}", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		body["id"] = r.PathValue("id")
+		f.mu.Lock()
+		f.updates = append(f.updates, body)
+		f.mu.Unlock()
+		write(w, map[string]any{"id": r.PathValue("id")})
+	})
 	return m
+}
+
+func (f *fakeGitHubAPI) checkUpdates() []map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]map[string]any(nil), f.updates...)
+}
+
+// keepGitHubApp restores the stored app after a test: the row is one per database, and the
+// database is shared across packages.
+func keepGitHubApp(t *testing.T, store *db.Store) {
+	t.Helper()
+	before, found, err := store.GitHubApp(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx := context.Background()
+		if found {
+			_ = store.SaveGitHubApp(ctx, before)
+		} else {
+			_, _ = store.Pool().Exec(ctx, `DELETE FROM github_app`)
+		}
+	})
 }
 
 func (f *fakeGitHubAPI) checkRuns() []map[string]any {
@@ -117,6 +151,10 @@ func TestGitHubAppEndToEnd(t *testing.T) {
 	if _, err := h.store.SetLocalOwner(ctx, h.alice.ID, false); err != nil {
 		t.Fatal(err)
 	}
+	keepGitHubApp(t, h.store)
+	if _, err := h.store.Pool().Exec(ctx, `DELETE FROM github_app`); err != nil {
+		t.Fatal(err)
+	}
 
 	credsPath := filepath.Join(t.TempDir(), "github-app.json")
 	integration, err := NewGitHub(GitHubOptions{CredentialsPath: credsPath, API: gh.URL, Web: "https://github.example", Poll: -1,
@@ -127,6 +165,15 @@ func TestGitHubAppEndToEnd(t *testing.T) {
 	srv := httptest.NewServer(New(h.store, coord.New(h.store), Options{GitHub: integration}).Handler())
 	defer srv.Close()
 	integration.opts.BaseURL = srv.URL
+	// A second replica over the same database, with its own integration and no file.
+	replica, err := NewGitHub(GitHubOptions{API: gh.URL, Web: "https://github.example", Poll: -1,
+		Getenv: func(string) string { return "" }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv2 := httptest.NewServer(New(h.store, coord.New(h.store), Options{GitHub: replica}).Handler())
+	defer srv2.Close()
+	replica.opts.BaseURL = srv2.URL
 
 	// --- Setup: only the machine's owner can start it.
 	if code, _ := h.doJSONOn(srv, h.bobTok, http.MethodPost, "/v1/github/setup", map[string]string{}); code != http.StatusForbidden {
@@ -148,18 +195,27 @@ func TestGitHubAppEndToEnd(t *testing.T) {
 		t.Error("a forged state rendered a setup form")
 	}
 
-	// --- Callback: bad state refused; good one stores the credentials; reuse refused.
-	if code := httpStatus(t, srv, "/github/callback?state=forged&code=good-code"); code != http.StatusBadRequest {
+	// --- Callback: bad state refused; good one stores the credentials; reuse refused. GitHub's
+	// redirect lands on the other replica, which must know the setup the first one started.
+	if code := httpStatus(t, srv2, "/github/callback?state=forged&code=good-code"); code != http.StatusBadRequest {
 		t.Errorf("forged callback = %d", code)
 	}
-	if code := httpStatus(t, srv, "/github/callback?state="+state+"&code=good-code"); code != http.StatusOK {
-		t.Fatalf("callback = %d", code)
+	if code := httpStatus(t, srv2, "/github/callback?state="+state+"&code=good-code"); code != http.StatusOK {
+		t.Fatalf("callback on another replica = %d", code)
 	}
-	if st, err := os.Stat(credsPath); err != nil || st.Mode().Perm() != 0o600 {
-		t.Fatalf("credentials file: %v %v", st, err)
+	if _, err := os.Stat(credsPath); !os.IsNotExist(err) {
+		t.Errorf("the callback wrote a local credentials file (%v); the app belongs in the database", err)
 	}
-	if !integration.Configured() {
-		t.Fatal("the integration is not configured after the callback")
+	if raw, found, err := h.store.GitHubApp(ctx); err != nil || !found || !strings.Contains(string(raw), `"slug": "conductor-test"`) {
+		// Not the raw row: it holds the app's private key.
+		t.Fatalf("stored app found=%v err=%v", found, err)
+	}
+	if !replica.Configured() {
+		t.Fatal("the replica that took the callback is not configured")
+	}
+	// The replica that started setup picks the app up from the database.
+	if err := integration.Refresh(ctx); err != nil || !integration.Configured() {
+		t.Fatalf("the first replica did not load the stored app: %v", err)
 	}
 	if code := httpStatus(t, srv, "/github/callback?state="+state+"&code=good-code"); code != http.StatusBadRequest {
 		t.Errorf("replayed callback = %d", code)
@@ -262,12 +318,40 @@ func TestGitHubAppEndToEnd(t *testing.T) {
 		t.Errorf("repeat check = %d %v", code, rep)
 	}
 
-	// --- Polling finds the same pull request and has nothing new to say.
+	// --- Polling finds the same pull request and has nothing new to say — on this replica,
+	// on the other, or after a restart (a fresh integration with nothing in memory).
 	if err := integration.pollOnce(ctx); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
-	if n := len(fake.checkRuns()); n != 1 {
-		t.Errorf("polling an unchanged pull request posted again (%d runs)", n)
+	if err := replica.pollOnce(ctx); err != nil {
+		t.Fatalf("poll on the replica: %v", err)
+	}
+	restarted, _ := NewGitHub(GitHubOptions{API: gh.URL, Poll: -1, Getenv: func(string) string { return "" }})
+	_ = New(h.store, coord.New(h.store), Options{GitHub: restarted})
+	if err := restarted.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.pollOnce(ctx); err != nil {
+		t.Fatalf("poll after a restart: %v", err)
+	}
+	if n := len(fake.checkRuns()); n != 1 || len(fake.checkUpdates()) != 0 {
+		t.Errorf("an unchanged pull request was posted again (%d runs, %d updates)", n, len(fake.checkUpdates()))
+	}
+
+	// --- A changed result updates the commit's run instead of stacking a second one.
+	code, raw = h.do(h.aliceTok, http.MethodPost, h.projectPath("/work/start"), map[string]any{
+		"summary": "touch the readme", "visibility": "team_summary",
+		"scopes": []map[string]any{{"resource": "path:README.md", "mode": "write_exclusive"}},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("start = %d %s", code, raw)
+	}
+	if err := replica.pollOnce(ctx); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if ups := fake.checkUpdates(); len(fake.checkRuns()) != 1 || len(ups) != 1 || ups[0]["id"] != "1" ||
+		!strings.Contains(toJSON(ups[0]["output"]), "README.md") {
+		t.Errorf("a changed result: %d runs, updates %v", len(fake.checkRuns()), ups)
 	}
 
 	// --- Webhooks: unsigned refused, signed accepted.
@@ -355,5 +439,91 @@ func TestPullReportRedaction(t *testing.T) {
 	pr.Head.Repo.FullName = "acme/widgets"
 	if pr.FromFork() {
 		t.Error("a same-repository branch was taken for a fork")
+	}
+}
+
+// An app set up before credentials lived in the database is imported from its file once;
+// an app stored since is never replaced by a file.
+func TestGitHubAppImportsLegacyFileOnce(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	keepGitHubApp(t, h.store)
+	if _, err := h.store.Pool().Exec(ctx, `DELETE FROM github_app`); err != nil {
+		t.Fatal(err)
+	}
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pemKey := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "github-app.json")
+	if err := githubapp.Save(legacy, githubapp.Credentials{AppID: 41, Slug: "legacy", PrivateKeyPEM: pemKey}); err != nil {
+		t.Fatal(err)
+	}
+	noEnv := func(string) string { return "" }
+	g, err := NewGitHub(GitHubOptions{CredentialsPath: legacy, Poll: -1, Getenv: noEnv})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = New(h.store, coord.New(h.store), Options{GitHub: g})
+	if err := g.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var source, slug string
+	if err := h.store.Pool().QueryRow(ctx, `SELECT source, credentials->>'slug' FROM github_app`).Scan(&source, &slug); err != nil || source != "imported" || slug != "legacy" {
+		t.Fatalf("after import: source=%q slug=%q err=%v", source, slug, err)
+	}
+
+	// Another host still has an older file; the database's app wins.
+	other := filepath.Join(dir, "other.json")
+	if err := githubapp.Save(other, githubapp.Credentials{AppID: 99, Slug: "stale", PrivateKeyPEM: pemKey}); err != nil {
+		t.Fatal(err)
+	}
+	g2, _ := NewGitHub(GitHubOptions{CredentialsPath: other, Poll: -1, Getenv: noEnv})
+	_ = New(h.store, coord.New(h.store), Options{GitHub: g2})
+	if err := g2.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if c := g2.appClient(); c == nil || c.Credentials().Slug != "legacy" {
+		t.Errorf("a stale file replaced the stored app: %+v", c)
+	}
+}
+
+// One replica polls at a time, and a replica that just polled is not followed by another.
+func TestGitHubPollerIsExclusive(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	g, err := NewGitHub(GitHubOptions{Poll: -1, Getenv: func(string) string { return "" }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = New(h.store, coord.New(h.store), Options{GitHub: g})
+
+	// Another replica is polling right now.
+	held := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = h.store.TryExclusive(ctx, pollerLock, func(context.Context) error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+	if outcome, err := g.pollExclusive(ctx, 0); outcome != "skipped" || err != nil {
+		t.Errorf("poll while another replica holds the poller = %s %v", outcome, err)
+	}
+	close(release)
+	<-done
+
+	// It just finished: a timed poll defers to it.
+	if err := h.store.RecordHeartbeat(ctx, db.ComponentGitHubPoller, "other", ""); err != nil {
+		t.Fatal(err)
+	}
+	if outcome, err := g.pollExclusive(ctx, time.Minute); outcome != "skipped" || err != nil {
+		t.Errorf("poll right after another replica's = %s %v", outcome, err)
 	}
 }
