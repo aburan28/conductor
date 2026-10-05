@@ -111,3 +111,37 @@ func (s *Service) ReserveForSession(ctx context.Context, principal domain.Princi
 	}
 	return SessionScopeResult{ExpandScopeResult: result, TaskID: task.ID, TaskRef: task.Ref}, nil
 }
+
+// PublishEvidence records evidence against a live attempt without finishing it.
+//
+// Only the lease's holder may publish into it: the fence proves the attempt is current, and
+// the holder check proves the caller is the one working it. Commands are stored with no
+// runner id, which is how an agent's own report stays distinguishable from a runner's
+// observation; summaries are not accepted here at all.
+func (s *Service) PublishEvidence(ctx context.Context, c Caller, fence domain.Fence, m domain.EvidenceManifest) error {
+	lease, err := s.Store.GetLease(ctx, fence.LeaseID)
+	if err != nil {
+		return err
+	}
+	if lease.HolderPrincipal != c.Principal.ID {
+		return fmt.Errorf("%w: only the lease holder may publish evidence for this attempt", domain.ErrNotPermitted)
+	}
+	m.TaskID, m.AttemptID = fence.TaskID, fence.AttemptID
+	m.LeaseID, m.FencingEpoch = fence.LeaseID, fence.FencingEpoch
+	m.RunnerID = ""
+	for i := range m.Commands {
+		m.Commands[i].RunnerID = ""
+	}
+	if err := s.Store.SubmitEvidence(ctx, m, ""); err != nil {
+		return err
+	}
+	task, err := s.Store.GetTask(ctx, fence.TaskID)
+	if err != nil {
+		return err
+	}
+	return s.Store.AppendEvent(ctx, task.OrganizationID, task.ProjectID, c.Principal.ID,
+		"attempt", fence.AttemptID, "attempt.evidence", task.Visibility, map[string]any{
+			"task_ref": task.Ref, "commit_sha": m.CommitSHA, "count": len(m.Commands),
+			"changed_paths": m.ChangedPaths,
+		})
+}

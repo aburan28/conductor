@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -43,6 +44,8 @@ type httpSession struct {
 	project     string
 	protocol    string
 	lastSeen    time.Time
+	// stopKeeping ends the session's lease keeper when the session is deleted or swept.
+	stopKeeping context.CancelFunc
 
 	// call serializes tool calls within one session, because the gateway mutates its fence
 	// as work is claimed and finished. Concurrent requests on one session are rare but must
@@ -60,6 +63,13 @@ func NewHTTPTransport(endpoint string) *HTTPTransport {
 		sessions: map[string]*httpSession{},
 	}
 }
+
+// leaseIdle is how long an HTTP session may go without a request before its claim is no
+// longer kept alive. Over HTTP there is no process whose life is the session's: the only
+// sign of life is the client calling. A model can think, or wait on a long test run, for a
+// good while without a tool call, so this is generous — but far shorter than the session's
+// own idle expiry, so a client that vanished stops holding territory within minutes.
+const leaseIdle = 15 * time.Minute
 
 // maxBody caps a request body. Tool arguments can carry a user's own text, so besides the
 // size limit the transport never logs a body.
@@ -163,6 +173,9 @@ func (t *HTTPTransport) deleteSession(w http.ResponseWriter, r *http.Request, pr
 		return
 	}
 	t.mu.Lock()
+	if sess := t.sessions[sessionID]; sess != nil && sess.stopKeeping != nil {
+		sess.stopKeeping()
+	}
 	delete(t.sessions, sessionID)
 	t.mu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
@@ -200,6 +213,7 @@ func (t *HTTPTransport) resolveProject(r *http.Request, token, pathProject strin
 }
 
 func (t *HTTPTransport) create(principalID, token, tokenHash, project string) *httpSession {
+	keepCtx, stop := context.WithCancel(context.Background())
 	sess := &httpSession{
 		id:          newSessionID(),
 		server:      newHTTP(t.endpoint, token, project, ""),
@@ -208,7 +222,14 @@ func (t *HTTPTransport) create(principalID, token, tokenHash, project string) *h
 		project:     project,
 		protocol:    ProtocolVersion,
 		lastSeen:    t.now(),
+		stopKeeping: stop,
 	}
+	// The session's claim stays alive while its client keeps calling (see leaseIdle).
+	go sess.server.keepLeaseAlive(keepCtx, func() bool {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		return t.now().Sub(sess.lastSeen) < leaseIdle
+	})
 	t.mu.Lock()
 	t.sweepLocked()
 	t.sessions[sess.id] = sess
@@ -243,6 +264,9 @@ func (t *HTTPTransport) sweepLocked() {
 	cutoff := t.now().Add(-t.idleTTL)
 	for id, sess := range t.sessions {
 		if sess.lastSeen.Before(cutoff) {
+			if sess.stopKeeping != nil {
+				sess.stopKeeping()
+			}
 			delete(t.sessions, id)
 		}
 	}

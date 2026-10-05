@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/adamburan/conductor/internal/db"
 	"github.com/adamburan/conductor/internal/domain"
 )
 
@@ -210,5 +211,32 @@ func TestTransitionToDoneReleasesTerritory(t *testing.T) {
 	}
 	if held, _ := h.store.ReservationsForTask(ctx, taskID); len(held) != 0 {
 		t.Errorf("a done task still holds %d reservation(s)", len(held))
+	}
+}
+
+// coord_publish_result against the real API: the commands and the commit reach the task.
+func TestMCPPublishResultRecordsEvidence(t *testing.T) {
+	h := newHarness(t)
+	responses := drive(t, h.server.URL, h.aliceTok, h.project.ID,
+		call("coord_start_work", map[string]any{"summary": "publish evidence", "title": "Evidence"}),
+		call("coord_publish_result", map[string]any{
+			"commit_sha": "c0ffee", "changed_paths": []string{"internal/e.go"},
+			"commands": []map[string]any{{"command": "go test ./...", "exit_code": 0}},
+		}),
+	)
+	if text, isErr := toolText(t, responses[1]); isErr {
+		t.Fatalf("publish errored: %s", text)
+	}
+	tasks, err := h.store.ListTasks(context.Background(), h.project.ID, db.ListTasksFilter{})
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("tasks = %d, %v", len(tasks), err)
+	}
+	results, err := h.store.ListValidation(context.Background(), tasks[0].ID)
+	if err != nil || len(results) != 1 || results[0].Command != "go test ./..." || results[0].RunnerID != "" {
+		t.Fatalf("validation = %+v, %v", results, err)
+	}
+	attempt, err := h.store.LatestAttempt(context.Background(), tasks[0].ID)
+	if err != nil || attempt.CommitSHA != "c0ffee" {
+		t.Errorf("attempt commit = %q, %v", attempt.CommitSHA, err)
 	}
 }
