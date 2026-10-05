@@ -468,7 +468,10 @@ Flags:
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
+	// Owner-only: the export names machines, worktree paths, and who ran what, which is the
+	// same class of data the control plane gates by role. A shared machine's other users
+	// have no business reading it.
+	if err := writePrivateFile(path, append(data, '\n')); err != nil {
 		return err
 	}
 	if *asJSON {
@@ -476,6 +479,15 @@ Flags:
 	}
 	fmt.Printf("Wrote %d session(s) to %s\n", len(selected), path)
 	return nil
+}
+
+// writePrivateFile writes data with mode 0600, tightening a file that already existed with a
+// looser mode (os.WriteFile keeps an existing file's permissions).
+func writePrivateFile(path string, data []byte) error {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
 }
 
 // selectSessions picks the exported sessions named by args. "all" means every session;

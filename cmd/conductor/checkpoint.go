@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -845,11 +846,14 @@ func pushCheckpoint(ctx context.Context, store *backup.Store, m checkpoint.Manif
 	if err != nil {
 		return err
 	}
-	manifest, err := os.ReadFile(strings.TrimSuffix(p, checkpoint.BundleExt) + checkpoint.ManifestExt)
+	// The object beside the sealed bundle is an index entry, not the manifest: the manifest
+	// names the conversation, the note, the working directory, and the machine, and those
+	// travel only inside the ciphertext.
+	index, err := json.Marshal(m.Index(int64(len(sealed))))
 	if err != nil {
 		return err
 	}
-	return store.PutCheckpoint(ctx, m.ID, manifest, sealed, checkpoint.IsSealed)
+	return store.PutCheckpoint(ctx, m.ID, index, sealed, checkpoint.IsSealed)
 }
 
 func checkpointPull(ctx context.Context, args []string) error {

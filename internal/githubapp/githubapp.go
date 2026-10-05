@@ -140,21 +140,42 @@ func Save(path string, c Credentials) error {
 // CONDUCTOR_GITHUB_APP_ID, CONDUCTOR_GITHUB_APP_SLUG, CONDUCTOR_GITHUB_APP_PRIVATE_KEY (the
 // PEM itself) or CONDUCTOR_GITHUB_APP_PRIVATE_KEY_FILE, CONDUCTOR_GITHUB_WEBHOOK_SECRET.
 // It returns ok=false, with no error, when no app is configured.
+//
+// conductord keeps the app in its database so every replica serves the same one; the file
+// is read only to import an app set up before that (see api.GitHub).
 func Load(path string, getenv func(string) string) (Credentials, bool, error) {
+	c, _, err := LoadFile(path)
+	if err != nil {
+		return c, false, err
+	}
+	return Overlay(c, getenv)
+}
+
+// LoadFile reads the credentials file alone. found is false, with no error, when there is no
+// file.
+func LoadFile(path string) (c Credentials, found bool, err error) {
+	if path == "" {
+		return c, false, nil
+	}
+	data, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		if err := json.Unmarshal(data, &c); err != nil {
+			return c, false, fmt.Errorf("%s: %w", path, err)
+		}
+		return c, true, nil
+	case os.IsNotExist(err):
+		return c, false, nil
+	default:
+		return c, false, err
+	}
+}
+
+// Overlay applies the environment overrides Load documents to c, and validates the result.
+// ok is false, with no error, when neither c nor the environment configures an app.
+func Overlay(c Credentials, getenv func(string) string) (Credentials, bool, error) {
 	if getenv == nil {
 		getenv = os.Getenv
-	}
-	var c Credentials
-	if path != "" {
-		data, err := os.ReadFile(path)
-		switch {
-		case err == nil:
-			if err := json.Unmarshal(data, &c); err != nil {
-				return c, false, fmt.Errorf("%s: %w", path, err)
-			}
-		case !os.IsNotExist(err):
-			return c, false, err
-		}
 	}
 	if v := getenv("CONDUCTOR_GITHUB_APP_ID"); v != "" {
 		id, err := strconv.ParseInt(v, 10, 64)
@@ -576,6 +597,70 @@ type PullRequest struct {
 	User struct {
 		Login string `json:"login"`
 	} `json:"user"`
+	// Merged and MergeCommitSHA say how a closed pull request ended: merged, or closed
+	// without merging. Both are present on the webhook payload and the single-PR endpoint.
+	Merged         bool   `json:"merged"`
+	MergeCommitSHA string `json:"merge_commit_sha"`
+	// MergedAt is set on every merged pull request, including in list responses, which do
+	// not carry Merged. UpdatedAt orders the closed list the poller pages through.
+	MergedAt  *time.Time `json:"merged_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+}
+
+// WasMerged reports whether a closed pull request ended in a merge, whichever of the two
+// signals the response carried.
+func (pr PullRequest) WasMerged() bool { return pr.Merged || pr.MergedAt != nil }
+
+// ClosedPullRequests lists a repository's pull requests closed (merged or not) since a given
+// time, most recently updated first. It pages until a pull request was last updated before
+// since, or maxPages pages of 100 have been read, so a busy repository costs a bounded
+// number of requests per poll.
+func (c *Client) ClosedPullRequests(ctx context.Context, installationID int64, owner, repo string, since time.Time, maxPages int) ([]PullRequest, error) {
+	tok, err := c.InstallationToken(ctx, installationID)
+	if err != nil {
+		return nil, err
+	}
+	base, err := repoPath(owner, repo)
+	if err != nil {
+		return nil, err
+	}
+	if maxPages <= 0 {
+		maxPages = 1
+	}
+	var out []PullRequest
+	for page := 1; page <= maxPages; page++ {
+		var batch []PullRequest
+		p := fmt.Sprintf("%s/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=%d", base, page)
+		if err := c.do(ctx, http.MethodGet, p, tok, nil, &batch); err != nil {
+			return nil, err
+		}
+		for _, pr := range batch {
+			if pr.UpdatedAt.Before(since) {
+				return out, nil
+			}
+			out = append(out, pr)
+		}
+		if len(batch) < 100 {
+			break
+		}
+	}
+	return out, nil
+}
+
+// GetPullRequest fetches one pull request, open or not. The poller uses it to learn how a
+// pull request it saw open has ended once it drops off the open list.
+func (c *Client) GetPullRequest(ctx context.Context, installationID int64, owner, repo string, number int) (PullRequest, error) {
+	tok, err := c.InstallationToken(ctx, installationID)
+	if err != nil {
+		return PullRequest{}, err
+	}
+	base, err := repoPath(owner, repo)
+	if err != nil {
+		return PullRequest{}, err
+	}
+	var out PullRequest
+	err = c.do(ctx, http.MethodGet, fmt.Sprintf("%s/pulls/%d", base, number), tok, nil, &out)
+	return out, err
 }
 
 // OpenPullRequests lists a repository's open pull requests, newest first (up to 100).
@@ -644,15 +729,45 @@ type CheckRun struct {
 // CheckName is the name the check run appears under on GitHub.
 const CheckName = "Conductor"
 
-// PostCheckRun creates a completed check run.
-func (c *Client) PostCheckRun(ctx context.Context, installationID int64, owner, repo string, run CheckRun) error {
+// PostCheckRun creates a completed check run and returns its id, which UpdateCheckRun takes.
+func (c *Client) PostCheckRun(ctx context.Context, installationID int64, owner, repo string, run CheckRun) (int64, error) {
+	tok, err := c.InstallationToken(ctx, installationID)
+	if err != nil {
+		return 0, err
+	}
+	body := c.checkRunBody(run)
+	body["head_sha"] = run.HeadSHA
+	base, err := repoPath(owner, repo)
+	if err != nil {
+		return 0, err
+	}
+	var out struct {
+		ID int64 `json:"id"`
+	}
+	if err := c.do(ctx, http.MethodPost, base+"/check-runs", tok, body, &out); err != nil {
+		return 0, err
+	}
+	return out.ID, nil
+}
+
+// UpdateCheckRun replaces the result of a check run PostCheckRun created. Updating rather
+// than posting again keeps one Conductor check per commit however many times the result
+// changes. A run that no longer exists answers with an *APIError whose NotFound is true.
+func (c *Client) UpdateCheckRun(ctx context.Context, installationID int64, owner, repo string, id int64, run CheckRun) error {
 	tok, err := c.InstallationToken(ctx, installationID)
 	if err != nil {
 		return err
 	}
+	base, err := repoPath(owner, repo)
+	if err != nil {
+		return err
+	}
+	return c.do(ctx, http.MethodPatch, base+"/check-runs/"+strconv.FormatInt(id, 10), tok, c.checkRunBody(run), nil)
+}
+
+func (c *Client) checkRunBody(run CheckRun) map[string]any {
 	body := map[string]any{
 		"name":         CheckName,
-		"head_sha":     run.HeadSHA,
 		"status":       "completed",
 		"conclusion":   run.Conclusion,
 		"completed_at": c.Now().UTC().Format(time.RFC3339),
@@ -668,11 +783,7 @@ func (c *Client) PostCheckRun(ctx context.Context, installationID int64, owner, 
 	if run.ExternalID != "" {
 		body["external_id"] = run.ExternalID
 	}
-	base, err := repoPath(owner, repo)
-	if err != nil {
-		return err
-	}
-	return c.do(ctx, http.MethodPost, base+"/check-runs", tok, body, nil)
+	return body
 }
 
 func truncate(s string, n int) string {

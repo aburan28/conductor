@@ -36,13 +36,19 @@ export default defineView({
     const invite = () => {
       const handle = h('input', { type: 'text', placeholder: 'rachel', required: true });
       const role = h('select', {}, ['contributor', 'maintainer', 'reviewer', 'observer', 'project_admin'].map(r => h('option', { value: r }, r)));
-      openModal({ title: 'Add a member', body: h('div', { class: 'form' }, h('label', { class: 'field' }, 'Handle', handle), h('label', { class: 'field' }, 'Role', role), h('div', { class: 'hint' }, 'Their token is shown once. Send it over a private channel.')),
+      openModal({ title: 'Add a member', body: h('div', { class: 'form' }, h('label', { class: 'field' }, 'Handle', handle), h('label', { class: 'field' }, 'Role', role), h('div', { class: 'hint' }, 'A new account\'s token is shown once; send it over a private channel. An existing account is added without one.')),
         actions: [{ label: 'Cancel' }, { label: 'Add member', kind: 'primary', onClick: async close => {
           if (!handle.value.trim()) { handle.focus(); return false; }
           try {
             const out = await ctx.api.post(ctx.api.project(ctx.project, '/members'), { handle: handle.value.trim(), role: role.value });
             close();
-            openModal({ title: `Token for ${handle.value.trim()}`, body: h('div', { class: 'stack' }, h('div', { class: 'token-reveal' }, out.token || '(no token returned)'), snippet(`conductor login --endpoint ${ctx.origin} --token ${out.token || 'cdt_…'} --project ${ctx.project}`), h('div', { class: 'notice warn' }, 'Shown once. It is stored only as a hash.')), actions: [{ label: 'Done' }] });
+            // An existing account is added without a token: it keeps its own login.
+            if (!out.token) {
+              openModal({ title: `Added ${out.handle || handle.value.trim()}`, body: h('div', { class: 'stack' }, h('div', { class: 'notice' }, out.note || 'Added to the project. No token was minted.'), snippet(`conductor login --project ${ctx.project}`)), actions: [{ label: 'Done' }] });
+              refresh();
+              return;
+            }
+            openModal({ title: `Token for ${handle.value.trim()}`, body: h('div', { class: 'stack' }, h('div', { class: 'token-reveal' }, out.token), snippet(`conductor login --endpoint ${ctx.origin} --token ${out.token} --project ${ctx.project}`), h('div', { class: 'notice warn' }, 'Shown once. It is stored only as a hash.')), actions: [{ label: 'Done' }] });
             refresh();
           } catch (err) { toastError(err, 'Could not add member'); return false; }
         } }] });

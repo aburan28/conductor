@@ -1,6 +1,8 @@
 package privacy
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -474,10 +476,12 @@ func TestSimilarityIsStableAcrossKeys(t *testing.T) {
 	missed, falsePositives := 0, 0
 	var min, max float64 = 1, 0
 	for i := 0; i < trials; i++ {
-		key, err := NewDedupeKey()
-		if err != nil {
-			t.Fatalf("NewDedupeKey: %v", err)
-		}
+		// Fixed keys, not NewDedupeKey: with fresh random keys every run the minimum over 200
+		// trials is itself random, and it dipped under the margin below in about 1 run in 40
+		// without anything having changed. 200 fixed keys measure the same spread and give
+		// the same answer every time, so a failure here means the estimator moved.
+		sum := sha256.Sum256([]byte(fmt.Sprintf("conductor-similarity-trial-%d", i)))
+		key := sum[:]
 		dup := Similarity(alice.Signature(key), bob.Signature(key))
 		if dup < min {
 			min = dup
@@ -504,5 +508,38 @@ func TestSimilarityIsStableAcrossKeys(t *testing.T) {
 	// A duplicate that only just clears the bar is a warning sign even when it passes.
 	if min < threshold+0.05 {
 		t.Errorf("duplicate similarity bottomed out at %.3f, uncomfortably close to %.2f", min, threshold)
+	}
+}
+
+// The files an attempt touched and where it ran describe the work. For a private task they
+// reach only the task's owner and the attempt's sponsor; coordination state stays public.
+func TestAttemptOfAPrivateTaskHidesItsPathsFromOthers(t *testing.T) {
+	alice := Owner{PrincipalID: "alice-id", Handle: "alice"}
+	runner := Owner{PrincipalID: "runner-id", Handle: "ci"}
+	a := domain.Attempt{ID: "a1", State: domain.AttemptRunning, Branch: "conductor/T-1",
+		WorktreePath: "/work/acquisition-memo", ChangedPaths: []string{"legal/acquisition.md"}}
+
+	private := AttemptTask{Owner: alice, Visibility: domain.VisibilityPrivate}
+	bob := Viewer{PrincipalID: "bob-id", Role: domain.RoleMaintainer}
+	got := ProjectAttempt(bob, a, runner, private, AttemptPolicy{})
+	if got.WorktreePath != "" || len(got.ChangedPaths) != 0 || !got.Redacted {
+		t.Errorf("another member sees a private attempt's paths: %+v", got)
+	}
+	if got.Branch == "" || got.State == "" {
+		t.Errorf("coordination state was hidden too: %+v", got)
+	}
+
+	for name, v := range map[string]Viewer{
+		"owner":   {PrincipalID: alice.PrincipalID},
+		"sponsor": {PrincipalID: runner.PrincipalID},
+	} {
+		if got := ProjectAttempt(v, a, runner, private, AttemptPolicy{}); len(got.ChangedPaths) != 1 || got.WorktreePath == "" || got.Redacted {
+			t.Errorf("the %s lost the attempt's paths: %+v", name, got)
+		}
+	}
+
+	team := AttemptTask{Owner: alice, Visibility: domain.VisibilityTeamSummary}
+	if got := ProjectAttempt(bob, a, runner, team, AttemptPolicy{}); len(got.ChangedPaths) != 1 || got.Redacted {
+		t.Errorf("a team task's attempt paths were hidden from the team: %+v", got)
 	}
 }

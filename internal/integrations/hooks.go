@@ -19,7 +19,9 @@ var claudeHooks = []struct {
 	Command string
 	Timeout int
 }{
-	{"PreToolUse", "Edit|Write|MultiEdit|NotebookEdit", HookCommand + " pre-tool", 15},
+	// --auto-reserve: a file edited outside the session's claimed scope is reserved under
+	// that claim on first edit, so scope drift is visible to teammates instead of silent.
+	{"PreToolUse", "Edit|Write|MultiEdit|NotebookEdit", HookCommand + " pre-tool --auto-reserve", 15},
 	{"SessionStart", "", HookCommand + " session-start", 15},
 	{"SessionEnd", "", HookCommand + " session-end", 30},
 	// Portability: a checkpoint after each turn (rate-limited and skipped when nothing

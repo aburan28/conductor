@@ -32,7 +32,16 @@ type Caller struct {
 	Principal domain.Principal
 	Role      domain.Role
 	SessionID domain.ID
+	// System marks the control plane acting on its own behalf — the scheduler, or merge
+	// reconciliation recording that a pull request landed. It is never derived from a
+	// request; only server code constructs it, with SystemCaller.
+	System bool
 }
+
+// SystemCaller is the caller for actions the control plane takes itself rather than on a
+// principal's request. Authority checks that exist to stop one principal acting on another's
+// work (AuthorizeTransition) do not apply to it; the state machine still does.
+func SystemCaller() Caller { return Caller{System: true} }
 
 // Viewer builds the privacy viewer for this caller.
 func (c Caller) Viewer() privacy.Viewer {
@@ -45,6 +54,12 @@ func (c Caller) Viewer() privacy.Viewer {
 // implied by the URL, because DESIGN.md §25.6 forbids any path that reaches a row by id
 // alone.
 func (s *Service) Authorize(ctx context.Context, principal domain.Principal, projectID domain.ID, need domain.Role) (Caller, error) {
+	// A token confined to one project is a stranger to every other: the same answer as for a
+	// project the principal does not belong to, so a scoped credential cannot even confirm
+	// what else its owner can reach.
+	if scope := TokenScope(ctx); scope != "" && scope != projectID {
+		return Caller{}, domain.ErrNotFound
+	}
 	role, err := s.Store.RoleIn(ctx, projectID, principal.ID)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
@@ -57,6 +72,213 @@ func (s *Service) Authorize(ctx context.Context, principal domain.Principal, pro
 		return Caller{}, fmt.Errorf("%w: role %s cannot act as %s", domain.ErrNotPermitted, role, need)
 	}
 	return Caller{Principal: principal, Role: role}, nil
+}
+
+// tokenScopeKey carries the project a request's credential is confined to.
+type tokenScopeKey struct{}
+
+// WithTokenScope records that the request authenticated with a token confined to projectID.
+// The API layer sets it once, at authentication, so no handler can forget to apply it.
+func WithTokenScope(ctx context.Context, projectID domain.ID) context.Context {
+	if projectID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, tokenScopeKey{}, projectID)
+}
+
+// TokenScope returns the project the request's credential is confined to, or "".
+func TokenScope(ctx context.Context) domain.ID {
+	id, _ := ctx.Value(tokenScopeKey{}).(domain.ID)
+	return id
+}
+
+// CanExecute reports whether a caller may act on execution endpoints: claiming queued work,
+// heartbeating and reporting on a lease it holds, and submitting results. Contributors can,
+// and so can the dedicated runner role, which exists so a machine that executes work need
+// not be granted a contributor's right to file, edit, and transition other people's tasks.
+func (c Caller) CanExecute() bool {
+	return c.Role == domain.RoleRunner || c.Role.Can(domain.RoleContributor)
+}
+
+// AuthorizeExecution is Authorize for execution endpoints (see Caller.CanExecute).
+func (s *Service) AuthorizeExecution(ctx context.Context, principal domain.Principal, projectID domain.ID) (Caller, error) {
+	c, err := s.Authorize(ctx, principal, projectID, domain.RoleObserver)
+	if err != nil {
+		return Caller{}, err
+	}
+	if !c.CanExecute() {
+		return Caller{}, fmt.Errorf("%w: role %s cannot execute work", domain.ErrNotPermitted, c.Role)
+	}
+	return c, nil
+}
+
+// ---------------------------------------------------------------------------
+// Lease authority
+// ---------------------------------------------------------------------------
+
+// HoldsLease reports whether the caller is the lease's holder. A lease names its holder
+// principal, and the fencing epoch proves the holder is current; neither alone is enough,
+// because the fence's identifiers are not secrets — they appear in claim responses, task
+// cards, and logs — and the epoch check only proves the caller presented the latest numbers.
+func (c Caller) HoldsLease(l domain.Lease) bool {
+	return l.HolderPrincipal != "" && l.HolderPrincipal == c.Principal.ID
+}
+
+// ResolveFence turns what a caller presented into the fence of the task's live lease, and
+// checks the caller may act under it: the holder may, and so may a maintainer or above, who
+// can always take back a stuck task. A caller who names no lease gets the live one filled in
+// only under the same rule — the server used to fill in anyone's lease for anyone, which let
+// any contributor release, re-scope, or hand off a teammate's running work.
+//
+// The returned bool reports that the caller acted on a lease it does not hold, which the
+// caller's handler records in the audit log.
+func (s *Service) ResolveFence(ctx context.Context, c Caller, taskID domain.ID, presented domain.Fence) (domain.Fence, bool, error) {
+	var lease domain.Lease
+	var err error
+	if presented.LeaseID == "" {
+		lease, err = s.Store.ActiveLeaseForTask(ctx, taskID)
+	} else {
+		lease, err = s.Store.GetLease(ctx, presented.LeaseID)
+		if err == nil && lease.TaskID != taskID {
+			err = domain.ErrNotFound
+		}
+	}
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return domain.Fence{}, false, fmt.Errorf("%w: no live lease on this task", domain.ErrLeaseNotHeld)
+		}
+		return domain.Fence{}, false, err
+	}
+	override := !c.HoldsLease(lease)
+	if override && !c.Role.Can(domain.RoleMaintainer) {
+		return domain.Fence{}, false, fmt.Errorf(
+			"%w: this task's lease is held by another principal; only its holder or a maintainer may act on it",
+			domain.ErrNotPermitted)
+	}
+	fence := presented
+	fence.TaskID = taskID
+	if presented.LeaseID == "" {
+		fence = domain.Fence{TaskID: taskID, AttemptID: lease.AttemptID,
+			LeaseID: lease.ID, FencingEpoch: lease.FencingEpoch}
+	}
+	if fence.AttemptID == "" {
+		fence.AttemptID = lease.AttemptID
+	}
+	return fence, override, nil
+}
+
+// assertLeaseAuthority checks a presented fence's lease belongs to the caller (or the caller
+// is a maintainer). The fence itself is still verified by the store, inside the transaction
+// that acts on it; this is the "who" that the epoch check cannot answer.
+func (s *Service) assertLeaseAuthority(ctx context.Context, c Caller, fence domain.Fence) error {
+	if fence.LeaseID == "" {
+		return fmt.Errorf("%w: no lease presented", domain.ErrLeaseNotHeld)
+	}
+	lease, err := s.Store.GetLease(ctx, fence.LeaseID)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return fmt.Errorf("%w: unknown lease", domain.ErrLeaseNotHeld)
+		}
+		return err
+	}
+	if fence.TaskID != "" && lease.TaskID != fence.TaskID {
+		return fmt.Errorf("%w: the lease belongs to another task", domain.ErrLeaseNotHeld)
+	}
+	if !c.HoldsLease(lease) && !c.Role.Can(domain.RoleMaintainer) {
+		return fmt.Errorf("%w: this lease is held by another principal", domain.ErrNotPermitted)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Transition authority
+// ---------------------------------------------------------------------------
+
+// ReviewTargets are the statuses that accept verified work. Moving a task into one of them
+// is a review decision, not a step of the work itself.
+var ReviewTargets = map[domain.TaskStatus]bool{
+	domain.TaskDone: true, domain.TaskMerging: true, domain.TaskReviewRequired: true,
+}
+
+// AuthorizeTransition is the single rule for who may move a task to a new status by request
+// (DESIGN.md §24.2). Every handler that changes a task's status on a principal's behalf calls
+// it; the store's state machine separately decides whether the move is legal at all.
+//
+//   - The control plane itself (SystemCaller: the scheduler, merge reconciliation) may make
+//     any legal move.
+//   - A maintainer or above may make any legal move.
+//   - Accepting verified work — into review_required, merging, or done — is a review
+//     decision for a reviewer or a maintainer, never the author or executor alone.
+//   - Every other move belongs to the task's creator or the holder of its live lease, and
+//     needs a contributor.
+//
+// It reports whether the caller acted on a task that is not theirs (neither creator nor lease
+// holder), which the handler records in the audit log.
+func (s *Service) AuthorizeTransition(ctx context.Context, c Caller, task domain.Task, to domain.TaskStatus) (bool, error) {
+	if c.System {
+		return false, nil
+	}
+	holds := false
+	if lease, err := s.Store.ActiveLeaseForTask(ctx, task.ID); err == nil {
+		holds = c.HoldsLease(lease)
+	} else if !errors.Is(err, domain.ErrNotFound) {
+		return false, err
+	}
+	mine := task.CreatedBy == c.Principal.ID || holds
+	switch {
+	case c.Role.Can(domain.RoleMaintainer):
+		return !mine, nil
+	case ReviewTargets[to] && task.Status != to:
+		if c.Role == domain.RoleReviewer {
+			return task.CreatedBy != c.Principal.ID, nil
+		}
+		return false, fmt.Errorf("%w: moving a task to %s is a review decision for a reviewer or maintainer",
+			domain.ErrNotPermitted, to)
+	case !c.Role.Can(domain.RoleContributor):
+		return false, fmt.Errorf("%w: role %s cannot move tasks", domain.ErrNotPermitted, c.Role)
+	case mine:
+		return false, nil
+	}
+	return false, fmt.Errorf("%w: only the task's creator, the holder of its lease, or a maintainer may move it",
+		domain.ErrNotPermitted)
+}
+
+// AuthorizeTaskEdit is the rule for changing a task's content (title, objective, acceptance
+// criteria, priority, labels, …): its creator, the holder of its live lease, or a maintainer.
+// Changing its visibility is narrower — the creator or a maintainer — because a lease holder
+// working someone else's private task must not be able to publish it. It reports whether the
+// caller edited a task that is not theirs.
+func (s *Service) AuthorizeTaskEdit(ctx context.Context, c Caller, task domain.Task, visibility bool) (bool, error) {
+	creator := task.CreatedBy == c.Principal.ID
+	if c.Role.Can(domain.RoleMaintainer) {
+		if creator {
+			return false, nil
+		}
+		lease, err := s.Store.ActiveLeaseForTask(ctx, task.ID)
+		if err != nil && !errors.Is(err, domain.ErrNotFound) {
+			return false, err
+		}
+		return err != nil || !c.HoldsLease(lease), nil
+	}
+	if !c.Role.Can(domain.RoleContributor) {
+		return false, fmt.Errorf("%w: role %s cannot edit tasks", domain.ErrNotPermitted, c.Role)
+	}
+	if visibility && !creator {
+		return false, fmt.Errorf("%w: only the task's creator or a maintainer may change its visibility",
+			domain.ErrNotPermitted)
+	}
+	if creator {
+		return false, nil
+	}
+	lease, err := s.Store.ActiveLeaseForTask(ctx, task.ID)
+	if err == nil && c.HoldsLease(lease) {
+		return false, nil
+	}
+	if err != nil && !errors.Is(err, domain.ErrNotFound) {
+		return false, err
+	}
+	return false, fmt.Errorf("%w: only the task's creator, the holder of its lease, or a maintainer may edit it",
+		domain.ErrNotPermitted)
 }
 
 // ---------------------------------------------------------------------------
@@ -97,11 +319,52 @@ type IntentDecision struct {
 	Advice string `json:"advice,omitempty"`
 }
 
-// CheckIntent evaluates duplicates and scope conflicts without changing anything.
+// CheckIntent evaluates duplicates and scope conflicts without changing any task, lease, or
+// reservation.
 //
 // This is the highest-value call in the system. An agent that runs it before editing cannot
 // cause a collision, and it costs one round trip.
+//
+// The one thing a blocked check does leave behind is a short-lived note that the caller is
+// waiting on that territory, so the release that frees it can say so (a `scope.released`
+// event naming them). Without it "wait for it" had nothing to wait on.
 func (s *Service) CheckIntent(ctx context.Context, c Caller, req IntentRequest) (IntentDecision, error) {
+	decision, err := s.evaluateIntent(ctx, c, req)
+	if err != nil {
+		return decision, err
+	}
+	if decision.Outcome == domain.OutcomeBlockConflict {
+		if err := s.noteWaiter(ctx, c, req, domain.ID(req.ExcludeTask)); err != nil {
+			return decision, err
+		}
+	}
+	return decision, nil
+}
+
+// noteWaiter records that the caller was refused territory, for notifyWaiters. It stores the
+// scopes asked for and nothing of the summary: the waiter is identified by who they are and
+// what they wanted to touch, which the conflict they just received already put on record.
+func (s *Service) noteWaiter(ctx context.Context, c Caller, req IntentRequest, taskID domain.ID) error {
+	if len(req.Scopes) == 0 {
+		return nil
+	}
+	_, err := s.Store.RecordIntent(ctx, domain.Intent{
+		ProjectID:   req.ProjectID,
+		SessionID:   req.SessionID,
+		PrincipalID: c.Principal.ID,
+		TaskID:      taskID,
+		Visibility:  domain.VisibilityPrivate,
+		Verb:        "wait",
+		Fingerprint: "waiting",
+		MinHash:     []int64{},
+		Scopes:      req.Scopes,
+		Outcome:     domain.OutcomeBlockConflict,
+	}, 15*time.Minute)
+	return err
+}
+
+// evaluateIntent is CheckIntent without the waiter note: the pure decision.
+func (s *Service) evaluateIntent(ctx context.Context, c Caller, req IntentRequest) (IntentDecision, error) {
 	project, err := s.Store.GetProject(ctx, req.ProjectID)
 	if err != nil {
 		return IntentDecision{}, err
@@ -184,9 +447,7 @@ func decide(duplicates []db.DuplicateCandidate, conflicts []db.ScopeConflict, cf
 			}
 		}
 		d.Reason = "scope conflict on " + blocker.ResourceKey
-		d.Advice = blocker.HolderOwner + " holds " + blocker.ResourceKey +
-			" for " + blocker.HolderTaskRef + " (" + string(blocker.HolderMode) +
-			"). Wait for it, split your scope, or join their task."
+		d.Advice = ConflictAdvice(blocker)
 		return d
 	}
 
@@ -198,6 +459,30 @@ func decide(duplicates []db.DuplicateCandidate, conflicts []db.ScopeConflict, cf
 			"). Proceed, but expect to coordinate on merge."
 	}
 	return d
+}
+
+// ConflictAdvice explains one blocking conflict in a sentence a person or agent can act on.
+//
+// Two holders look the same in the reservation table and mean different things. One is
+// editing the files right now: wait, split, or join. The other has finished and is waiting
+// for a merge: the files' new contents sit in an unmerged pull request, and the useful moves
+// are to wait for the merge, build on that branch, or go and review it. Saying "wait" in both
+// cases sent people to ping a teammate who was not doing anything.
+func ConflictAdvice(c db.ScopeConflict) string {
+	if c.PendingMerge() {
+		where := "an unmerged branch"
+		if c.HolderPullRequest != "" {
+			where = "an unmerged pull request (" + c.HolderPullRequest + ")"
+		}
+		return c.HolderOwner + "'s " + c.HolderTaskRef + " changed " + c.ResourceKey +
+			" and is waiting to merge (" + string(c.HolderStatus) + "); the new contents are in " +
+			where + ". The files stay reserved until it merges or the task is marked done " +
+			"(`conductor task done " + c.HolderTaskRef + "`) or cancelled. Wait for the merge, " +
+			"build on their branch, or review it."
+	}
+	return c.HolderOwner + " holds " + c.ResourceKey +
+		" for " + c.HolderTaskRef + " (" + string(c.HolderMode) +
+		"). Wait for it (you will get a scope.released event when it frees), split your scope, or join their task."
 }
 
 // fingerprint returns the intent fingerprint and MinHash signature, computing them under the
@@ -274,7 +559,7 @@ func (s *Service) StartWork(ctx context.Context, c Caller, req StartWorkRequest)
 		return StartWorkResult{}, err
 	}
 
-	decision, err := s.CheckIntent(ctx, c, req.IntentRequest)
+	decision, err := s.evaluateIntent(ctx, c, req.IntentRequest)
 	if err != nil {
 		return StartWorkResult{}, err
 	}
@@ -436,6 +721,9 @@ func (s *Service) ExpandScope(ctx context.Context, c Caller, fence domain.Fence,
 	if err != nil {
 		return ExpandScopeResult{}, err
 	}
+	if err := s.assertLeaseAuthority(ctx, c, fence); err != nil {
+		return ExpandScopeResult{}, err
+	}
 	if err := s.Store.AssertFence(ctx, fence); err != nil {
 		return ExpandScopeResult{}, err
 	}
@@ -463,10 +751,19 @@ func (s *Service) ExpandScope(ctx context.Context, c Caller, fence domain.Fence,
 				!errors.Is(uerr, domain.ErrIllegalTransition) {
 				return ExpandScopeResult{}, uerr
 			}
+			// The paused attempt is now waiting on that territory; note it so the holder's
+			// release tells this task's owner to resume.
+			if werr := s.noteWaiter(ctx, c, IntentRequest{
+				ProjectID: projectID, Scopes: requests, SessionID: c.SessionID,
+			}, fence.TaskID); werr != nil {
+				return ExpandScopeResult{}, werr
+			}
 			advice := "Scope expansion blocked."
-			if len(conflicts) > 0 {
-				advice = conflicts[0].HolderOwner + " holds " + conflicts[0].ResourceKey +
-					" for " + conflicts[0].HolderTaskRef + ". Split, wait, or join."
+			for _, cf := range conflicts {
+				if cf.Outcome.Blocks() {
+					advice = ConflictAdvice(cf)
+					break
+				}
 			}
 			return ExpandScopeResult{
 				Outcome:   domain.OutcomeBlockConflict,
@@ -506,6 +803,9 @@ type ProgressReport struct {
 func (s *Service) ReportProgress(ctx context.Context, c Caller, fence domain.Fence, projectID domain.ID, r ProgressReport) error {
 	project, err := s.Store.GetProject(ctx, projectID)
 	if err != nil {
+		return err
+	}
+	if err := s.assertLeaseAuthority(ctx, c, fence); err != nil {
 		return err
 	}
 	if _, err := s.Store.HeartbeatLease(ctx, fence,
@@ -583,6 +883,9 @@ type FinishResult struct {
 func (s *Service) FinishWork(ctx context.Context, c Caller, req FinishRequest) (FinishResult, error) {
 	project, err := s.Store.GetProject(ctx, req.ProjectID)
 	if err != nil {
+		return FinishResult{}, err
+	}
+	if err := s.assertLeaseAuthority(ctx, c, req.Fence); err != nil {
 		return FinishResult{}, err
 	}
 	if err := s.Store.AssertFence(ctx, req.Fence); err != nil {
@@ -686,6 +989,9 @@ func joinComma(in []string) string {
 // from the outgoing session's conversation. That is what lets Claude hand to Codex without
 // either one seeing the other's transcript.
 func (s *Service) Handoff(ctx context.Context, c Caller, fence domain.Fence, toHarness, toRole string, bundle domain.HandoffBundle) (domain.Handoff, error) {
+	if err := s.assertLeaseAuthority(ctx, c, fence); err != nil {
+		return domain.Handoff{}, err
+	}
 	task, err := s.Store.GetTask(ctx, fence.TaskID)
 	if err != nil {
 		return domain.Handoff{}, err

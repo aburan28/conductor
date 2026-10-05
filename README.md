@@ -18,6 +18,71 @@ what is actually built.
 
 ---
 
+## Install
+
+You need:
+
+- **git**, and **curl** for the release installer;
+- **PostgreSQL 16 or newer** that you already run, *or* **Docker**, in which case
+  `conductor up` starts Postgres 17 in a container for you;
+- **Go 1.25.14 or newer** only to build from source (an older `go` downloads the right
+  toolchain itself unless `GOTOOLCHAIN=local` is set).
+
+Pick one way to get the three binaries (`conductor`, `conductord`, `conductor-mcp`) onto your
+PATH:
+
+```bash
+# A release build for macOS or Linux (amd64/arm64), no Go needed. Checks SHA256SUMS before
+# installing into ~/.local/bin; add that directory to PATH if it is not already there.
+curl -fsSL https://raw.githubusercontent.com/aburan28/conductor/main/scripts/install-release.sh \
+  | bash -s -- aburan28/conductor ~/.local/bin
+
+# From a clone: `make install` downloads the release as above, `make install-local` builds
+# this checkout. Both add ~/.local/bin to PATH in your shell's startup file (zsh, bash, fish).
+git clone https://github.com/aburan28/conductor && cd conductor && make install-local
+
+# With Go, straight from the module:
+go install github.com/aburan28/conductor/cmd/...@latest
+```
+
+Every release archive carries a GitHub build-provenance attestation:
+`gh attestation verify conductor_vX.Y.Z_linux_amd64.tar.gz --repo aburan28/conductor`.
+`conductor version` (or `--version` on any of the three binaries) says which build you have.
+
+## Quickstart
+
+From the repository you want to coordinate:
+
+```bash
+conductor up          # Postgres (Docker only if none is reachable), the control plane, your login
+conductor init        # optional: scaffold .conductor/ policy files into this repository
+conductor status      # what is in flight
+conductor dashboard   # prints a ready-to-open link
+conductor wrap claude # run Claude Code as a registered session (or codex, opencode)
+conductor down        # stop the control plane (--db also stops the Postgres container)
+```
+
+`conductor up` is the whole setup. It reuses a Postgres that already answers at the DSN
+(`--dsn`, or `DATABASE_URL`) and starts one in Docker only when none does; it starts the
+control plane (API, SSE, dashboard, scheduler) on `127.0.0.1:8080` in the background, with
+its log and pidfile under `~/.conductor/runtime/`; and it saves your CLI login at
+`~/.conductor/credentials`. No token to copy, no second terminal. Running it again reuses
+whatever is already up. In a clone of this repository, `make up` and `make down` do the same.
+
+`conductor doctor` checks everything at once: the control plane and its version, the
+database, `conductord`, git, Docker, and which coding tools are installed and connected.
+
+### Getting help
+
+```bash
+conductor help                # the commands you need first
+conductor help all            # every command
+conductor help task           # one command, with an example (same as: conductor task -h)
+source <(conductor completion bash)   # tab completion; also zsh and fish
+```
+
+---
+
 ## What it does
 
 ```
@@ -224,24 +289,10 @@ the parse boundary before it can reach the store. Three tests assert this mechan
 
 ---
 
-## Quickstart
+## Setting up, in detail
 
-Requires Go 1.25+, Docker (for Postgres), and git.
-
-```bash
-make up
-```
-
-That is the whole thing: Postgres on `:55432`, the binaries in `bin/`, the control plane
-(API, SSE, dashboard, scheduler) serving `127.0.0.1:8080` in the background — log and
-pidfile under `.conductor/runtime/` — and your CLI login saved at `~/.conductor/credentials`.
-No token to copy, no second terminal.
-
-```bash
-conductor status                             # what is in flight
-conductor dashboard                          # prints a ready-to-open link
-make down                                    # stop the control plane (make db-down also stops Postgres)
-```
+[Quickstart](#quickstart) covers the one-command path. The rest of this section is what
+happens underneath, and how to do it by hand or for a team.
 
 ### Signing in on your own machine needs no token
 
@@ -331,11 +382,26 @@ address bar. If the endpoint you are logged in against is loopback (`127.0.0.1`)
 that a teammate cannot reach it and shows how to expose the control plane and pass a public
 `--endpoint`.
 
+A token is minted only for a **new** account. If the handle already belongs to someone in your
+organization (they are in another project, say), `invite` and `member add` add them to this
+project and print no token or link: they keep signing in with their own credentials, which now
+reach this project (`conductor login --project myrepo` switches their default). Handing the
+inviter a fresh token for an existing account would let any project admin sign in as anyone.
+
+Inviting someone who is already a member is refused rather than quietly changing their role.
+Roles change with `conductor member role`, which never grants a role above your own, never
+touches someone who outranks you, and never demotes the project's last administrator:
+
+```bash
+conductor member role rachel maintainer
+```
+
 The longer form still works, and is what a script or CI wants:
 
 ```bash
-conductor member add rachel --role contributor   # prints a `conductor login …` line, once
+conductor member add rachel --role contributor   # a new account: prints a `conductor login …` line, once
 conductor member list
+conductor member role rachel reviewer            # change a member's role
 conductor member remove rachel                   # also revokes their tokens
 conductor token create --save                    # mint one more; the old ones stay valid
 conductor token reset --save                     # rotate: one replacement, everything else revoked
@@ -365,7 +431,10 @@ conductor worker --dry-run succeed --once -v
 
 The built-in fake harness claims a task, creates a worktree, edits a file, runs your required
 checks, commits, and submits evidence — exercising every coordination path with a deterministic
-stand-in for a model.
+stand-in for a model. The task ends in `verifying`: the work is finished but not merged, so it
+keeps `README.md` reserved. `conductor task show T-1` shows the branch and commit; once that
+branch is merged, `conductor task done T-1` completes the task and frees the file (with the
+GitHub App linked, the merge does it for you).
 
 Or run the scripted demo, which reproduces the scenario above end to end:
 
@@ -381,6 +450,8 @@ make e2e
 conductor check --summary "…" --scope dir:internal/api    # before you edit. exit 3 = stop
 conductor task claim --next                               # take work and its territory
 conductor wrap claude                                     # register a session + heartbeat, then launch
+conductor task done T-42                                  # it merged: close it and free its files
+conductor task reopen T-42                                # review wants changes: back to the queue
 conductor serve qwen                                      # local vLLM for OpenCode (also: flash, glm53)
 conductor wrap opencode --model vllm/qwen3.8-27b
 conductor presence --watch                                # who is live, on what
@@ -412,6 +483,34 @@ conductor queue                                           # the admission line w
 ```
 
 Every command takes `--json`.
+
+### The loop, start to finish
+
+1. **Check.** `conductor check` (or the agent's `conductor_check_conflicts`) says whether
+   anyone holds what you are about to touch. A blocked check leaves a short note that you are
+   waiting; when the holder lets go, a `scope.released` event names you.
+2. **Claim.** `conductor task claim T-42 --scope path:…` takes the task and its territory. Run
+   inside a wrapped session (or by an agent through `coord_start_work`), the claim is bound to
+   that session. From a plain shell it is recorded against the checkout and waits up to ten
+   minutes for a session to take it over.
+3. **Wrap.** `conductor wrap claude` registers the session and adopts any claim made in the
+   same checkout. Its heartbeat (every 20 seconds) keeps the session **and every claim it
+   holds** alive for as long as it runs, and reports which paths the working tree has touched
+   (paths only), so merge-risk detection sees interactive work too. When the session ends,
+   the claim lapses one lease TTL later and the reconciler releases it. An MCP gateway keeps
+   the claim it took alive the same way, without the model spending a token on it.
+4. **Work.** The pre-edit hook blocks an edit to a file someone else holds. The first edit of
+   a file outside your own claim reserves it under the claim (`--auto-reserve`, the default
+   `conductor integrate` installs) and tells the agent so; a session with no claim is
+   reminded that its edits reserve nothing.
+5. **Publish.** `coord_publish_result` records the commit, the changed paths, and each
+   validation command with its exit code; `coord_finish_work` moves the task to `verifying`.
+6. **Merge.** Finished work keeps its territory while it waits to merge — anyone who checks
+   one of its files is told the change is in an unmerged pull request, not that someone is
+   editing. When the pull request merges, the task is done and its files are free: the
+   GitHub App does this from the merge webhook (or by polling), and `conductor task done`
+   does it by hand. A pull request closed without merging sends a waiting task back to
+   `ready` and releases its hold; `conductor task reopen` sends work back but keeps it.
 
 ### Sharing with someone by text
 
@@ -453,14 +552,29 @@ neither take the app over nor read a repository through it. In a check run, a pr
 appears as "a private task", and a public repository gets no task references or owners at
 all. A pull request's own task is excluded only for a branch in the repository itself, never
 a fork's. The app asks for read access to contents and pull requests and write access to checks only. It
-cannot push, merge, or change settings. Its credentials stay on the machine running
-`conductord` (`~/.conductor/github-app.json`, mode 0600), or come from
-`CONDUCTOR_GITHUB_APP_ID` / `CONDUCTOR_GITHUB_APP_PRIVATE_KEY(_FILE)` /
-`CONDUCTOR_GITHUB_WEBHOOK_SECRET`. A conductord that GitHub cannot reach, such as a laptop,
+cannot push, merge, or change settings. Its credentials are kept in Conductor's database, so
+every `conductord` sharing it serves the same app, with the private key and secrets sealed
+under a key that is not in the database (`~/.conductor/secret.key`, `--secret-key-file`, or
+`CONDUCTOR_SECRET_KEY`; replicas must share it — see docs/OPERATIONS.md). An app saved by an
+older version in `~/.conductor/github-app.json` is imported once. `CONDUCTOR_GITHUB_APP_ID` /
+`CONDUCTOR_GITHUB_APP_PRIVATE_KEY(_FILE)` / `CONDUCTOR_GITHUB_WEBHOOK_SECRET` override the
+stored values. A changed result updates the commit's check run rather than adding another,
+and an unchanged one is not posted again after a restart. A conductord that GitHub cannot reach, such as a laptop,
 polls open pull requests every two minutes (`--github-poll`). One started with a public
 `--public-url` receives signed webhooks at `/github/webhook`. The check is `neutral` when
 there is an overlap, so it informs a reviewer without blocking a merge unless branch
 protection requires it.
+
+The app also closes the loop. A pull request is linked to its task when its branch is one an
+attempt recorded or follows the `agent/<task-ref>/attempt-<n>` convention (branches in the
+repository itself only, never a fork's); `conductor task show` and the dashboard show the
+link. When a linked pull request **merges**, the task moves to `done` — from wherever its work
+stood, ending a still-live claim — and its reserved files are released. When one is **closed
+without merging**, a task that was waiting on it goes back to `ready` and drops its hold, and a
+task still being worked is left alone. Without webhooks, the poller does the same from the
+pull requests closed since its last pass (and looks up any linked pull request that left the
+open list), so a pull request opened and merged between two polls still completes its task.
+Seeing the same merge twice changes nothing and announces nothing.
 
 ### Connecting your coding tool
 
@@ -772,9 +886,10 @@ migration lane, table, API route, symbol), and acquisition takes a per-project a
 check-then-insert cannot interleave. Without it, two agents each see a clear field and both
 plant a flag.
 
-**Merge risk from observed diffs.** Runners report the paths git says changed, so the conflict
-graph is built from what agents are *doing*, not only what they declared. That is what turns a
-merge-time disaster into a minute-five warning.
+**Merge risk from observed diffs.** Runners report the paths git says changed, and so does the
+`conductor wrap` heartbeat for interactive sessions, so the conflict graph is built from what
+agents and people are *doing*, not only what they declared. That is what turns a merge-time
+disaster into a minute-five warning.
 
 ---
 
@@ -789,7 +904,13 @@ Implemented and exercised by tests:
 - Conflict graph: scope overlap, duplicate intent, merge risk, with join/wait/split advice.
 - Presence, event log with gapless per-aggregate sequencing, SSE stream, live dashboard.
 - REST API, MCP gateway, CLI, session wrapper with heartbeat sidecar.
-- Scheduler: reconcile, session reaping, stall detection, dependency gating, budget events.
+- Scheduler: reconcile (with outage recovery, so a control-plane outage does not reclaim
+  live work), session reaping, stall detection, dependency gating, budget events announced
+  once per threshold crossing, and retention.
+- Operations: ordered graceful shutdown, request ids and access logs, Prometheus `/metrics`,
+  `/v1/ready`, bounded database calls, request-body deadlines, capped event streams over a
+  shared per-project feed, a schema-version guard, multi-replica-safe GitHub state, and a
+  tested Postgres backup/restore script (docs/OPERATIONS.md).
 - Adaptive router: hard floors, tiers, escalation, de-escalation, budget guard.
 - Session capability advertisement and capability-aware assignment: sessions declare the model
   and reasoning effort they are running, the catalog decides what that is worth, and work with
@@ -810,8 +931,9 @@ Implemented and exercised by tests:
   against drive-by pages, DNS rebinding, and proxies, with an enhanced security mode that
   requires tokens everywhere and revokes what local sign-in issued.
 - A GitHub App created in one click through GitHub's manifest flow. It posts a "Conductor"
-  check run on each pull request that overlaps reserved or in-flight work, by webhook or by
-  polling when GitHub cannot reach the daemon.
+  check run on each pull request that overlaps reserved or in-flight work, links the pull
+  request to its task, and completes the task when it merges — by webhook, or by polling when
+  GitHub cannot reach the daemon.
 - Session portability: `conductor checkpoint` bundles a session's native transcript, working
   tree, and a harness-neutral continuation into one file — taken periodically by `conductor
   wrap`, by Claude Code and OpenCode hooks, at shutdown, and on an agent's own `coord_checkpoint`
@@ -860,10 +982,14 @@ Not built, and where the design says it goes:
   rather than binding the bidirectional JSON-RPC App Server.
 - **OIDC** (§25.1). Authentication is bearer tokens hashed at rest; there is no identity
   provider integration.
-- **Merge queue, PR integration, tracker sync, symbol/tree-sitter indexing** (§29, §30 phase 5).
-- **Codex model ids** are still empty in `.conductor/models.yaml` until an operator names a
-  verified Codex model. **OpenCode** is wired to local vLLM: Qwen 3.8 27B, GLM-5.3-Flash, and
-  GLM-5.3 (`conductor serve qwen|flash|glm53`, then `conductor wrap opencode --model vllm/…`).
+- **Merge queue, tracker sync, symbol/tree-sitter indexing** (§29, §30 phase 5). Pull requests
+  are integrated as far as the check run and merge-to-done above; nothing queues or performs
+  merges.
+- **Codex** is profiled as `gpt-5.3-codex` in `.conductor/models.yaml` but left disabled until
+  someone verifies it against their account; its `exec --json` stream adapter is tested against
+  fixture transcripts built from Codex's documented event schema, not a live run. **OpenCode**
+  is wired to local vLLM: Qwen 3.8 27B, GLM-5.3-Flash, and GLM-5.3 (`conductor serve
+  qwen|flash|glm53`, then `conductor wrap opencode --model vllm/…`).
 
 One deliberate deviation from the design document: it recommends TypeScript (§28.1). This is
 Go, at the repository owner's direction. The tradeoff is real — the Claude Agent SDK and
@@ -880,8 +1006,10 @@ make db-up && make test
 make e2e      # scripted two-person scenario end to end
 ```
 
-CI runs all of it against a real Postgres on every push, and fails if the integration tests
-skip — a misconfigured database service would otherwise produce a silently green run.
+CI runs all of it against a real Postgres (16 and 17) on every push, with and without the
+race detector, and fails if the integration tests skip — a misconfigured database service
+would otherwise produce a silently green run. It also runs `staticcheck` and `govulncheck`,
+and builds and unit-tests on macOS, which the release ships binaries for.
 
 `scripts/e2e.sh` asserts the MVP acceptance criteria of DESIGN.md §31 rather than printing
 output for a human to eyeball: that a completed task carries a commit and runner-observed
@@ -1005,9 +1133,54 @@ that produced it.
 | `.conductor/models.yaml` | model aliases (roles), capability floors, concrete profiles |
 | `.conductor/WORKFLOW.md` | the prose contract every agent reads; required checks; protected scopes |
 
+**These files are code, not just settings, wherever a `conductor worker` runs.** The harness
+`command`, `arg_template`, and `mcp_servers` in `project.yaml` are executed by the worker, and
+the required checks run as `sh -c` inside the worktree the agent just edited — an edited
+`Makefile` included. The worker runs them as its own user with no sandbox; it strips credentials
+from their environment (and hands the agent a short-lived, project-scoped token instead of
+yours), but it cannot stop code from reading that user's files. Run a worker only for
+repositories and teammates you would let run code on that machine (DESIGN.md §25.3).
+
+Running the control plane itself — probes and `/metrics`, shutdown and outage behaviour,
+database timeouts, retention windows, running several replicas, and backing up and restoring
+Postgres (`scripts/pg-backup.sh`) — is covered in [docs/OPERATIONS.md](docs/OPERATIONS.md).
+
+---
+
+## Removing Conductor
+
+`make uninstall` (or deleting the three binaries) removes the program, not what it created.
+All of it, from least to most destructive:
+
+```bash
+conductor down --db                          # stop the control plane and the conductor-db container
+conductor integrate <tool> --remove          # for each tool you connected (claude, codex, cursor, …)
+conductor sessions install-hook --uninstall  # if you installed the shutdown hook
+make uninstall                               # the binaries in ~/.local/bin and the PATH entry
+                                             # (~/.zshrc, ~/.bashrc or ~/.bash_profile, or fish conf.d)
+rm -rf ~/.conductor                          # credentials, pidfile and log, saved sessions,
+                                             # checkpoints, extra harness accounts, GitHub App key
+```
+
+`~/.conductor/checkpoints` may hold the only copy of a session you captured; export anything
+you want to keep (`conductor checkpoint export`) first.
+
+In each repository you ran `conductor init` in, `.conductor/` holds the policy files (versioned
+with your code; keep them if you might come back) and `.conductor/runtime/` the task worktrees.
+`init` also added a block between `<!-- conductor:begin -->` and `<!-- conductor:end -->` to
+`CLAUDE.md` and `AGENTS.md`; delete it by hand.
+
+The database is last because it is every task, reservation, and member of every project on
+this control plane. If `conductor up` started it in Docker:
+
+```bash
+docker rm -f conductor-db && docker volume rm conductor-pgdata
+```
+
+If you pointed Conductor at your own Postgres, drop its database there instead.
+
 ---
 
 ## License
 
-Not yet chosen. DESIGN.md §35 notes that Apache-2.0 components from OpenAI Symphony are
-compatible with reuse here.
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

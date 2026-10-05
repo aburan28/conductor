@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -18,6 +19,28 @@ type usageBody struct {
 	Buckets []usage.Bucket `json:"buckets"`
 }
 
+// maxUsageBody bounds a usage upload. A sync posts hourly buckets — a few hundred bytes each —
+// so even a year of buckets for every harness fits with room to spare; without a bound, any
+// member could make the server buffer an arbitrarily large body.
+const maxUsageBody = 8 << 20
+
+// decodeUsage reads a usage upload under maxUsageBody, answering 413 when it is exceeded and
+// 400 when it is not JSON. It reports whether the handler should continue.
+func (s *Server) decodeUsage(w http.ResponseWriter, r *http.Request, dst *usageBody) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxUsageBody)
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			s.ok(w, r, http.StatusRequestEntityTooLarge, ErrorBody{
+				Error: "usage upload exceeds 8 MiB; sync in smaller windows", Code: "too_large"})
+			return false
+		}
+		s.fail(w, r, domain.ErrInvalidArgument)
+		return false
+	}
+	return true
+}
+
 // recordSessionUsage is what a `conductor wrap` sidecar calls with what its harness logged.
 func (s *Server) recordSessionUsage(w http.ResponseWriter, r *http.Request, p domain.Principal) {
 	session, err := s.store.GetSession(r.Context(), r.PathValue("session"))
@@ -31,8 +54,7 @@ func (s *Server) recordSessionUsage(w http.ResponseWriter, r *http.Request, p do
 		return
 	}
 	var body usageBody
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		s.fail(w, r, domain.ErrInvalidArgument)
+	if !s.decodeUsage(w, r, &body) {
 		return
 	}
 	n, err := s.svc.RecordSessionUsage(r.Context(), caller, session, body.Buckets)
@@ -51,8 +73,7 @@ func (s *Server) recordSyncedUsage(w http.ResponseWriter, r *http.Request, p dom
 		return
 	}
 	var body usageBody
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		s.fail(w, r, domain.ErrInvalidArgument)
+	if !s.decodeUsage(w, r, &body) {
 		return
 	}
 	n, err := s.svc.RecordSyncedUsage(r.Context(), caller, project.ID, body.Buckets)

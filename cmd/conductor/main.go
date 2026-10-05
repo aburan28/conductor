@@ -13,182 +13,43 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/adamburan/conductor/internal/client"
 )
 
-const usageText = `conductor — coordinate humans and coding agents on one repository
-
-Setup
-  conductor up                       one command: Postgres, control plane, and login
-  conductor down [--db]              stop the control plane (--db also stops Postgres)
-  conductor init                     scaffold .conductor/ into this repository
-  conductor login                    save endpoint, token, and project
-  conductor doctor                   report which harnesses are installed
-  conductor member add <handle>      give a coworker access (prints a token once)
-  conductor invite <handle>          mint a teammate a token and print one join link
-  conductor join <link>              accept an invite link and log in
-  conductor member list|remove       see or revoke who has access
-  conductor token create|list|reset|revoke manage your own credentials
-  conductor dashboard                print a ready-to-open dashboard link
-  conductor integrate <tool>         connect Claude Code, Cursor, Codex, OpenCode, … to this project
-  conductor models                   the model catalog; models discover finds local ones
-  conductor policy lint              validate .conductor/ policy files and their rules
-
-Coordination
-  conductor status                   what is in flight, and what is contested
-  conductor presence                 who is working on what, right now
-  conductor capabilities             which models and effort levels are live right now
-  conductor check                    can I start this work? (run before you edit)
-  conductor budget                   the team's token budget for this window
-  conductor usage                    tokens and cost over time, by day, harness, model, or person
-  conductor usage sync               report this machine's unwrapped sessions
-  conductor quota                    how close each subscription login is to its usage limit
-  conductor budget share <who> <n>   give a teammate part of your allowance
-
-Work
-  conductor task list                open tasks
-  conductor task show <ref>          one task
-  conductor task create              file new work
-  conductor task claim <ref|--next>  take a task and its territory
-  conductor task release <ref>       hand a task back
-  conductor task handoff <ref>       hand off to another harness
-  conductor task assign <ref>        offer work to a session that meets a capability floor
-  conductor inbox                    work offered to this session
-  conductor task export <ref>        write the Markdown task card
-
-Territory
-  conductor scope add <ref> <resource>   reserve a resource
-  conductor scope list                   active reservations
-  conductor conflicts                    open conflicts and what to do about them
-
-Dispatch
-  conductor dispatch <objective|T-n> plan work, then send it to models by policy
-  conductor route <ref> --explain    show what the dispatch policy would decide, and why
-  conductor swarm join|status        contribute this machine's sessions to the team's queue
-  conductor queue                    the admission queue: who is waiting for a slot
-  conductor peers                    daemon-to-daemon mesh: link state per peer
-
-Execution
-  conductor worker                   run a runner: claim, execute, verify, report
-  conductor wrap <harness> [args…]   register a session, heartbeat, then launch a tool
-  conductor serve <flash|glm53|qwen> start local vLLM for OpenCode (GLM-5.3 / Qwen 3.8)
-  conductor pause | resume           freeze every agent terminal on this machine, and wake them
-  conductor sessions save all        keep every agent session resumable past a closed terminal or reboot
-  conductor sessions list            saved, paused, and running sessions on this machine
-  conductor sessions export          the project's whole session history, as JSON
-  conductor backup push|pull|status  copy this machine's resume records to/from S3
-  conductor security [local|enhanced] sign in without a token on this machine, or require tokens everywhere
-  conductor github setup|link|status create the GitHub App, link a repo, see what it checks
-  conductor checkpoint capture       snapshot a session: transcript + working tree, portable
-  conductor checkpoint resume <id>   continue it here, under another login (--account), or in another harness
-  conductor checkpoint list|export|push|pull  move checkpoints between machines, as a file or sealed via S3
-  conductor pause                    freeze the live agent terminals; save how to revive them
-  conductor resume                   wake paused sessions, reopening any closed terminals
-
-Run any command with -h for its flags.
-`
-
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Print(usageText)
+		printShortHelp(os.Stderr)
 		os.Exit(2)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	args := os.Args[2:]
-	var err error
+	name, args := os.Args[1], os.Args[2:]
+	switch name {
+	case "help", "-h", "-help", "--help":
+		os.Exit(cmdHelp(ctx, args))
+	case "--version", "-version":
+		name = "version"
+	}
 
-	switch os.Args[1] {
-	case "init":
-		err = cmdInit(args)
-	case "up":
-		err = cmdUp(ctx, args)
-	case "down":
-		err = cmdDown(ctx, args)
-	case "login":
-		err = cmdLogin(ctx, args)
-	case "member":
-		err = cmdMember(ctx, args)
-	case "invite":
-		err = cmdInvite(ctx, args)
-	case "join":
-		err = cmdJoin(ctx, args)
-	case "token":
-		err = cmdToken(ctx, args)
-	case "doctor":
-		err = cmdDoctor(ctx, args)
-	case "dashboard":
-		err = cmdDashboard(args)
-	case "status":
-		err = cmdStatus(ctx, args)
-	case "presence":
-		err = cmdPresence(ctx, args)
-	case "capabilities":
-		err = cmdCapabilities(ctx, args)
-	case "sessions":
-		err = cmdSessions(ctx, args)
-	case "backup":
-		err = cmdBackup(ctx, args)
-	case "checkpoint":
-		err = cmdCheckpoint(ctx, args)
-	case "security":
-		err = cmdSecurity(ctx, args)
-	case "github":
-		err = cmdGitHub(ctx, args)
-	case "inbox":
-		err = cmdInbox(ctx, args)
-	case "check":
-		err = cmdCheck(ctx, args)
-	case "conflicts":
-		err = cmdConflicts(ctx, args)
-	case "budget":
-		err = cmdBudget(ctx, args)
-	case "usage":
-		err = cmdUsage(ctx, args)
-	case "quota":
-		err = cmdQuota(ctx, args)
-	case "task":
-		err = cmdTask(ctx, args)
-	case "scope":
-		err = cmdScope(ctx, args)
-	case "worker":
-		err = cmdWorker(ctx, args)
-	case "wrap":
-		err = cmdWrap(ctx, args)
-	case "serve":
-		err = cmdServe(args)
-	case "pause":
-		err = cmdPause(ctx, args)
-	case "resume":
-		err = cmdResume(ctx, args)
-	case "integrate":
-		err = cmdIntegrate(ctx, args)
-	case "hook":
-		err = cmdHook(ctx, args)
-	case "dispatch":
-		err = cmdDispatch(ctx, args)
-	case "route":
-		err = cmdRoute(ctx, args)
-	case "policy":
-		err = cmdPolicy(ctx, args)
-	case "models":
-		err = cmdModels(ctx, args)
-	case "swarm":
-		err = cmdSwarm(ctx, args)
-	case "queue":
-		err = cmdQueue(ctx, args)
-	case "peers":
-		err = cmdPeers(ctx, args)
-	case "help", "-h", "--help":
-		fmt.Print(usageText)
+	// `<command> -h` gets the same page as `conductor help <command>`, for every command. The
+	// bare word "help" is only taken as a request for help by commands with subcommands,
+	// where it cannot be anything else; `conductor invite help` invites someone called help.
+	if c, ok := lookupCommand(name); ok && len(args) > 0 && isHelpArg(args[0]) &&
+		(args[0] != "help" || len(c.subs) > 0) {
+		helpFor(name, commandRunner(ctx, name))
 		return
-	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", os.Args[1], usageText)
+	}
+
+	err := runCommand(ctx, name, args)
+	if errors.Is(err, errUnknownCommand) {
+		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", name)
+		printShortHelp(os.Stderr)
 		os.Exit(2)
 	}
 
@@ -203,6 +64,127 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
+}
+
+// cmdHelp answers `conductor help [topic]` and returns the exit status.
+func cmdHelp(ctx context.Context, args []string) int {
+	if len(args) == 0 {
+		printShortHelp(os.Stdout)
+		return 0
+	}
+	if args[0] == "all" {
+		printAllHelp(os.Stdout)
+		return 0
+	}
+	if args[0] == "help" {
+		printShortHelp(os.Stdout)
+		return 0
+	}
+	if !helpFor(args[0], commandRunner(ctx, args[0])) {
+		fmt.Fprintf(os.Stderr, "no help topic %q; topics are:\n  %s\n", args[0], strings.Join(topicNames(), " "))
+		return 2
+	}
+	return 0
+}
+
+func commandRunner(ctx context.Context, name string) func([]string) error {
+	return func(args []string) error {
+		return runCommand(ctx, name, args)
+	}
+}
+
+// errUnknownCommand is runCommand's answer for a name that is not a command.
+var errUnknownCommand = errors.New("unknown command")
+
+// runCommand runs one top-level command.
+func runCommand(ctx context.Context, name string, args []string) error {
+	switch name {
+	case "init":
+		return cmdInit(args)
+	case "up":
+		return cmdUp(ctx, args)
+	case "down":
+		return cmdDown(ctx, args)
+	case "login":
+		return cmdLogin(ctx, args)
+	case "version":
+		return cmdVersion(args)
+	case "completion":
+		return cmdCompletion(args)
+	case "member":
+		return cmdMember(ctx, args)
+	case "invite":
+		return cmdInvite(ctx, args)
+	case "join":
+		return cmdJoin(ctx, args)
+	case "token":
+		return cmdToken(ctx, args)
+	case "doctor":
+		return cmdDoctor(ctx, args)
+	case "quota":
+		return cmdQuota(ctx, args)
+	case "dashboard":
+		return cmdDashboard(args)
+	case "status":
+		return cmdStatus(ctx, args)
+	case "presence":
+		return cmdPresence(ctx, args)
+	case "capabilities":
+		return cmdCapabilities(ctx, args)
+	case "sessions":
+		return cmdSessions(ctx, args)
+	case "backup":
+		return cmdBackup(ctx, args)
+	case "checkpoint":
+		return cmdCheckpoint(ctx, args)
+	case "security":
+		return cmdSecurity(ctx, args)
+	case "github":
+		return cmdGitHub(ctx, args)
+	case "inbox":
+		return cmdInbox(ctx, args)
+	case "check":
+		return cmdCheck(ctx, args)
+	case "conflicts":
+		return cmdConflicts(ctx, args)
+	case "budget":
+		return cmdBudget(ctx, args)
+	case "usage":
+		return cmdUsage(ctx, args)
+	case "task":
+		return cmdTask(ctx, args)
+	case "scope":
+		return cmdScope(ctx, args)
+	case "worker":
+		return cmdWorker(ctx, args)
+	case "wrap":
+		return cmdWrap(ctx, args)
+	case "serve":
+		return cmdServe(args)
+	case "pause":
+		return cmdPause(ctx, args)
+	case "resume":
+		return cmdResume(ctx, args)
+	case "integrate":
+		return cmdIntegrate(ctx, args)
+	case "hook":
+		return cmdHook(ctx, args)
+	case "dispatch":
+		return cmdDispatch(ctx, args)
+	case "route":
+		return cmdRoute(ctx, args)
+	case "policy":
+		return cmdPolicy(ctx, args)
+	case "models":
+		return cmdModels(ctx, args)
+	case "swarm":
+		return cmdSwarm(ctx, args)
+	case "queue":
+		return cmdQueue(ctx, args)
+	case "peers":
+		return cmdPeers(ctx, args)
+	}
+	return errUnknownCommand
 }
 
 // parseFlags parses flags that may appear before, after, or between positional arguments,
@@ -242,11 +224,22 @@ func mustClient() (*client.Client, client.Credentials, error) {
 		if signed, err := localSignInAndSave(creds); err == nil {
 			return client.New(signed.Endpoint, signed.Token), signed, nil
 		} else if !errors.Is(err, errNotLocal) {
-			return nil, creds, fmt.Errorf("not logged in, and local sign-in failed: %w\n(run `conductor login --token …`)", err)
+			return nil, creds, fmt.Errorf("not logged in, and local sign-in failed: %w\n(%s)", err, notLoggedInHint(creds.Endpoint))
 		}
-		return nil, creds, errors.New("not logged in: run `conductor login --token …`")
+		return nil, creds, fmt.Errorf("not logged in: %s", notLoggedInHint(creds.Endpoint))
 	}
 	return api, creds, nil
+}
+
+// notLoggedInHint says what to do without a login. On a loopback endpoint the usual cause is
+// that nothing is running yet, and a new user has no token to log in with: `conductor up`
+// starts the control plane and signs in. A remote endpoint needs a token from a teammate.
+func notLoggedInHint(endpoint string) string {
+	if isLoopbackEndpoint(endpoint) {
+		return "start the local control plane and sign in with `conductor up`, " +
+			"or log in elsewhere with `conductor login --endpoint URL --token …`"
+	}
+	return "run `conductor login --token …` with a token from `conductor invite`, or accept an invite with `conductor join <link>`"
 }
 
 // errNotLocal means local sign-in was not attempted because the endpoint is not this machine.

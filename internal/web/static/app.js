@@ -307,6 +307,9 @@ function onEvent(e) {
     case 'budget.shared': if (p.to === store.get().handle) toast(`${p.from} shared ${p.tokens} tokens with you`, { kind: 'info' }); break;
     case 'lease.expired': toast(`Lease expired on ${p.task_ref || 'a task'} — territory released`, { kind: 'warn' }); break;
     case 'queue.granted': if (p.principal === store.get().handle) toast('Your queue ticket was granted', { kind: 'info' }); break;
+    // Territory this person was refused has been released: tell them to try again.
+    case 'scope.released': if (p.principal === store.get().handle) toast(`${(p.resources || []).join(', ') || 'Territory'} is free again`, { kind: 'info', detail: `${p.task_ref || 'The holder'} let go${p.waiting_task_ref ? ' — ' + p.waiting_task_ref + ' can carry on' : ''}. Check again before you edit.` }); break;
+    case 'github.pr_merged': toast(`${p.task_ref || 'A task'} merged — done, its files are free`, { kind: 'info' }); break;
   }
   // The events view appends live lines itself instead of refetching.
   const st = current && current.instance && current.instance.state;

@@ -3,6 +3,12 @@ name: Pages
 # The marketing + docs site rebuilds whenever the site itself changes or the
 # content it syncs from changes (sync-content.cjs copies README.md and
 # docs/*.md into the build at prebuild time).
+#
+# Deploying needs GitHub Pages switched on once, by a repository admin:
+# Settings → Pages → Build and deployment → Source: "GitHub Actions". Until
+# then the site still builds (so a broken build is caught), and the deploy
+# job is skipped with a warning that says exactly that, instead of failing
+# every push to main with a 404 from the Pages API.
 on:
   push:
     branches: [main]
@@ -15,8 +21,6 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 # One deployment at a time; a superseding push queues behind the live run
 # rather than cancelling it, so the site is never left half-published.
@@ -28,10 +32,18 @@ jobs:
   build:
     name: build site
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pages: read
+    outputs:
+      enabled: ${{ steps.pages.outputs.enabled }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -47,18 +59,39 @@ jobs:
         working-directory: site
         run: npm run build
 
+      - name: is GitHub Pages enabled?
+        id: pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api "repos/${GITHUB_REPOSITORY}/pages" --jq .build_type > /tmp/pages-build-type 2>/dev/null; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            if [ "$(cat /tmp/pages-build-type)" != "workflow" ]; then
+              echo "::warning title=Pages source::Pages builds from a branch, not from this workflow. Set Settings → Pages → Source to \"GitHub Actions\"."
+            fi
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=GitHub Pages is not enabled::The site built, but it cannot be deployed until a repository admin enables Pages: Settings → Pages → Build and deployment → Source: GitHub Actions. Then re-run this workflow."
+          fi
+
       - name: upload
-        uses: actions/upload-pages-artifact@v3
+        if: steps.pages.outputs.enabled == 'true'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: site/dist
 
   deploy:
     name: deploy to GitHub Pages
     needs: build
+    if: needs.build.outputs.enabled == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

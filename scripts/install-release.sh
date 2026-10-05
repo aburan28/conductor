@@ -8,11 +8,15 @@
 # <dir>      directory the binaries are installed into (created if missing)
 # [version]  release tag to install (default: the repository's latest release)
 #
-# No Go toolchain is required. The expected assets, produced by the release
-# workflow, are:
+# No Go toolchain is required. The expected assets, produced by
+# .github/workflows/release.yml, are (<version> is the tag, with its leading v):
 #
 #   conductor_<version>_<os>_<arch>.tar.gz  containing conductor_<version>_<os>_<arch>/
 #   SHA256SUMS                               checked against the downloaded archive
+#
+# Each archive also carries a GitHub build-provenance attestation; the script prints the
+# command that verifies it. RELEASE_BASE_URL overrides https://github.com/<repo>/releases
+# (a mirror, or a local copy when testing the release pipeline).
 
 set -euo pipefail
 
@@ -34,7 +38,7 @@ case "$goarch" in
   *) echo "unsupported architecture: $goarch (need arm64 or amd64)" >&2; exit 1 ;;
 esac
 
-base="https://github.com/${repo}/releases"
+base="${RELEASE_BASE_URL:-https://github.com/${repo}/releases}"
 if [[ -z "$version" ]]; then
   # /releases/latest 302-redirects to /releases/tag/<tag>. Reading the
   # Location header needs no JSON parser and no authentication.
@@ -69,3 +73,4 @@ for bin in conductord conductor conductor-mcp; do
   install -m 0755 "$tmp/conductor_${version}_${goos}_${goarch}/$bin" "$dest/$bin"
 done
 echo "installed conductord, conductor, conductor-mcp from ${version} into ${dest}"
+echo "to verify where the archive was built: gh attestation verify ${asset} --repo ${repo}"

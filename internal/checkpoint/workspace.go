@@ -320,16 +320,14 @@ patch:
 	}
 	for _, p := range b.Files(UntrackedDir + "/") {
 		rel := strings.TrimPrefix(p, UntrackedDir+"/")
-		if rel == "" || strings.Contains(rel, "..") {
+		if rel == "" {
 			continue
 		}
 		data, _ := b.File(p)
-		dst := filepath.Join(root, filepath.FromSlash(rel))
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return rep, err
-		}
-		if err := os.WriteFile(dst, data, 0o644); err != nil {
-			return rep, err
+		// Never through a symlink, never outside the checkout, never into .git: the patch
+		// applied above may have just created a link for exactly this (writeInside).
+		if err := writeInside(root, rel, data, 0o644, 0o755); err != nil {
+			return rep, fmt.Errorf("restoring untracked files: %w", err)
 		}
 		rep.Untracked++
 	}

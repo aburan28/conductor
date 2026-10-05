@@ -19,10 +19,12 @@ import (
 	"syscall"
 
 	"github.com/adamburan/conductor/internal/mcp"
+	"github.com/adamburan/conductor/internal/version"
 )
 
 func main() {
 	fs := flag.NewFlagSet("conductor-mcp", flag.ExitOnError)
+	showVersion := fs.Bool("version", false, "print the version and exit")
 	endpoint := fs.String("endpoint", "", "control plane URL (default: saved credentials or CONDUCTOR_ENDPOINT)")
 	token := fs.String("token", "", "bearer token (default: saved credentials or CONDUCTOR_TOKEN)")
 	project := fs.String("project", "", "project id or slug (default: CONDUCTOR_PROJECT)")
@@ -38,6 +40,10 @@ Flags:
 	}
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		os.Exit(1)
+	}
+	if *showVersion {
+		fmt.Println("conductor-mcp", version.Get())
+		return
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

@@ -299,7 +299,7 @@ func InstallCodex(b *Bundle, codexHome, cwd string, force bool) (CodexInstall, e
 		return CodexInstall{}, errors.New("the checkpoint carries no transcript")
 	}
 	rel := m.Transcript.NativeRelPath
-	if rel == "" || strings.Contains(rel, "..") {
+	if !SafeRelPath(rel) {
 		rel = "sessions/" + m.CreatedAt.UTC().Format("2006/01/02") + "/rollout-" + m.CreatedAt.UTC().Format("2006-01-02T15-04-05") + "-" + m.SessionID + ".jsonl"
 	}
 	dst := filepath.Join(codexHome, filepath.FromSlash(rel))

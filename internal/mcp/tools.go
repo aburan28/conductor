@@ -336,6 +336,10 @@ func (s *Server) startWork(ctx context.Context, raw json.RawMessage) (any, error
 		"attach_to":    args.AttachTo,
 		"force":        args.Force,
 		"harness":      "mcp",
+		// Binding the claim to the wrapping session is what keeps it alive: the wrap
+		// sidecar's heartbeat renews every lease its session holds. Without it the lease
+		// lived only as long as the model kept calling progress tools.
+		"session_id": s.session,
 	}, &result)
 
 	// A 409 here is a coordination answer, not a failure: the body explains who holds the
@@ -352,10 +356,10 @@ func (s *Server) startWork(ctx context.Context, raw json.RawMessage) (any, error
 	}
 
 	// Adopt the fence so subsequent tool calls in this session are automatically fenced.
-	s.fence = domain.Fence{
+	s.setFence(domain.Fence{
 		TaskID: result.TaskID, AttemptID: result.AttemptID,
 		LeaseID: result.LeaseID, FencingEpoch: result.FencingEpoch,
-	}
+	})
 	return jsonResult(result), nil
 }
 
@@ -499,21 +503,23 @@ func (s *Server) publishResult(ctx context.Context, raw json.RawMessage) (any, e
 		})
 	}
 
-	// Reported as evidence with outcome "blocked", which records the artifact metadata
-	// without transitioning the task. Completion still goes through coord_finish_work, and
-	// the runner's own observations are what the verification pipeline trusts.
-	err := s.api.Post(ctx, "/v1/attempts/"+s.fence.AttemptID+"/progress", map[string]any{
+	// Recorded as evidence against the attempt — the commit, the changed paths, and each
+	// command with its exit code — without transitioning the task; completion still goes
+	// through coord_finish_work. The results carry no runner id, so anything reading them can
+	// tell an agent's own report from a runner's observation.
+	var out map[string]any
+	err := s.api.Post(ctx, "/v1/attempts/"+s.fence.AttemptID+"/evidence", map[string]any{
 		"task_id": s.fence.TaskID, "lease_id": s.fence.LeaseID,
 		"fencing_epoch": s.fence.FencingEpoch,
-		"phase":         "testing", "changed_paths": args.ChangedPaths,
-		"summary": fmt.Sprintf("published %d validation result(s)", len(commands)),
-	}, nil)
+		"commit_sha":    args.CommitSHA, "changed_paths": args.ChangedPaths,
+		"commands": commands,
+	}, &out)
 	if err != nil {
 		return nil, err
 	}
 	return jsonResult(map[string]any{
 		"status": "recorded", "commands": len(commands), "commit_sha": args.CommitSHA,
-		"note": "Validation is attested by the runner. Agent-reported exit codes are advisory.",
+		"note": "Recorded as agent-reported evidence. A runner's own observations are attested separately.",
 	}), nil
 }
 
@@ -546,7 +552,7 @@ func (s *Server) finishWork(ctx context.Context, raw json.RawMessage) (any, erro
 	if len(result.MissingChecks) > 0 {
 		return jsonResult(result), nil
 	}
-	s.fence = domain.Fence{}
+	s.setFence(domain.Fence{})
 	return jsonResult(result), nil
 }
 
@@ -580,7 +586,7 @@ func (s *Server) handoff(ctx context.Context, raw json.RawMessage) (any, error) 
 	if err != nil {
 		return nil, err
 	}
-	s.fence = domain.Fence{}
+	s.setFence(domain.Fence{})
 	return jsonResult(out), nil
 }
 
@@ -672,7 +678,7 @@ func (s *Server) delegate(ctx context.Context, raw json.RawMessage) (any, error)
 	}
 	// The lease is gone either way: the handoff released it. Clearing the fence keeps the
 	// agent from making further fenced calls that would now fail confusingly.
-	s.fence = domain.Fence{}
+	s.setFence(domain.Fence{})
 	return jsonResult(out), nil
 }
 

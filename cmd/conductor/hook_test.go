@@ -2,11 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/adamburan/conductor/internal/client"
 	"github.com/adamburan/conductor/internal/coord"
 	"github.com/adamburan/conductor/internal/db"
 	"github.com/adamburan/conductor/internal/domain"
@@ -187,5 +191,88 @@ func TestHookCheckpointCapturesFromStdin(t *testing.T) {
 	_ = cmdHook(context.Background(), []string{"checkpoint"})
 	if count() != 2 {
 		t.Fatalf("PreCompact hook did not checkpoint the changed transcript (%d total)", count())
+	}
+}
+
+func TestJudgePreToolExplainsPendingMerge(t *testing.T) {
+	v := judgePreTool(coord.IntentDecision{
+		Outcome: domain.OutcomeBlockConflict,
+		Conflicts: []db.ScopeConflict{{
+			ResourceKey: "path:internal/api/api.go", Outcome: domain.OutcomeBlockConflict,
+			HolderOwner: "alice", HolderTaskRef: "T-7", HolderMode: domain.ModeWriteExclusive,
+			HolderStatus: domain.TaskVerifying, HolderPullRequest: "https://github.com/acme/w/pull/3",
+		}},
+	}, "bob")
+	if !v.Block || !strings.Contains(v.Message, "waiting to merge") || !strings.Contains(v.Message, "pull/3") {
+		t.Fatalf("verdict = %+v, want a pending-merge explanation", v)
+	}
+}
+
+func TestCoveredBy(t *testing.T) {
+	scopes := []string{"dir:internal/api", "path:README.md"}
+	for rel, want := range map[string]bool{
+		"internal/api/handlers.go": true,
+		"README.md":                true,
+		"internal/db/claim.go":     false,
+	} {
+		if got := coveredBy(scopes, rel); got != want {
+			t.Errorf("coveredBy(%q) = %v, want %v", rel, got, want)
+		}
+	}
+	if !coveredBy([]string{"repo:"}, "anything.go") {
+		t.Error("a repo-wide claim covers every file")
+	}
+}
+
+// An edit outside the session's own claim is reserved under that claim on first edit, by
+// path alone, and the model is told; with auto-reserve off it is only reported.
+func TestExpandOwnScopeReservesThroughTheSession(t *testing.T) {
+	t.Setenv("CONDUCTOR_STATE_DIR", t.TempDir())
+	var got map[string]any
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.URL.Path != "/v1/sessions/s-1/scopes" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"outcome":"allow","task_ref":"T-3"}`))
+	}))
+	defer srv.Close()
+	api := client.New(srv.URL, "tok")
+	claim := activeTask{ID: "t-3", Ref: "T-3", Scopes: []string{"dir:internal/api"}, SessionID: "s-1"}
+
+	if note := expandOwnScope(context.Background(), api, claim, "internal/api/x.go", true); note != "" || calls != 0 {
+		t.Fatalf("an edit inside the claim = %q (%d calls), want silence", note, calls)
+	}
+	note := expandOwnScope(context.Background(), api, claim, "internal/db/y.go", true)
+	if calls != 1 || !strings.Contains(note, "now reserved for T-3") {
+		t.Fatalf("note = %q after %d call(s)", note, calls)
+	}
+	scopes, _ := got["scopes"].([]any)
+	first, _ := scopes[0].(map[string]any)
+	if first["resource"] != "path:internal/db/y.go" || got["source"] != "observed" {
+		t.Errorf("request = %v", got)
+	}
+	if body, _ := json.Marshal(got); strings.Contains(string(body), "content") {
+		t.Errorf("something besides the path was sent: %s", body)
+	}
+
+	// Off: report, do not reserve.
+	note = expandOwnScope(context.Background(), api, claim, "internal/db/z.go", false)
+	if calls != 1 || !strings.Contains(note, "outside T-3's claimed scope") {
+		t.Errorf("report-only note = %q (%d calls)", note, calls)
+	}
+}
+
+func TestUnclaimedEditNoteIsRateLimited(t *testing.T) {
+	t.Setenv("CONDUCTOR_STATE_DIR", t.TempDir())
+	if note := unclaimedEditNote("s-9", "/repo"); !strings.Contains(note, "holds no task") {
+		t.Fatalf("first note = %q", note)
+	}
+	if note := unclaimedEditNote("s-9", "/repo"); note != "" {
+		t.Errorf("repeated note = %q, want silence", note)
 	}
 }

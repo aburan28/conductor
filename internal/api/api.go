@@ -13,12 +13,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/adamburan/conductor/internal/coord"
 	"github.com/adamburan/conductor/internal/db"
@@ -52,6 +52,8 @@ type Server struct {
 	local LocalLoginOptions
 	// github is the GitHub App integration; nil when no app is configured (github.go).
 	github *GitHub
+	// ops is the operational surface: lifetime context, background work, streams (observe.go).
+	ops *opsState
 }
 
 type Options struct {
@@ -74,6 +76,9 @@ type Options struct {
 	LocalLogin LocalLoginOptions
 	// GitHub is the GitHub App integration. Nil serves only the setup page.
 	GitHub *GitHub
+	// Ops configures metrics, request deadlines, stream caps and the server lifetime
+	// (observe.go).
+	Ops OpsOptions
 }
 
 func New(store *db.Store, svc *coord.Service, opts Options) *Server {
@@ -95,7 +100,9 @@ func New(store *db.Store, svc *coord.Service, opts Options) *Server {
 		local:       opts.LocalLogin,
 		github:      opts.GitHub,
 	}
+	s.ops = newOpsState(store, s, opts.Ops)
 	s.routes()
+	s.opsRoutes(s.mux)
 	return s
 }
 
@@ -103,9 +110,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 
-// Handler wraps the mux with logging, panic recovery, and security headers.
+// Handler wraps the mux with request IDs, access logging, metrics, panic recovery and body
+// deadlines (observe.go), and security headers.
 func (s *Server) Handler() http.Handler {
-	return s.recoverPanic(s.securityHeaders(s.logRequests(s.mux)))
+	return s.observe(s.securityHeaders(s.mux))
 }
 
 // securityHeaders sets the headers that matter for a page which holds a bearer token in its
@@ -143,6 +151,8 @@ const (
 	principalKey ctxKey = iota
 	// tokenNameKey carries the name of the token that authenticated the request.
 	tokenNameKey
+	// tokenScopeKey carries the project the authenticating token is confined to, if any.
+	tokenScopeKey
 )
 
 // tokenName returns the name of the token the request authenticated with.
@@ -151,11 +161,62 @@ func tokenName(r *http.Request) string {
 	return name
 }
 
+// tokenProjectScope returns the project the request's token is confined to, or "".
+func tokenProjectScope(r *http.Request) domain.ID {
+	id, _ := r.Context().Value(tokenScopeKey).(domain.ID)
+	return id
+}
+
+// scopedGlobalRoutes are the routes that name no project resource but that a project-scoped
+// token may still use: identity, read-only listings (filtered to the scope where they list
+// projects), the lease heartbeat and runner registration (both authorized against the
+// project they touch), and the MCP gateway (which calls back into this API with the same
+// token, so every tool call is scoped in turn).
+var scopedGlobalRoutes = map[string]bool{
+	"GET /v1/whoami": true, "GET /v1/projects": true, "GET /v1/tokens": true,
+	"GET /v1/peers": true, "GET /v1/security": true, "GET /v1/github/status": true,
+	"POST /v1/leases/heartbeat": true, "POST /v1/runners/register": true,
+	"POST /mcp": true, "GET /mcp": true, "DELETE /mcp": true,
+	"POST /mcp/{project}": true, "GET /mcp/{project}": true, "DELETE /mcp/{project}": true,
+}
+
+// scopedRouteAllowed reports whether a project-scoped token may reach a route. Routes that
+// address a project or a resource inside one are allowed, because their handlers authorize
+// against that resource's project through coord.Authorize, which applies the scope (sessions
+// and runners, which are checked by owner instead, apply it themselves). Everything else —
+// the machine's security mode, GitHub App setup, token administration — is server- or
+// principal-wide, and a credential handed to one attempt's agent has no business there.
+func scopedRouteAllowed(pattern string) bool {
+	if scopedGlobalRoutes[pattern] {
+		return true
+	}
+	for _, param := range []string{"{project}", "{task}", "{attempt}", "{assignment}",
+		"{reservation}", "{conflict}", "{ticket}", "{session}", "{runner}"} {
+		if strings.Contains(pattern, param) {
+			return true
+		}
+	}
+	return false
+}
+
 // authenticate resolves the bearer token to a principal.
 //
 // Tokens are matched by SHA-256 hash, so a database dump contains no usable credential, and
-// the plaintext is never logged (DESIGN.md §25.1).
+// the plaintext is never logged (DESIGN.md §25.1). The token must arrive in the Authorization
+// header; see authenticateStream for the one route that also accepts it in the URL.
 func (s *Server) authenticate(next func(http.ResponseWriter, *http.Request, domain.Principal)) http.HandlerFunc {
+	return s.authenticateWith(false, next)
+}
+
+// authenticateStream is authenticate for the SSE event stream, the one route that also
+// accepts ?token=. A browser's EventSource cannot set headers, so the dashboard has no other
+// way to open the stream; everywhere else a token in the URL is refused, because URLs land in
+// proxy logs, browser history, and Referer headers where a header never does.
+func (s *Server) authenticateStream(next func(http.ResponseWriter, *http.Request, domain.Principal)) http.HandlerFunc {
+	return s.authenticateWith(true, next)
+}
+
+func (s *Server) authenticateWith(allowQueryToken bool, next func(http.ResponseWriter, *http.Request, domain.Principal)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		client := clientKey(r, s.behindProxy)
 		// The throttle gates *failures*, not requests. A correct credential is always
@@ -177,22 +238,29 @@ func (s *Server) authenticate(next func(http.ResponseWriter, *http.Request, doma
 
 		header := r.Header.Get("Authorization")
 		token := strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
-		if token == "" || token == header {
-			// Also accept the token as a query parameter for SSE, where browsers cannot set
-			// headers on EventSource. Restricted to GET so a token never rides on a mutation.
-			if r.Method == http.MethodGet {
-				token = r.URL.Query().Get("token")
-			}
+		if token == header {
+			token = ""
+		}
+		if token == "" && allowQueryToken && r.Method == http.MethodGet {
+			// Restricted to GET on the stream route, so a token never rides on a mutation.
+			token = r.URL.Query().Get("token")
 		}
 		if token == "" {
 			reject()
 			return
 		}
-		principal, name, err := s.store.AuthenticateTokenNamed(r.Context(), token)
+		principal, info, err := s.store.AuthenticateTokenInfo(r.Context(), token)
 		if err != nil {
+			if !errors.Is(err, domain.ErrUnauthenticated) {
+				// A database failure is not a bad credential; do not count it against the
+				// client, and do not tell it the token was wrong.
+				s.fail(w, r, err)
+				return
+			}
 			reject()
 			return
 		}
+		name := info.Name
 		// A token local sign-in issued is good only while local sign-in is: the moment the
 		// server is in enhanced mode — switched at runtime, pinned by flag, or the default
 		// for a reachable daemon — it stops working, whether or not it was revoked.
@@ -209,8 +277,19 @@ func (s *Server) authenticate(next func(http.ResponseWriter, *http.Request, doma
 			}
 		}
 		s.limiter.succeed(client)
+		notePrincipal(r, principal.ID)
 		ctx := context.WithValue(r.Context(), principalKey, principal)
 		ctx = context.WithValue(ctx, tokenNameKey, name)
+		if info.ProjectID != "" {
+			if !scopedRouteAllowed(r.Pattern) {
+				s.fail(w, r, fmt.Errorf("%w: a project-scoped token cannot use %s", domain.ErrNotPermitted, r.Pattern))
+				return
+			}
+			ctx = context.WithValue(ctx, tokenScopeKey, info.ProjectID)
+			// coord.Authorize enforces the scope, so every project-scoped handler inherits it
+			// without having to remember to.
+			ctx = coord.WithTokenScope(ctx, info.ProjectID)
+		}
 		next(w, r.WithContext(ctx), principal)
 	}
 }
@@ -298,6 +377,8 @@ type ErrorBody struct {
 	Error   string `json:"error"`
 	Code    string `json:"code"`
 	Details any    `json:"details,omitempty"`
+	// RequestID is set on server faults, whose detail is logged rather than returned.
+	RequestID string `json:"request_id,omitempty"`
 }
 
 // fail maps a domain error onto an HTTP status exactly once, here, so status decisions cannot
@@ -336,8 +417,26 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		status, code = http.StatusServiceUnavailable, "no_capacity"
 	}
 
+	if status == http.StatusInternalServerError {
+		// The detail of a server fault — usually a database error naming tables, columns,
+		// constraints, or the database host — stays in the server log. The client gets a
+		// request id to quote, which is all an operator needs to find that line.
+		// The observe middleware has already put this id on the response's X-Request-Id.
+		id := requestID(r)
+		if id == "" {
+			id = newRequestID()
+			w.Header().Set("X-Request-Id", id)
+		}
+		s.logger.Error("request failed", "request_id", id, "method", r.Method,
+			"path", r.URL.Path, "error", err)
+		s.ok(w, r, status, ErrorBody{Error: "internal error", Code: code, RequestID: id})
+		return
+	}
 	if status >= 500 {
-		s.logger.Error("request failed", "path", r.URL.Path, "error", err)
+		// A mapped 5xx (no capacity) is a domain answer whose message is meant for the
+		// client, but it is still worth a log line.
+		s.logger.Warn("request failed", "request_id", requestID(r), "method", r.Method,
+			"path", r.URL.Path, "error", err)
 	}
 	s.ok(w, r, status, ErrorBody{Error: err.Error(), Code: code})
 }
@@ -396,55 +495,6 @@ func (s *Server) remember(r *http.Request, principal domain.Principal, status in
 		r.Header.Get("X-Conductor-Body-Hash"), status, encoded)
 }
 
-// ---------------------------------------------------------------------------
-// Middleware
-// ---------------------------------------------------------------------------
-
-func (s *Server) logRequests(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-		next.ServeHTTP(rec, r)
-
-		// Log identifiers and outcomes only. Bodies routinely contain task titles, which are
-		// project-visibility data and do not belong in a server log (DESIGN.md §26.3).
-		s.logger.Debug("request",
-			"method", r.Method, "path", r.URL.Path, "status", rec.status,
-			"duration", time.Since(start).Round(time.Millisecond).String())
-	})
-}
-
-func (s *Server) recoverPanic(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer func() {
-			if rec := recover(); rec != nil {
-				s.logger.Error("panic recovered", "path", r.URL.Path, "panic", rec)
-				s.ok(w, r, http.StatusInternalServerError,
-					ErrorBody{Error: "internal error", Code: "panic"})
-			}
-		}()
-		next.ServeHTTP(w, r)
-	})
-}
-
-type statusRecorder struct {
-	http.ResponseWriter
-	status int
-}
-
-func (w *statusRecorder) WriteHeader(status int) {
-	w.status = status
-	w.ResponseWriter.WriteHeader(status)
-}
-
-// Flush forwards to the underlying writer so SSE streaming keeps working through the
-// recorder.
-func (w *statusRecorder) Flush() {
-	if f, ok := w.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
-}
-
 func intParam(r *http.Request, name string, fallback int) int {
 	if v := r.URL.Query().Get(name); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -466,3 +516,78 @@ func fenceFrom(r *http.Request, body fenceCarrier) domain.Fence {
 }
 
 type fenceCarrier interface{ fence() domain.Fence }
+
+// ownSession loads a session the caller registered. Sessions are authorized by owner rather
+// than by project role, so the token's project scope is applied here: a scoped token cannot
+// heartbeat, close, or re-declare its owner's sessions in another project. Another
+// principal's session and a session outside the scope are the same 404.
+func (s *Server) ownSession(r *http.Request, p domain.Principal) (domain.Session, error) {
+	session, err := s.store.GetSession(r.Context(), r.PathValue("session"))
+	if err != nil {
+		if isBadUUID(err) {
+			return domain.Session{}, domain.ErrNotFound
+		}
+		return domain.Session{}, err
+	}
+	if scope := tokenProjectScope(r); scope != "" && session.ProjectID != scope {
+		return domain.Session{}, domain.ErrNotFound
+	}
+	if session.PrincipalID != p.ID {
+		return domain.Session{}, domain.ErrNotPermitted
+	}
+	return session, nil
+}
+
+// inTokenScope filters a project listing to the token's scope, if it has one.
+func inTokenScope(r *http.Request, projects []domain.Project) []domain.Project {
+	scope := tokenProjectScope(r)
+	if scope == "" {
+		return projects
+	}
+	out := make([]domain.Project, 0, 1)
+	for _, p := range projects {
+		if p.ID == scope {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// execProject resolves the project and authorizes the caller for execution endpoints, which
+// accept the runner role as well as contributors (coord.Caller.CanExecute).
+func (s *Server) execProject(r *http.Request, principal domain.Principal) (domain.Project, coord.Caller, error) {
+	project, err := s.resolveProject(r.Context(), principal, r.PathValue("project"))
+	if err != nil {
+		return domain.Project{}, coord.Caller{}, err
+	}
+	caller, err := s.svc.AuthorizeExecution(r.Context(), principal, project.ID)
+	if err != nil {
+		return domain.Project{}, coord.Caller{}, err
+	}
+	return project, caller, nil
+}
+
+// execTaskFor is taskFor for execution endpoints.
+func (s *Server) execTaskFor(r *http.Request, principal domain.Principal) (domain.Task, coord.Caller, error) {
+	task, caller, err := s.taskFor(r, principal, domain.RoleObserver)
+	if err != nil {
+		return domain.Task{}, coord.Caller{}, err
+	}
+	if !caller.CanExecute() {
+		return domain.Task{}, coord.Caller{}, fmt.Errorf("%w: role %s cannot execute work",
+			domain.ErrNotPermitted, caller.Role)
+	}
+	return task, caller, nil
+}
+
+// auditOthersWork records a principal acting on a task or lease that is not theirs — a
+// maintainer releasing a stuck lease, cancelling a teammate's task. Those are legitimate, and
+// precisely the actions someone will later need to explain.
+func (s *Server) auditOthersWork(r *http.Request, caller coord.Caller, task domain.Task, action string, detail map[string]any) {
+	if detail == nil {
+		detail = map[string]any{}
+	}
+	detail["task_ref"] = task.Ref
+	s.store.Audit(r.Context(), task.OrganizationID, task.ProjectID, caller.Principal.ID,
+		action, "task", task.ID, detail)
+}
