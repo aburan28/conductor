@@ -2014,7 +2014,7 @@ Bearer tokens in this build:
   URL is refused, since URLs end up in proxy logs and browser history.
 - Every token expires unless an administrator deliberately invites a service identity (a runner)
   with no expiry. `POST /v1/tokens` and `/v1/tokens/reset` default to 90 days and cap a human's
-  token there. `conductord bootstrap` mints a 90-day token (`--token-ttl`) and revokes the
+  token there; an organization's policy can lower both caps, and cap service tokens (§25.8). `conductord bootstrap` mints a 90-day token (`--token-ttl`) and revokes the
   bootstrap token it printed before, so re-running bootstrap to recover a login retires the old one.
 - A token can be confined to one project (`POST /v1/tokens` with `project`). Every
   project-scoped authorization goes through `coord.Authorize`, which treats any other project as
@@ -2157,8 +2157,27 @@ and hourly otherwise), `iss` equal to the configured issuer and to the discovery
 minutes of skew, the nonce from this sign-in, and `email_verified` true. GitHub has no ID token:
 the identity is GitHub's answer for the access token just redeemed — the numeric user id, the
 verified primary address from `/user/emails`, and active membership of an allowed organization.
-Providers that do not assert `email_verified` (Entra ID among them) are refused, because an
-unverified address is exactly what an account takeover would supply.
+Providers that do not assert `email_verified` are refused, because an unverified address is
+exactly what an account takeover would supply — with one explicit exception, below. GitHub sign-ins
+ask for `read:org` and also report the account's active organizations and its teams
+(`org/team-slug`), which organization policy (§25.8) admits by and maps to roles; an OIDC
+provider's groups come from its configured claim (`groups-claim`, default `groups`).
+
+**Microsoft Entra ID.** Entra issues no `email_verified` claim, so without help it cannot sign
+anyone in. A provider may list `trust-email-domain=` domains; then a token without a verified
+email is accepted when (1) the provider's issuer is one tenant's,
+`https://login.microsoftonline.com/<tenant-id>/v2.0` with the tenant's GUID — `common`,
+`organizations`, `consumers` and domain-named tenants are refused at startup, because through them
+any tenant's administrator decides what the claims say; (2) the token's `tid` is that tenant;
+(3) it is not a guest (`idp` naming another issuer, or `acct` 1); and (4) its `upn`, else
+`preferred_username`, else `email` is an address in a listed domain, which becomes the identity's
+address. The UPN comes first because Entra lets a tenant use a UPN suffix only after proving it
+owns the domain, whereas `email` is an attribute a tenant administrator can set to anything. What
+this trusts: the tenant's administrators, who could already sign in as any of its accounts, not to
+put an address in a listed domain on an account it does not belong to. What it does not do: trust
+any other tenant, any guest, or any address outside the listed domains; and a token that does
+assert `email_verified` is still taken at its word. Linking by address (below) still needs an
+address an administrator registered.
 
 **Identity mapping.** An external account is named by issuer and subject (GitHub: instance URL
 and user id), never by email: `external_identities` is unique on (issuer, subject) and on
@@ -2194,6 +2213,85 @@ authentication means. The PKCE verifier and nonce of a sign-in in flight are sto
 for up to ten minutes; they are useless without the authorization code and the client secret.
 Revoking someone at the provider does not end their current `sso:` token; it expires within the
 token TTL, and `conductor sso unlink` or `conductor member remove` ends it at once.
+
+### 25.8 Organization administration
+
+An organization's administrators — principals holding `org_admin` in any of its projects — manage
+it through `/v1/admin` and the dashboard's Admin area. Roles stay per project; there is no
+separate organization membership. `conductord bootstrap` makes the first principal of a new
+organization its `org_admin` (and, asked for no role, never changes an existing member's).
+
+**Policy.** One document per organization (`org_policies`, `internal/admin.Policy`), validated as
+a whole on every change and audited by the names of the settings changed (never their values):
+require-SSO; allowed email domains and GitHub organizations; account provisioning (default project
+and role, contributor at most, and only with a domain or organization restriction); group → role
+rules with a ceiling (default maintainer; `org_admin` is never mappable); caps on human and service
+token lifetimes and the single sign-on session; feature flags; branding. A server's config file
+(`conductord --config`) can lock any of these for every organization: the lock is applied over the
+stored document whenever it is read, the API refuses to change a locked setting (403), and the
+dashboard shows it read-only. Each replica caches an organization's effective policy for five
+seconds.
+
+**Require-SSO** is enforced at authentication, on every request: a human principal's token is
+accepted only if it is named `sso:<provider>` (minted by a sign-in) or `sso:<provider>/<name>`
+(minted with such a token — capped at its parent's expiry, and revoked with it when the identity is
+unlinked; the `sso:` prefix cannot be chosen by a client), or `local:` (local sign-in, governed by
+the security mode). Other tokens are refused with `sso_required`, not revoked: refusal covers
+every way a token can come to exist (bootstrap, invite, older tokens), takes effect everywhere at
+once, and is reversible when the identity provider is down; deactivation is how access ends for
+good. Service principals are not people and keep their tokens. An invite of a person mints no
+token while the policy is on. Turning the policy on is refused from a session that did not itself
+come from single sign-on, so the administrator doing it has proved they can still sign in.
+
+**Sign-in hooks.** After the provider verifies an identity, the organization's admission rules
+apply (allowed domains; for GitHub, allowed organizations), a deactivated principal is refused, and
+a first sign-in matching no registered address is provisioned by the one organization whose policy
+provisions for it (several matching is a refusal). Group mapping then runs over the token's groups,
+GitHub teams and the principal's SCIM groups: it adds memberships and sets roles up to the ceiling,
+leaves any role above the ceiling and any runner role alone, never demotes a project's last
+administrator, never removes a membership, and audits each change (`member.role_mapped`).
+
+**Deactivation.** `principals.deactivated_at`. Deactivating revokes every token and sign-in in
+flight in one transaction, and token authentication refuses a deactivated principal whatever it
+holds. Memberships and history are kept, so reactivation restores access (through a new sign-in).
+Deactivating, or SCIM-deleting, a project's last active administrator is refused.
+
+**SCIM 2.0** (`/scim/v2`, RFC 7643/7644 core): `Users` (list with `eq` filters on `userName`,
+`externalId`, `id`, `emails.value`; get, create, replace, patch, delete), `Groups` (the same, plus
+member add/remove/replace in the shapes Okta and Entra send), `ServiceProviderConfig`, `Schemas`,
+`ResourceTypes`. It authenticates with an organization's SCIM token (`cdscim_…`, minted by an
+`org_admin`, stored as a SHA-256 hash, usable nowhere else) under the same failure throttle as
+other credentials, and reaches only that organization. Every human principal of the organization is
+a SCIM user, so a provider can find and adopt accounts that predate it; `userName` is the one the
+provider set, else the registered address, else the handle. SCIM grants no role: a created user
+joins the policy's default project with its default role, a `roles` attribute is ignored, and
+groups only feed mapping. `active=false` deactivates; DELETE also removes memberships, linked
+identities and group memberships and hides the principal from SCIM, keeping the row the audit log
+refers to.
+
+**Branding** is public (the sign-in page shows it): a display name, an accent color that must reach
+3:1 against the white surface (the text color on it is chosen for contrast), a plain-text sign-in
+banner, and a logo — PNG, JPEG or GIF by its own magic bytes, at most 64 KiB and 1024 pixels a side,
+never SVG — served with its sniffed type, `nosniff` and a sandboxing CSP. The dashboard applies the
+color through the CSSOM, which its strict CSP allows, and shows the logo as a `data:` image.
+
+**Audit.** `GET /v1/admin/audit` lists an organization's audit log filtered by actor, action (exact
+or a family) and time, and exports every matching record as JSON lines or CSV (cells starting with
+`=`, `+`, `-`, `@` are quoted so a spreadsheet does not run them); exports are themselves audited.
+`db.Store.SetAuditHook` sees each record after it is written — the seam for streaming the audit log
+to a notification channel or a SIEM.
+
+| Threat | Defence |
+|---|---|
+| A project administrator reaching organization settings | `/v1/admin` requires `org_admin` in the caller's organization; project-scoped tokens are refused |
+| Locking everyone out with require-SSO | refused unless a provider is configured and the change comes from an SSO session; the config file or one SQL statement turns it off, and refused tokens work again |
+| A token minted to outlive the SSO session | derived tokens are capped at the parent's expiry and named under it; `sso:` names are reserved |
+| A group or SCIM granting administration | the ceiling never includes `org_admin`; SCIM grants only the policy's default role (contributor at most) |
+| Deprovisioning stranding a project | deactivation and SCIM deletion refuse a project's last administrator |
+| A deactivated person keeping access | tokens revoked in the same transaction, and authentication refuses the principal regardless |
+| A logo or banner carrying script | the logo is sniffed and never SVG, served with `nosniff` and `sandbox`; the banner and name are rendered as text |
+| CSV injection in an audit export | formula-leading cells are prefixed with `'` |
+| A SCIM token used elsewhere | a separate table and prefix; the API refuses it, SCIM refuses API tokens |
 
 ---
 
@@ -2255,13 +2353,20 @@ query string, header or body.
 
 ### 26.4 Dashboard views
 
-1. **Project board:** tasks, owners, states, dependencies, conflicts.
-2. **Live presence:** humans and agents currently active.
-3. **Conflict radar:** overlapping scopes and merge-risk graph.
-4. **Task detail:** task card, attempts, decisions, artifacts, checks.
-5. **Runner capacity:** hosts, harness versions, model availability, queues.
-6. **Cost and routing:** role/model/harness usage and escalations.
-7. **Policy audit:** why a task was routed, blocked, escalated, or required approval.
+The menu is the core loop; everything else is one level down.
+
+1. **Home:** can I start (a check before an edit, against live claims), who is on what, what is
+   contested, and what is waiting on me — one screen.
+2. **Tasks:** the board or list, with the task detail drawer (card, attempts, decisions, checks,
+   pull request and issue links).
+3. **People:** members, what each is working on, and their open sessions.
+4. **Settings:** you (tokens, appearance), this project (members, notification channels,
+   repository policy), security, privacy.
+5. **More:** conflict radar, fleet (runners and models), swarm, admission queue, usage and cost,
+   the event timeline, integrations. Swarm and the queue appear only when the organization turns
+   them on (§25.8); every area keeps its address either way.
+6. **Admin** (`org_admin` only): organization branding, authentication, provisioning, members and
+   roles, features, the audit log, and the effective server configuration.
 
 ---
 
