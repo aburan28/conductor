@@ -79,6 +79,9 @@ type Server struct {
 	// "work offered to me" answerable: without it the gateway knows the principal but not
 	// which of that principal's live sessions it is running inside.
 	session domain.ID
+	// local is true for the stdio gateway, which runs on the harness's own machine and may
+	// therefore take checkpoints there; the HTTP transport never may.
+	local bool
 
 	// out and mu belong to the stdio transport; the HTTP transport leaves them nil and
 	// writes responses itself.
@@ -125,6 +128,7 @@ func New(opts Options) *Server {
 		project: project,
 		fence:   fence,
 		session: firstNonEmpty(string(opts.SessionID), os.Getenv("CONDUCTOR_SESSION_ID")),
+		local:   true,
 	}
 }
 

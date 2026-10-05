@@ -42,16 +42,16 @@ type Options struct {
 	PermissionMode string
 	// MCPEndpoint is the control-plane URL injected into the agent's MCP config so it can
 	// coordinate from inside its own session.
-	MCPEndpoint    string
-	MCPToken       string
-	MCPCommand     string
+	MCPEndpoint string
+	MCPToken    string
+	MCPCommand  string
 	// HarnessMCPServers are extra MCP servers to expose to an attempt, keyed by the harness
 	// driving it. A cairn search worker is the motivating case: it needs the cairn node's
 	// tools, and no other harness does. See docs/cairn-integration.md.
 	HarnessMCPServers map[string]map[string]harness.MCPServer
-	PollInterval   time.Duration
-	MaxTurns       int
-	AttemptTimeout time.Duration
+	PollInterval      time.Duration
+	MaxTurns          int
+	AttemptTimeout    time.Duration
 	// KeepFailedWorktrees retains the tree after a failure so the branch can be inspected
 	// and adopted (DESIGN.md §27.2).
 	KeepFailedWorktrees bool

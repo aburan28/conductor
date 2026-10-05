@@ -360,6 +360,8 @@ conductor usage --by day,harness                          # tokens and cost over
 conductor sessions export                                 # the project's session history, as JSON
 conductor sessions install-hook                          # capture every session at shutdown (systemd/launchd)
 conductor backup push | pull | status                    # copy this machine's resume records to/from S3
+conductor checkpoint capture --note "tests pass"         # snapshot a session: transcript + working tree, portable
+conductor checkpoint resume 9a474a --account work        # continue it under another login, or --harness codex
 conductor integrate cursor                                # wire a coding tool to this project (MCP + hooks)
 conductor route T-42                                      # what would this route to, and why — before spending a token
 conductor dispatch T-42                                   # send work to a model by policy, through the queue
@@ -415,9 +417,10 @@ protocol revisions `2024-11-05` through `2025-06-18`, with per-session ids and t
 auth every other client uses — the gateway holds no private path into the store, over either
 transport.
 
-Eleven tools: `conductor_check_conflicts`, `coord_start_work`, `coord_get_work`,
+Twelve tools: `conductor_check_conflicts`, `coord_start_work`, `coord_get_work`,
 `coord_expand_scope`, `coord_report_progress`, `coord_publish_result`, `coord_finish_work`,
-`coord_handoff`, `coord_delegate`, `coord_capabilities`, `coord_project_status`. Heartbeats are
+`coord_handoff`, `coord_delegate`, `coord_capabilities`, `coord_checkpoint`,
+`coord_project_status`. Heartbeats are
 deliberately *not* an MCP tool — a model should never spend tokens telling the server it is
 still alive. And where a harness supports pre-edit hooks, `conductor integrate` installs
 `conductor hook pre-tool`, which calls the same conflict check before every edit and blocks the
@@ -555,6 +558,58 @@ Wrapped sessions stay honest with the team while paused: the sidecar keeps heart
 a mystery that stopped moving. A relaunched wrap registers a fresh session with the same
 capability flags it was started with.
 
+### Moving a session: another login, another machine, another harness
+
+Everything above reopens a conversation where its harness keeps it — this machine, this
+login, this directory. That is the wrong place the day the account hits its usage limit
+with the task half done, the cloud instance is reclaimed with the transcript on its disk,
+or Claude planned something Codex should finish. A **checkpoint** is the session in one
+file: the harness's own transcript, the uncommitted working tree (plus any commits not yet
+on a remote), and a harness-neutral `CONTINUATION.md` distilled from the conversation.
+
+```bash
+conductor wrap claude                        # checkpoints itself every 2 minutes, and on the way down
+conductor checkpoint list                    # what this machine holds
+conductor checkpoint resume latest --account work      # usage limit hit: carry on under another login
+conductor checkpoint resume latest --harness codex     # carry on in a different agent
+conductor checkpoint export latest --seal              # one file, encrypted, for another machine
+conductor checkpoint resume session.ckpt --dir ~/src/repo --clone   # …and on that machine
+```
+
+A `conductor wrap` session checkpoints itself: every `CONDUCTOR_CHECKPOINT_INTERVAL`
+(default two minutes), on the SIGTERM/SIGHUP a shutdown sends, and when the harness exits.
+Bare sessions are covered by hooks — `conductor integrate claude` adds `Stop` and `PreCompact`
+hooks, `conductor integrate opencode` captures on `session.idle` — and by `conductor sessions
+save all`, so the shutdown hook captures conversations as well as resume records. Inside a
+session, an agent that reaches a milestone or suspects it is near a limit can call the
+`coord_checkpoint` MCP tool with a note on where the work stands. Nothing is written when
+nothing changed, and the newest five per session are kept (`CONDUCTOR_CHECKPOINT_KEEP`).
+
+`conductor checkpoint resume` restores the working tree into a checkout (the current one,
+or `--dir`, cloned on demand with `--clone`), then:
+
+- **Same harness.** The native transcript is installed where that harness looks, with the
+  session's working directory rewritten to the new checkout, and the harness reopens the
+  very same conversation: `claude --resume <path>`, `codex resume <id>`, or `opencode import`
+  followed by `opencode --session <id>`. `--account NAME` (or `--state-dir DIR`) points the
+  harness at a different state directory — `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, or
+  `XDG_DATA_HOME` — which is where each keeps both its login and its sessions, so the
+  conversation is reopened by that directory's account.
+- **Different harness.** Codex cannot read a Claude Code transcript, so it starts from the
+  checkpoint's `CONTINUATION.md` — the original request, the conversation so far with one
+  line per tool call, the files touched, and the last exchange — with a first prompt that
+  tells it to read that file and continue, not start over.
+
+Where this sits in the privacy model matters: a checkpoint contains the conversation, which
+the control plane never holds. Checkpoints are written only by the CLI, on your machine,
+under `~/.conductor/checkpoints/` (0600 in 0700, beside your credentials), and leave it only
+as a file you move yourself or **sealed** — AES-256-GCM under a passphrase — in your own
+bucket: `conductor checkpoint push` refuses to upload plaintext and shares the
+`CONDUCTOR_BACKUP_S3_*` configuration with `conductor backup`. The `coord_checkpoint` tool
+works only in the stdio gateway, on the session's own machine; the HTTP gateway, which runs
+in the control plane, refuses it. [docs/PORTABILITY.md](docs/PORTABILITY.md) has the bundle
+format and the per-harness mechanics.
+
 **VS Code:** integrated terminals are ordinary ptys, so pausing and in-place resume already
 work there. Reopening a *closed* session into VS Code needs the companion extension in
 [`integrations/vscode`](integrations/vscode) — VS Code offers no command-line way to open an
@@ -636,6 +691,11 @@ Implemented and exercised by tests:
 - Machine-local pause/resume: `conductor pause` freezes every interactive agent session on
   the machine and `conductor resume` revives them — in place, or in freshly opened terminals
   on each harness's own conversation-resume invocation.
+- Session portability: `conductor checkpoint` bundles a session's native transcript, working
+  tree, and a harness-neutral continuation into one file — taken periodically by `conductor
+  wrap`, by Claude Code and OpenCode hooks, at shutdown, and on an agent's own `coord_checkpoint`
+  call — and `conductor checkpoint resume` continues it on another machine, under another
+  login, or in a different harness, sealed with a passphrase whenever it leaves the machine.
 - Isolated git worktrees, scope-drift detection, runner-attested validation, evidence manifests,
   handoff bundles, portable Markdown task cards.
 - Member and token administration, TLS, a loopback-by-default bind, and auth throttling.
@@ -653,7 +713,9 @@ Implemented and exercised by tests:
   Windsurf, VS Code, Zed, Gemini CLI): MCP config plus, where supported, pre-edit hooks that
   run the conflict check before every edit and block on a hard conflict.
 - MCP over Streamable HTTP served by `conductord` itself, so an HTTP-capable client connects
-  with a bearer token and no local binary — the same eleven tools as the stdio gateway.
+  with a bearer token and no local binary — the same twelve tools as the stdio gateway
+  (all but `coord_checkpoint`, which only the stdio gateway can honour, since it runs on
+  the harness's own machine).
 - Repository dispatch policy: named lanes, ordered model ladders, `when`-gated candidates, and
   hard-floor-respecting escalation, evaluated by a small deterministic expression language,
   with `conductor route` to preview and `conductor policy lint` to validate.

@@ -78,6 +78,9 @@ Execution
   conductor sessions list            saved, paused, and running sessions on this machine
   conductor sessions export          the project's whole session history, as JSON
   conductor backup push|pull|status  copy this machine's resume records to/from S3
+  conductor checkpoint capture       snapshot a session: transcript + working tree, portable
+  conductor checkpoint resume <id>   continue it here, under another login (--account), or in another harness
+  conductor checkpoint list|export|push|pull  move checkpoints between machines, as a file or sealed via S3
   conductor pause                    freeze the live agent terminals; save how to revive them
   conductor resume                   wake paused sessions, reopening any closed terminals
 
@@ -127,6 +130,8 @@ func main() {
 		err = cmdSessions(ctx, args)
 	case "backup":
 		err = cmdBackup(ctx, args)
+	case "checkpoint":
+		err = cmdCheckpoint(ctx, args)
 	case "inbox":
 		err = cmdInbox(ctx, args)
 	case "check":

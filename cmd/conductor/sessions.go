@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/adamburan/conductor/internal/checkpoint"
 	"github.com/adamburan/conductor/internal/localstate"
 	"github.com/adamburan/conductor/internal/privacy"
 	"github.com/adamburan/conductor/internal/shutdownhook"
@@ -238,6 +239,14 @@ Flags:
 		maybeBackupAfterSave(ctx)
 	}
 
+	// Portability: a record says how to reopen a conversation on this machine; a checkpoint
+	// carries the conversation itself, so it can also continue on another one. Taken for
+	// every saved session, skipped when nothing changed; off with CONDUCTOR_CHECKPOINT=off.
+	var checkpoints []captureOutcome
+	if len(selected) > 0 && !checkpoint.Disabled(os.Getenv) {
+		checkpoints = captureSelectedSessions(ctx, selected, checkpoint.ReasonExit)
+	}
+
 	if *asJSON {
 		if selected == nil {
 			selected = []localstate.Record{}
@@ -251,7 +260,37 @@ Flags:
 	printRecords(selected)
 	fmt.Printf("\nSaved %d session(s). They stay resumable after a closed terminal or a reboot: `conductor resume` reopens them.\n",
 		len(selected))
+	if taken := countTaken(checkpoints); taken > 0 {
+		fmt.Printf("Checkpointed %d of them as well; `conductor checkpoint list` shows what can continue on another machine or login.\n", taken)
+	}
 	return nil
+}
+
+// captureSelectedSessions checkpoints the given records, quietly.
+func captureSelectedSessions(ctx context.Context, records []localstate.Record, reason string) []captureOutcome {
+	var out []captureOutcome
+	for _, rec := range records {
+		res, err := checkpoint.Capture(ctx, checkpoint.Request{
+			Harness: rec.Harness, Cwd: rec.Cwd, PID: rec.PID, Since: rec.StartedAt.Add(-time.Minute),
+			Reason: reason, Conductor: checkpoint.ConductorRef{Project: rec.Project, SessionID: rec.SessionID},
+		})
+		o := captureOutcome{Harness: rec.Harness, Cwd: rec.Cwd, Result: res}
+		if err != nil {
+			o.Error = err.Error()
+		}
+		out = append(out, o)
+	}
+	return out
+}
+
+func countTaken(outcomes []captureOutcome) int {
+	n := 0
+	for _, o := range outcomes {
+		if o.Error == "" {
+			n++
+		}
+	}
+	return n
 }
 
 // selectRecords picks the local records named by args. "all" means every session (optionally

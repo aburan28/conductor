@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,5 +115,77 @@ func TestHookCacheRoundTrip(t *testing.T) {
 	if readHookCache("../escape", &got) {
 		// The name is sanitized into the cache directory; a traversal never reads outside it.
 		t.Log("sanitized name resolved to an existing file, which is fine; it must be inside the dir")
+	}
+}
+
+// The checkpoint hook reads only the session id, cwd, and event name from the payload, and
+// locates the transcript itself; a Stop event within the rate limit of a previous capture
+// writes nothing, a PreCompact event always captures a changed transcript.
+func TestHookCheckpointCapturesFromStdin(t *testing.T) {
+	state := t.TempDir()
+	cfg := t.TempDir()
+	work := t.TempDir()
+	t.Setenv("CONDUCTOR_STATE_DIR", state)
+	t.Setenv("CLAUDE_CONFIG_DIR", cfg)
+	t.Setenv("CONDUCTOR_HARNESS", "")
+	t.Setenv("CONDUCTOR_CHECKPOINT", "")
+	slug := strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			return r
+		}
+		return '-'
+	}, work)
+	dir := filepath.Join(cfg, "projects", slug)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "s-1.jsonl")
+	line := `{"type":"user","uuid":"u1","timestamp":"2026-10-05T17:37:06Z","cwd":"` + work + `","sessionId":"s-1","message":{"role":"user","content":"hi"}}` + "\n"
+	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	feed := func(payload string) {
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.WriteString(payload)
+		w.Close()
+		old := os.Stdin
+		os.Stdin = r
+		t.Cleanup(func() { os.Stdin = old })
+	}
+	count := func() int {
+		entries, _ := os.ReadDir(filepath.Join(state, "checkpoints"))
+		n := 0
+		for _, e := range entries {
+			if strings.HasSuffix(e.Name(), ".ckpt") {
+				n++
+			}
+		}
+		return n
+	}
+
+	feed(`{"session_id":"s-1","cwd":"` + work + `","hook_event_name":"Stop","transcript_path":"/should/not/be/read"}`)
+	if err := cmdHook(context.Background(), []string{"checkpoint"}); err != nil {
+		t.Fatal(err)
+	}
+	if count() != 1 {
+		t.Fatalf("Stop hook wrote %d checkpoints, want 1", count())
+	}
+
+	// A new line, but within the rate limit: Stop writes nothing, PreCompact does.
+	f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	f.WriteString(strings.Replace(line, `"u1"`, `"u2"`, 1))
+	f.Close()
+	feed(`{"session_id":"s-1","cwd":"` + work + `","hook_event_name":"Stop"}`)
+	_ = cmdHook(context.Background(), []string{"checkpoint"})
+	if count() != 1 {
+		t.Fatalf("rate-limited Stop hook wrote a checkpoint (%d total)", count())
+	}
+	feed(`{"session_id":"s-1","cwd":"` + work + `","hook_event_name":"PreCompact"}`)
+	_ = cmdHook(context.Background(), []string{"checkpoint"})
+	if count() != 2 {
+		t.Fatalf("PreCompact hook did not checkpoint the changed transcript (%d total)", count())
 	}
 }
