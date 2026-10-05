@@ -30,7 +30,7 @@ func clearEnv(t *testing.T) {
 		"CONDUCTOR_GITHUB_API", "CONDUCTOR_GITHUB_WEB", "CONDUCTOR_RETENTION_DAYS",
 		"CONDUCTOR_AUDIT_RETENTION_DAYS", "CONDUCTOR_METRICS_TOKEN", "CONDUCTOR_SECRET_KEY",
 		"CONDUCTOR_SECRET_KEY_FILE", "CONDUCTOR_STATE_DIR", "CONDUCTOR_SSO_PROVIDERS",
-		"CONDUCTOR_SSO_AUTO_PROVISION", "CONDUCTOR_SSO_DEFAULT_PROJECT"} {
+		"CONDUCTOR_SSO_AUTO_PROVISION", "CONDUCTOR_SSO_DEFAULT_PROJECT", "CONDUCTOR_NOTIFY_PROXY"} {
 		t.Setenv(k, "")
 	}
 }
@@ -108,6 +108,39 @@ func TestServeConfigOperationsFlags(t *testing.T) {
 	c, err = parseServeConfigQuiet([]string{"--dsn", "x", "--retention-days", "3"})
 	if err != nil || c.retention.OutboxDelivered != 3*day {
 		t.Errorf("--retention-days 3 = %+v %v", c, err)
+	}
+}
+
+// The notification relay is on, and confined to public https destinations, unless the
+// operator says otherwise.
+func TestServeConfigNotifyFlags(t *testing.T) {
+	clearEnv(t)
+	c, err := parseServeConfigQuiet([]string{"--dsn", "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.notifyPoll <= 0 || c.notifyNetwork.AllowPrivate || c.notifyNetwork.AllowHTTP {
+		t.Errorf("defaults: poll %v, network %+v", c.notifyPoll, c.notifyNetwork)
+	}
+	c, err = parseServeConfigQuiet([]string{"--dsn", "x", "--notify-poll", "-1s",
+		"--notify-allow-private-networks", "--notify-allow-http"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.notifyPoll >= 0 || !c.notifyNetwork.AllowPrivate || !c.notifyNetwork.AllowHTTP {
+		t.Errorf("flags: poll %v, network %+v", c.notifyPoll, c.notifyNetwork)
+	}
+	if c.notifyNetwork.Proxy != nil {
+		t.Errorf("a proxy with none configured: %v", c.notifyNetwork.Proxy)
+	}
+
+	t.Setenv("CONDUCTOR_NOTIFY_PROXY", "http://proxy.internal:3128")
+	c, err = parseServeConfigQuiet([]string{"--dsn", "x"})
+	if err != nil || c.notifyNetwork.Proxy == nil || c.notifyNetwork.Proxy.Host != "proxy.internal:3128" {
+		t.Errorf("CONDUCTOR_NOTIFY_PROXY = %+v, %v", c, err)
+	}
+	if _, err := parseServeConfigQuiet([]string{"--dsn", "x", "--notify-proxy", "ftp://proxy"}); err == nil {
+		t.Error("an ftp proxy was accepted")
 	}
 }
 

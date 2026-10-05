@@ -323,6 +323,10 @@ function onEvent(e) {
     case 'queue.granted': if (p.principal === store.get().handle) toast('Your queue ticket was granted', { kind: 'info' }); break;
     // Territory this person was refused has been released: tell them to try again.
     case 'scope.released': if (p.principal === store.get().handle) toast(`${(p.resources || []).join(', ') || 'Territory'} is free again`, { kind: 'info', detail: `${p.task_ref || 'The holder'} let go${p.waiting_task_ref ? ' — ' + p.waiting_task_ref + ' can carry on' : ''}. Check again before you edit.` }); break;
+    // Someone ran into someone else's work. The person it happened to already saw the refusal.
+    case 'conflict.blocked': if (p.principal !== store.get().handle) toast(`${p.principal || 'Someone'} is blocked by ${p.task_ref || 'a private task'}`, { kind: 'warn', detail: (p.resources || []).join(', ') }); break;
+    case 'conflict.suggest_join': if (p.principal !== store.get().handle) toast(`${p.principal || 'Someone'} is starting work like ${p.task_ref || 'a private task'}`, { kind: 'info', detail: 'Joining may beat duplicating it.' }); break;
+    case 'conflict.detected': toast(`Conflict: ${p.task_ref || 'a task'}${p.with_task_ref ? ' and ' + p.with_task_ref : ''}`, { kind: p.severity === 'high' || p.severity === 'critical' ? 'danger' : 'warn', detail: [p.kind, p.severity, (p.resources || p.changed_paths || []).join(', ')].filter(Boolean).join(' · ') }); break;
     case 'github.pr_merged': toast(`${p.task_ref || 'A task'} merged — done, its files are free`, { kind: 'info' }); break;
   }
   // The events view appends live lines itself instead of refetching.

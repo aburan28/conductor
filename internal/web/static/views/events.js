@@ -3,7 +3,7 @@ import { defineView } from '../lib/view.js';
 import { card, empty } from '../components/ui.js';
 import { fmtTime } from '../lib/format.js';
 
-const TYPE_KIND = t => /stalled|exhausted|expired|failed|block|conflict/.test(t) ? 'danger' : /downshift|released|reclaimed|warn|declined/.test(t) ? 'warn' : /claimed|done|succeeded|granted|shared|unblocked|accepted/.test(t) ? 'accent' : '';
+const TYPE_KIND = t => /suggest_join/.test(t) ? 'warn' : /stalled|exhausted|expired|failed|block|conflict/.test(t) ? 'danger' : /downshift|released|reclaimed|warn|declined/.test(t) ? 'warn' : /claimed|done|succeeded|granted|shared|unblocked|accepted/.test(t) ? 'accent' : '';
 
 export function eventLine(e, { fresh = false } = {}) {
   const payload = e.payload || {};

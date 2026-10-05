@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -58,10 +59,34 @@ _conductor() {
     COMPREPLY=($(compgen -W "$subs -h" -- "$cur"))
     return
   fi
+  if [[ $COMP_CWORD -eq 3 ]]; then
+    local nested=""
+    case "${COMP_WORDS[1]} ${COMP_WORDS[2]}" in
+`)
+	for _, c := range commands {
+		for _, sub := range sortedKeys(c.nested) {
+			fmt.Fprintf(w, "      %q) nested=%q ;;\n", c.name+" "+sub, strings.Join(c.nested[sub], " "))
+		}
+	}
+	fmt.Fprint(w, `    esac
+    if [[ -n $nested ]]; then
+      COMPREPLY=($(compgen -W "$nested -h" -- "$cur"))
+      return
+    fi
+  fi
   COMPREPLY=($(compgen -f -- "$cur"))
 }
 complete -o default -F _conductor conductor
 `)
+}
+
+func sortedKeys(m map[string][]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func writeFishCompletion(w io.Writer) {
@@ -69,7 +94,17 @@ func writeFishCompletion(w io.Writer) {
 	for _, c := range commands {
 		fmt.Fprintf(w, "complete -c conductor -f -n __fish_use_subcommand -a %s -d %s\n", c.name, fishQuote(c.summary))
 		for _, sub := range c.subs {
+			if _, nested := c.nested[sub]; nested {
+				// Offered only before the subcommand is typed, so its own words come next.
+				fmt.Fprintf(w, "complete -c conductor -f -n '__fish_seen_subcommand_from %s; and not __fish_seen_subcommand_from %s' -a %s\n", c.name, sub, sub)
+				continue
+			}
 			fmt.Fprintf(w, "complete -c conductor -f -n '__fish_seen_subcommand_from %s' -a %s\n", c.name, sub)
+		}
+		for _, sub := range sortedKeys(c.nested) {
+			for _, word := range c.nested[sub] {
+				fmt.Fprintf(w, "complete -c conductor -f -n '__fish_seen_subcommand_from %s; and __fish_seen_subcommand_from %s' -a %s\n", c.name, sub, word)
+			}
 		}
 	}
 	fmt.Fprintln(w, "complete -c conductor -f -n __fish_use_subcommand -a help -d 'help for a command'")

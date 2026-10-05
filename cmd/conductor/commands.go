@@ -125,6 +125,11 @@ func cmdStatus(ctx context.Context, args []string) error {
 	return nil
 }
 
+// issueWeb is the GitHub web address issue links are printed under; taskList sets it from the
+// project's issue sync status, so a GitHub Enterprise host is linked right. Empty means
+// github.com.
+var issueWeb string
+
 func printTaskLine(t privacy.TaskView) {
 	title := t.Title
 	if title == "" {
@@ -136,6 +141,9 @@ func printTaskLine(t privacy.TaskView) {
 	}
 	if t.PullRequestURL != "" {
 		fmt.Printf("           %s (%s)\n", t.PullRequestURL, t.PullRequestState)
+	}
+	if u := issueLink(issueWeb, t.ExternalRef); u != "" {
+		fmt.Printf("           issue %s\n", u)
 	}
 }
 
@@ -442,6 +450,17 @@ func taskList(ctx context.Context, args []string) error {
 		return nil
 	}
 	for _, t := range out.Tasks {
+		if issueLink("", t.ExternalRef) != "" {
+			var sync struct {
+				Web string `json:"web"`
+			}
+			if err := api.Get(ctx, "/v1/projects/"+ref+"/github/issues", &sync); err == nil {
+				issueWeb = sync.Web
+			}
+			break
+		}
+	}
+	for _, t := range out.Tasks {
 		printTaskLine(t)
 	}
 	return nil
@@ -479,6 +498,19 @@ func taskShow(ctx context.Context, args []string) error {
 		return err
 	}
 	fmt.Print(string(card))
+	// The card names an imported task's issue by its external_ref; give the link too. A task
+	// with no GitHub issue (or no GitHub App here) answers 404, and prints nothing more.
+	var issue struct {
+		URL   string `json:"url"`
+		State string `json:"state"`
+	}
+	if err := api.Get(ctx, "/v1/tasks/"+positional[0]+"/issue"+client.Query("project", ref), &issue); err == nil && issue.URL != "" {
+		fmt.Printf("\nIssue: %s", issue.URL)
+		if issue.State != "" {
+			fmt.Printf(" (%s)", issue.State)
+		}
+		fmt.Println()
+	}
 	return nil
 }
 

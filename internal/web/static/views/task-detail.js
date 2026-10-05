@@ -46,12 +46,15 @@ export function openTaskDrawer(ref, ctx, { onClose } = {}) {
     ]);
     if (!alive) return;
     if (!task) { replace(body, errorBox(new Error(`Task ${ref} could not be loaded`), refresh)); return; }
+    // A task imported from (or naming) a GitHub issue links to it; the server knows its address.
+    const [issue] = task.external_ref && task.external_ref.startsWith('github:') ? await settle([ctx.api.get(t('/issue'))]) : [null];
+    if (!alive) return;
     replace(body, render({ task, attempts: (attempts && attempts.attempts) || [], validation: (validation && validation.results) || task.validation || [],
       decisions: (decisions && decisions.decisions) || [], handoff: handoff && handoff.bundle ? handoff.bundle : handoff && handoff.task_ref ? handoff : null,
-      cardText: typeof cardText === 'string' ? cardText : '', sessions: (caps && caps.sessions) || [], explain }));
+      cardText: typeof cardText === 'string' ? cardText : '', sessions: (caps && caps.sessions) || [], explain, issue }));
   }
 
-  function render({ task, attempts, validation, decisions, handoff, cardText, sessions, explain }) {
+  function render({ task, attempts, validation, decisions, handoff, cardText, sessions, explain, issue }) {
     const act = async fn => { const r = await fn(); if (r) { refresh(); if (ctx.refreshAll) ctx.refreshAll(); } };
     const isOpen = !['done', 'cancelled', 'superseded', 'failed'].includes(task.status);
     const actions = h('div', { class: 'btn-row' },
@@ -91,6 +94,10 @@ export function openTaskDrawer(ref, ctx, { onClose } = {}) {
       ['Pull request', task.pull_request_url ? h('span', {}, /^https:\/\//.test(task.pull_request_url)
         ? h('a', { href: task.pull_request_url, target: '_blank', rel: 'noopener' }, task.pull_request_url.replace(/^https:\/\/[^/]+\//, ''))
         : h('span', { class: 'mono' }, task.pull_request_url), ' ', pill(task.pull_request_state || 'open')) : null],
+      // Linked only when it is an https URL, as for the pull request above.
+      ['Issue', issue && issue.url ? h('span', {}, /^https:\/\//.test(issue.url)
+        ? h('a', { href: issue.url, target: '_blank', rel: 'noopener' }, task.external_ref.replace(/^github:/, ''))
+        : h('span', { class: 'mono' }, task.external_ref), issue.state ? ' ' : null, issue.state ? pill(issue.state) : null) : null],
       ['Depends on', task.depends_on && task.depends_on.length ? h('div', { class: 'chips' }, task.depends_on.map(d => h('a', { class: 'chip', href: `/tasks/${encodeURIComponent(d)}`, 'data-link': true }, d))) : null],
       ['Scopes', task.scopes && task.scopes.length ? chips(task.scopes) : h('span', { class: 'muted' }, 'none reserved')],
       ['Created', fmtDate(task.created_at)],

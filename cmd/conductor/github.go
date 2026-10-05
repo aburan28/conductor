@@ -13,7 +13,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/adamburan/conductor/internal/db"
 	"github.com/adamburan/conductor/internal/githubapp"
+	"github.com/adamburan/conductor/internal/tracker"
 )
 
 // `conductor github` connects Conductor to GitHub through a GitHub App: one click creates the
@@ -35,6 +37,8 @@ func cmdGitHub(ctx context.Context, args []string) error {
 		return githubCheck(ctx, args[1:])
 	case "install":
 		return githubInstall(ctx, args[1:])
+	case "issues":
+		return githubIssues(ctx, args[1:])
 	case "-h", "--help", "help":
 		fmt.Fprint(os.Stderr, `conductor github — connect Conductor to GitHub
 
@@ -43,14 +47,17 @@ func cmdGitHub(ctx context.Context, args []string) error {
   conductor github link [owner/repo]   tell Conductor which repository this project is (default: origin)
   conductor github status              the app, where it is installed, which projects are linked
   conductor github check owner/repo#12 check one pull request now
+  conductor github issues enable|disable|status|sync
+                                       turn the repository's issues into tasks (conductor github issues -h)
 
-The app reads pull requests and writes a "Conductor" check run. It cannot push, merge, or
-change settings. A Conductor GitHub cannot reach (a laptop) polls for pull requests; one with
-a public --public-url receives webhooks.
+The app reads pull requests and writes a "Conductor" check run; with issue sync on, it also
+comments on, labels, and closes the synced issues. It cannot push, merge, or change settings.
+A Conductor GitHub cannot reach (a laptop) polls; one with a public --public-url receives
+webhooks.
 `)
 		return nil
 	default:
-		return fmt.Errorf("unknown github subcommand %q (setup, install, link, status, check)", args[0])
+		return fmt.Errorf("unknown github subcommand %q (setup, install, link, status, check, issues)", args[0])
 	}
 }
 
@@ -104,12 +111,18 @@ type githubStatusView struct {
 		Owner string `json:"owner"`
 		URL   string `json:"html_url"`
 	} `json:"app"`
-	InstallURL    string                   `json:"install_url"`
-	Installations []githubapp.Installation `json:"installations"`
-	InstallErr    string                   `json:"installations_error"`
-	Linked        []map[string]string      `json:"linked"`
-	LastPoll      *time.Time               `json:"last_poll"`
-	LastError     string                   `json:"last_error"`
+	InstallURL     string                   `json:"install_url"`
+	Installations  []githubapp.Installation `json:"installations"`
+	InstallErr     string                   `json:"installations_error"`
+	PermissionGaps []struct {
+		Scope   string `json:"scope"`
+		Missing string `json:"missing"`
+		Fix     string `json:"fix"`
+		URL     string `json:"url"`
+	} `json:"permission_gaps"`
+	Linked    []map[string]string `json:"linked"`
+	LastPoll  *time.Time          `json:"last_poll"`
+	LastError string              `json:"last_error"`
 }
 
 func fetchGitHubStatus(ctx context.Context) (githubStatusView, error) {
@@ -158,6 +171,18 @@ func githubStatus(ctx context.Context, args []string) error {
 			}
 			fmt.Printf("Installed   on %s\n", strings.Join(where, ", "))
 		}
+		// A permission the app asks for that GitHub has not granted: an app created before
+		// issue sync, or an installation whose owner has not accepted the new permission yet.
+		for _, gap := range st.PermissionGaps {
+			who := "the app"
+			if gap.Scope != "app" {
+				who = "the installation on " + gap.Scope
+			}
+			fmt.Printf("Needs       %s for %s (issue sync). %s\n", gap.Missing, who, gap.Fix)
+			if gap.URL != "" {
+				fmt.Printf("            %s\n", gap.URL)
+			}
+		}
 	}
 	if len(st.Linked) == 0 {
 		fmt.Println("\nNo project of yours is linked to a GitHub repository. In a checkout: conductor github link")
@@ -165,7 +190,14 @@ func githubStatus(ctx context.Context, args []string) error {
 	}
 	fmt.Println("\nLinked projects")
 	for _, l := range st.Linked {
-		fmt.Printf("  %-24s %s\n", l["project"], l["repository"])
+		issues := "issues not synced"
+		switch v := l["issues"]; {
+		case v == "all":
+			issues = "syncs every open issue"
+		case strings.HasPrefix(v, "label:"):
+			issues = "syncs issues labelled " + strings.TrimPrefix(v, "label:")
+		}
+		fmt.Printf("  %-24s %-32s %s\n", l["project"], l["repository"], issues)
 	}
 	return nil
 }
@@ -279,6 +311,229 @@ func githubCheck(ctx context.Context, args []string) error {
 		fmt.Println("The check on GitHub is already up to date.")
 	}
 	return nil
+}
+
+// `conductor github issues` turns a linked repository's issues into tasks and tells each
+// issue when its task is claimed and done (internal/tracker).
+func githubIssues(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		args = []string{"status"}
+	}
+	switch args[0] {
+	case "enable":
+		return githubIssuesEnable(ctx, args[1:], true)
+	case "disable":
+		return githubIssuesEnable(ctx, args[1:], false)
+	case "status":
+		return githubIssuesStatus(ctx, args[1:])
+	case "sync":
+		return githubIssuesSync(ctx, args[1:])
+	case "-h", "--help", "help":
+		fmt.Fprint(os.Stderr, `conductor github issues — GitHub Issues as Conductor tasks
+
+  conductor github issues enable [--label conductor | --all] [--in-progress-label in-progress | --no-progress-label]
+                                 [--public-visibility team_artifacts]
+  conductor github issues disable
+  conductor github issues status
+  conductor github issues sync     import now instead of waiting for the next poll
+
+Open issues on the project's linked repository that carry the label (or every open issue,
+with --all) become ready tasks, with external_ref github:owner/repo#N. Issue edits reach the
+task unless the task was edited in Conductor since (the later edit wins); closing an issue
+cancels its task, reopening it brings the task back. A claimed task gets one comment on its
+issue ("Claimed by <handle> via Conductor") and the in-progress label; a done task gets one
+comment linking its pull request, and its issue is closed. Nothing written in Conductor is
+ever sent to GitHub, and a private task is never written back to a public repository's issue.
+
+Example:
+  conductor github issues enable --label conductor
+`)
+		return nil
+	default:
+		return fmt.Errorf("unknown github issues subcommand %q (enable, disable, status, sync)", args[0])
+	}
+}
+
+type issueSyncView struct {
+	Project          string     `json:"project"`
+	Repository       string     `json:"repository"`
+	Enabled          bool       `json:"enabled"`
+	Label            string     `json:"label"`
+	All              bool       `json:"all"`
+	InProgressLabel  string     `json:"in_progress_label"`
+	PublicVisibility string     `json:"public_visibility"`
+	LastSyncAt       *time.Time `json:"last_sync_at"`
+	LastError        string     `json:"last_error"`
+	WriteBackError   string     `json:"writeback_error"`
+	Imported         int        `json:"imported"`
+	Open             int        `json:"open"`
+}
+
+func printIssueSync(v issueSyncView) {
+	if !v.Enabled {
+		fmt.Printf("Issue sync is off for %s. Turn it on: conductor github issues enable\n", v.Project)
+		return
+	}
+	which := "open issues labelled " + v.Label
+	if v.All {
+		which = "every open issue"
+	}
+	fmt.Printf("Project     %s ← %s (%s)\n", v.Project, orDash(v.Repository), which)
+	label := v.InProgressLabel
+	if label == "" {
+		label = "none"
+	}
+	fmt.Printf("Write-back  claim and done comments; in-progress label: %s\n", label)
+	fmt.Printf("Public repo imported tasks are %s\n", v.PublicVisibility)
+	fmt.Printf("Imported    %d task(s), %d open\n", v.Imported, v.Open)
+	if v.LastSyncAt != nil {
+		fmt.Printf("Last sync   %s ago\n", time.Since(*v.LastSyncAt).Round(time.Second))
+	}
+	if v.LastError != "" {
+		fmt.Printf("Problem     %s\n", v.LastError)
+	}
+	if v.WriteBackError != "" {
+		fmt.Printf("Write-back  failing: %s\n", v.WriteBackError)
+	}
+}
+
+func githubIssuesEnable(ctx context.Context, args []string, enable bool) error {
+	name := "github issues disable"
+	if enable {
+		name = "github issues enable"
+	}
+	fs := flag.NewFlagSet(name, flag.ExitOnError)
+	project := fs.String("project", "", "project id or slug")
+	asJSON := fs.Bool("json", false, "machine-readable output")
+	var label, progress, public *string
+	var all, noProgress *bool
+	if enable {
+		label = fs.String("label", "", "import only open issues with this label (default conductor, or the label set before)")
+		all = fs.Bool("all", false, "import every open issue, labelled or not")
+		progress = fs.String("in-progress-label", "", "label put on an issue while its task is worked (default in-progress)")
+		noProgress = fs.Bool("no-progress-label", false, "write no in-progress label")
+		public = fs.String("public-visibility", "", "visibility of tasks imported from a public repository (default team_artifacts)")
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	api, creds, err := mustClient()
+	if err != nil {
+		return err
+	}
+	ref, err := projectRef(*project, creds)
+	if err != nil {
+		return err
+	}
+	body := map[string]any{"enabled": enable}
+	if enable {
+		if *label != "" {
+			body["label"] = *label
+		}
+		body["all"] = *all
+		switch {
+		case *noProgress:
+			body["in_progress_label"] = ""
+		case *progress != "":
+			body["in_progress_label"] = *progress
+		}
+		if *public != "" {
+			body["public_visibility"] = *public
+		}
+	}
+	var out issueSyncView
+	if err := api.Post(ctx, "/v1/projects/"+ref+"/github/issues", body, &out); err != nil {
+		return err
+	}
+	if *asJSON {
+		return emit(out)
+	}
+	if enable {
+		fmt.Println("Issue sync is on; the first import runs with the next poll (or now: conductor github issues sync).")
+	}
+	printIssueSync(out)
+	return nil
+}
+
+func githubIssuesStatus(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("github issues status", flag.ExitOnError)
+	project := fs.String("project", "", "project id or slug")
+	asJSON := fs.Bool("json", false, "machine-readable output")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	api, creds, err := mustClient()
+	if err != nil {
+		return err
+	}
+	ref, err := projectRef(*project, creds)
+	if err != nil {
+		return err
+	}
+	var out issueSyncView
+	if err := api.Get(ctx, "/v1/projects/"+ref+"/github/issues", &out); err != nil {
+		return err
+	}
+	if *asJSON {
+		return emit(out)
+	}
+	printIssueSync(out)
+	return nil
+}
+
+func githubIssuesSync(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("github issues sync", flag.ExitOnError)
+	project := fs.String("project", "", "project id or slug")
+	asJSON := fs.Bool("json", false, "machine-readable output")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	api, creds, err := mustClient()
+	if err != nil {
+		return err
+	}
+	ref, err := projectRef(*project, creds)
+	if err != nil {
+		return err
+	}
+	var rep struct {
+		Repository  string `json:"repository"`
+		Seen        int    `json:"seen"`
+		Created     int    `json:"created"`
+		Linked      int    `json:"linked"`
+		Updated     int    `json:"updated"`
+		Cancelled   int    `json:"cancelled"`
+		Revived     int    `json:"revived"`
+		NotModified bool   `json:"not_modified"`
+		More        bool   `json:"more"`
+	}
+	if err := api.Post(ctx, "/v1/projects/"+ref+"/github/issues/sync", map[string]any{}, &rep); err != nil {
+		return err
+	}
+	if *asJSON {
+		return emit(rep)
+	}
+	if rep.NotModified {
+		fmt.Printf("%s: nothing changed since the last sync.\n", rep.Repository)
+		return nil
+	}
+	fmt.Printf("%s: read %d issue(s); %d imported, %d linked to existing tasks, %d updated, %d cancelled, %d reopened.\n",
+		rep.Repository, rep.Seen, rep.Created, rep.Linked, rep.Updated, rep.Cancelled, rep.Revived)
+	if rep.More {
+		fmt.Println("More remain; the poller continues from here, or run this again.")
+	}
+	return nil
+}
+
+// issueLink is the web address, under web (empty: github.com), of the GitHub issue a task
+// names in its external_ref, or "" for a task that names none.
+func issueLink(web, externalRef string) string {
+	name, key, ok := tracker.ParseRef(externalRef)
+	if !ok || name != db.TrackerGitHub {
+		return ""
+	}
+	u, _ := githubapp.IssueURL(web, key)
+	return u
 }
 
 // openBrowser opens a URL in the user's browser, quietly doing nothing where it cannot.

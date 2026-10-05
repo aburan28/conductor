@@ -435,6 +435,11 @@ func (s *Store) OpenFootprints(ctx context.Context, projectID domain.ID) ([]Task
 // someone deliberately ignored should stay ignored rather than reappearing every tick.
 func (s *Store) ReplaceConflictsOfKind(ctx context.Context, projectID domain.ID, kind domain.ConflictKind, edges []domain.ConflictEdge) error {
 	return s.Tx(ctx, func(tx pgx.Tx) error {
+		var orgID domain.ID
+		if err := tx.QueryRow(ctx, `SELECT organization_id::text FROM projects WHERE id = $1::uuid`,
+			projectID).Scan(&orgID); err != nil {
+			return noRows(err)
+		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE conflict_edges SET state = 'resolved', resolved_at = now(), updated_at = now()
 			 WHERE project_id = $1::uuid AND kind = $2 AND state = 'open'`,
@@ -466,18 +471,26 @@ func (s *Store) ReplaceConflictsOfKind(ctx context.Context, projectID domain.ID,
 			if handled {
 				continue
 			}
-			if _, err := tx.Exec(ctx, `
+			var edgeID domain.ID
+			if err := tx.QueryRow(ctx, `
 				INSERT INTO conflict_edges (project_id, task_a, task_b, kind, severity,
 				        weight, suggestion, detail, state)
 				VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, 'open')
 				ON CONFLICT (project_id, task_a, task_b, kind) WHERE state IN ('open','acknowledged')
 				DO UPDATE SET severity = EXCLUDED.severity, weight = EXCLUDED.weight,
 				              suggestion = EXCLUDED.suggestion, detail = EXCLUDED.detail,
-				              updated_at = now()`,
-				projectID, a, b, kind, e.Severity, e.Weight, e.Suggestion, body); err != nil {
+				              updated_at = now()
+				RETURNING id::text`,
+				projectID, a, b, kind, e.Severity, e.Weight, e.Suggestion, body).Scan(&edgeID); err != nil {
+				return err
+			}
+			// Recomputing the graph rewrites every edge each pass; whether one is new is
+			// decided by conflict_alerts, not by the insert.
+			e.ProjectID, e.TaskA, e.TaskB, e.Kind, e.Detail = projectID, a, b, kind, detail
+			if err := announceDetectedTx(ctx, tx, orgID, edgeID, e); err != nil {
 				return err
 			}
 		}
-		return nil
+		return forgetClosedDetectionsTx(ctx, tx, projectID)
 	})
 }

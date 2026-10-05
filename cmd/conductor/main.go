@@ -151,6 +151,8 @@ func runCommand(ctx context.Context, name string, args []string) error {
 		return cmdConflicts(ctx, args)
 	case "budget":
 		return cmdBudget(ctx, args)
+	case "notify":
+		return cmdNotify(ctx, args)
 	case "usage":
 		return cmdUsage(ctx, args)
 	case "task":

@@ -4,15 +4,20 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -26,7 +31,8 @@ import (
 )
 
 // fakeGitHub serves the slice of GitHub's API the integration uses: the manifest conversion,
-// installations, one repository with one pull request, and check-run creation.
+// installations, one repository with one pull request, check-run creation, and the issues
+// that issue sync reads and writes (github_issues_test.go).
 type fakeGitHubAPI struct {
 	t       *testing.T
 	repo    string // unique per run: the database is shared across runs and packages
@@ -35,6 +41,18 @@ type fakeGitHubAPI struct {
 	checks  []map[string]any
 	updates []map[string]any
 	files   []string
+
+	// public makes the repository public.
+	public bool
+	// appPerms and instPerms are the permissions the app and its installation hold; nil
+	// means everything Conductor asks for.
+	appPerms, instPerms map[string]string
+	issues              map[int]map[string]any
+	// issueWrites records every write to an issue, as "comment 3: text", "label+ 3: name",
+	// "label- 3: name", or "close 3".
+	issueWrites []string
+	// notModified counts issue listings answered 304.
+	notModified int
 }
 
 func (f *fakeGitHubAPI) handler() http.Handler {
@@ -49,18 +67,34 @@ func (f *fakeGitHubAPI) handler() http.Handler {
 			"html_url": "https://github.example/apps/conductor-test", "webhook_secret": "whsec",
 			"client_id": "Iv1", "client_secret": "cs", "pem": f.pem, "owner": map[string]any{"login": "acme"}})
 	})
+	perms := func(p map[string]string) map[string]string {
+		if p == nil {
+			return githubapp.Permissions
+		}
+		return p
+	}
+	m.HandleFunc("GET /app", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		write(w, map[string]any{"id": 1234, "slug": "conductor-test", "permissions": perms(f.appPerms),
+			"owner": map[string]any{"login": "acme", "type": "Organization"}})
+	})
 	m.HandleFunc("GET /app/installations", func(w http.ResponseWriter, r *http.Request) {
-		write(w, []map[string]any{{"id": 77, "target_type": "Organization", "account": map[string]any{"login": "acme"}}})
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		write(w, []map[string]any{{"id": 77, "target_type": "Organization", "account": map[string]any{"login": "acme"},
+			"html_url": "https://github.example/organizations/acme/settings/installations/77", "permissions": perms(f.instPerms)}})
 	})
 	m.HandleFunc("POST /app/installations/77/access_tokens", func(w http.ResponseWriter, r *http.Request) {
 		write(w, map[string]any{"token": "ghs_test", "expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)})
 	})
 	m.HandleFunc("GET /installation/repositories", func(w http.ResponseWriter, r *http.Request) {
-		write(w, map[string]any{"repositories": []map[string]any{{"name": f.repo, "full_name": "acme/" + f.repo, "private": true, "owner": map[string]any{"login": "acme"}}}})
+		write(w, map[string]any{"repositories": []map[string]any{{"name": f.repo, "full_name": "acme/" + f.repo, "private": !f.public, "owner": map[string]any{"login": "acme"}}}})
 	})
 	m.HandleFunc("GET /repos/acme/{repo}", func(w http.ResponseWriter, r *http.Request) {
-		write(w, map[string]any{"name": f.repo, "full_name": "acme/" + f.repo, "private": true, "owner": map[string]any{"login": "acme"}})
+		write(w, map[string]any{"name": f.repo, "full_name": "acme/" + f.repo, "private": !f.public, "owner": map[string]any{"login": "acme"}})
 	})
+	f.issueHandlers(m, write)
 	m.HandleFunc("GET /repos/acme/{repo}/installation", func(w http.ResponseWriter, r *http.Request) {
 		write(w, map[string]any{"id": 77})
 	})
@@ -98,6 +132,149 @@ func (f *fakeGitHubAPI) handler() http.Handler {
 		write(w, map[string]any{"id": r.PathValue("id")})
 	})
 	return m
+}
+
+// issueHandlers serves the issues endpoints from f.issues, the way GitHub does: listings
+// oldest change first with an ETag, a 304 for an unchanged listing, and a 403 for an
+// installation that has not accepted the issues permission.
+func (f *fakeGitHubAPI) issueHandlers(m *http.ServeMux, write func(http.ResponseWriter, any)) {
+	allowed := func(w http.ResponseWriter, level string) bool {
+		if f.instPerms != nil && !githubapp.Grants(f.instPerms, "issues", level) {
+			w.WriteHeader(http.StatusForbidden)
+			write(w, map[string]any{"message": "Resource not accessible by integration"})
+			return false
+		}
+		return true
+	}
+	number := func(r *http.Request) int {
+		n, _ := strconv.Atoi(r.PathValue("n"))
+		return n
+	}
+	m.HandleFunc("GET /repos/acme/{repo}/issues", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if !allowed(w, "read") {
+			return
+		}
+		state := r.URL.Query().Get("state")
+		since, _ := time.Parse(time.RFC3339, r.URL.Query().Get("since"))
+		list := []map[string]any{}
+		for _, is := range f.issues {
+			if state == "open" && is["state"] != "open" {
+				continue
+			}
+			if at, _ := time.Parse(time.RFC3339Nano, is["updated_at"].(string)); at.Before(since) {
+				continue
+			}
+			list = append(list, is)
+		}
+		sort.Slice(list, func(i, j int) bool { return list[i]["updated_at"].(string) < list[j]["updated_at"].(string) })
+		body, _ := json.Marshal(list)
+		sum := sha256.Sum256(body)
+		etag := `"` + hex.EncodeToString(sum[:8]) + `"`
+		if r.Header.Get("If-None-Match") == etag {
+			f.notModified++
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", etag)
+		_, _ = w.Write(body)
+	})
+	m.HandleFunc("GET /repos/acme/{repo}/issues/{n}", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		is, ok := f.issues[number(r)]
+		if !ok {
+			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+			return
+		}
+		write(w, is)
+	})
+	m.HandleFunc("PATCH /repos/acme/{repo}/issues/{n}", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if !allowed(w, "write") {
+			return
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body["state"] == "closed" {
+			f.issueWrites = append(f.issueWrites, fmt.Sprintf("close %d", number(r)))
+			f.issues[number(r)]["state"] = "closed"
+			f.issues[number(r)]["updated_at"] = fakeNow()
+		}
+		write(w, f.issues[number(r)])
+	})
+	m.HandleFunc("POST /repos/acme/{repo}/issues/{n}/comments", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if !allowed(w, "write") {
+			return
+		}
+		var body map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.issueWrites = append(f.issueWrites, fmt.Sprintf("comment %d: %s", number(r), body["body"]))
+		w.WriteHeader(http.StatusCreated)
+		write(w, map[string]any{"id": len(f.issueWrites)})
+	})
+	m.HandleFunc("POST /repos/acme/{repo}/issues/{n}/labels", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if !allowed(w, "write") {
+			return
+		}
+		var body map[string][]string
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		for _, l := range body["labels"] {
+			f.issueWrites = append(f.issueWrites, fmt.Sprintf("label+ %d: %s", number(r), l))
+		}
+		write(w, []any{})
+	})
+	m.HandleFunc("DELETE /repos/acme/{repo}/issues/{n}/labels/{name}", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if !allowed(w, "write") {
+			return
+		}
+		f.issueWrites = append(f.issueWrites, fmt.Sprintf("label- %d: %s", number(r), r.PathValue("name")))
+		write(w, []any{})
+	})
+}
+
+// fakeNow is an updated_at as GitHub writes one. Nanoseconds keep two changes in one test
+// apart, which is all the ordering the sync relies on.
+func fakeNow() string { return time.Now().UTC().Format(time.RFC3339Nano) }
+
+// setIssue creates or replaces an issue, stamping it as changed now.
+func (f *fakeGitHubAPI) setIssue(number int, title, body, state string, labels ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.issues == nil {
+		f.issues = map[int]map[string]any{}
+	}
+	ls := []map[string]any{}
+	for _, l := range labels {
+		ls = append(ls, map[string]any{"name": l})
+	}
+	f.issues[number] = map[string]any{"number": number, "title": title, "body": body, "state": state,
+		"labels": ls, "updated_at": fakeNow(),
+		"html_url": "https://github.example/acme/" + f.repo + "/issues/" + strconv.Itoa(number)}
+}
+
+func (f *fakeGitHubAPI) issue(number int) map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := map[string]any{}
+	for k, v := range f.issues[number] {
+		out[k] = v
+	}
+	return out
+}
+
+func (f *fakeGitHubAPI) writes() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.issueWrites...)
 }
 
 func (f *fakeGitHubAPI) checkUpdates() []map[string]any {

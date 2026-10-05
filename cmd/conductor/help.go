@@ -25,6 +25,8 @@ type command struct {
 	summary string
 	// subs are the subcommands, for completion and for the help listing.
 	subs []string
+	// nested are the subcommands of a subcommand (github issues enable), for completion.
+	nested map[string][]string
 	// short marks the commands the bare `conductor help` page shows.
 	short bool
 	// topic is the help page printed for `conductor help <name>` and `<name> -h`. Empty means
@@ -213,6 +215,27 @@ Example:
   conductor budget share rachel 200000
 
 Run ` + "`conductor budget <subcommand> -h`" + ` for its flags.
+`},
+	{name: "notify", group: "Coordinate", subs: []string{"add", "list", "remove", "test", "events"},
+		summary: "send conflicts, freed territory, stalls and merges to Slack, Discord, or a webhook",
+		topic: `conductor notify — send this project's events to Slack, Discord, or a webhook
+
+Channels are project-wide and managed by maintainers. Events about private tasks go out as
+"a private task", with no title, ref, or paths. Webhooks are signed (X-Conductor-Signature).
+
+Usage:
+  conductor notify [list]                               channels and their delivery health
+  conductor notify add slack|discord|webhook <url|->    add a channel ("-" reads the URL from stdin)
+        [--events TYPE,…] [--name LABEL]
+  conductor notify test <id>                            send a test message now
+  conductor notify remove <id>
+  conductor notify events                               what can be sent, and the defaults
+
+Example:
+  conductor notify add slack https://hooks.slack.com/services/T…/B…/… --name "#eng-agents"
+  conductor notify add webhook https://ci.example.com/hook --events scope.released,task.status_changed:done
+
+Run ` + "`conductor notify <subcommand> -h`" + ` for its flags.
 `},
 	{name: "usage", group: "Coordinate", subs: []string{"sync"},
 		summary: "tokens and cost over time, by day, harness, model, or person"},
@@ -437,8 +460,9 @@ Example:
 
 Run ` + "`conductor sso <subcommand> -h`" + ` for its flags.
 `},
-	{name: "github", group: "Team and access", subs: []string{"setup", "install", "link", "status", "check"},
-		summary: "create the GitHub App, link a repo, see what it checks"},
+	{name: "github", group: "Team and access", subs: []string{"setup", "install", "link", "status", "check", "issues"},
+		nested:  map[string][]string{"issues": {"enable", "disable", "status", "sync"}},
+		summary: "create the GitHub App, link a repo, sync its issues into tasks"},
 
 	// Other
 	{name: "hook", group: "Other", subs: []string{"pre-tool", "session-start", "session-end", "checkpoint"},

@@ -38,6 +38,7 @@ import (
 	"github.com/adamburan/conductor/internal/db"
 	"github.com/adamburan/conductor/internal/domain"
 	"github.com/adamburan/conductor/internal/githubapp"
+	"github.com/adamburan/conductor/internal/notify"
 	"github.com/adamburan/conductor/internal/peer"
 	"github.com/adamburan/conductor/internal/scheduler"
 	"github.com/adamburan/conductor/internal/secretbox"
@@ -96,6 +97,8 @@ type serveConfig struct {
 	ops               api.OpsOptions
 	secretKeyFile     string
 	secretKeyEnv      string
+	notifyPoll        time.Duration
+	notifyNetwork     notify.NetworkPolicy
 	verbose           bool
 	// sso is single sign-on, with its providers built from --sso-provider.
 	sso api.SSOOptions
@@ -196,6 +199,15 @@ func parseServeConfig(args []string, output io.Writer) (*serveConfig, error) {
 		"key that seals secrets conductord stores in the database (the GitHub App's private key); created 0600 on first use. "+
 			"Every replica must use the same key. Default: secret.key in CONDUCTOR_STATE_DIR or ~/.conductor. "+
 			secretbox.EnvKey+" (the base64 key itself) takes precedence")
+	fs.DurationVar(&c.notifyPoll, "notify-poll", 3*time.Second,
+		"how often the notification relay sends undelivered events to webhook and Slack channels (negative disables the relay)")
+	fs.BoolVar(&c.notifyNetwork.AllowPrivate, "notify-allow-private-networks", false,
+		"let notification channels reach loopback, private and link-local addresses (a chat server on your LAN); refused by default to prevent request forgery")
+	fs.BoolVar(&c.notifyNetwork.AllowHTTP, "notify-allow-http", false,
+		"accept http:// notification URLs, for local testing; credentials and payloads then cross the network in the clear")
+	notifyProxy := fs.String("notify-proxy", envOr("CONDUCTOR_NOTIFY_PROXY", ""),
+		"forward proxy (http, https or socks5 URL) for notification requests, where conductord reaches the internet only through one; "+
+			"destinations are still resolved and refused here if not public. HTTPS_PROXY is not used")
 	fs.BoolVar(&c.verbose, "v", false, "verbose logging")
 
 	// Single sign-on.
@@ -310,6 +322,13 @@ Binding 127.0.0.1 needs none of these.`, c.addr)
 	}
 	if err := c.parseSSO(*ssoSpecs, os.Getenv("CONDUCTOR_SSO_PROVIDERS"), *ssoAutoProvision); err != nil {
 		return nil, err
+	}
+	if *notifyProxy != "" {
+		proxy, err := notify.ParseProxy(*notifyProxy)
+		if err != nil {
+			return nil, fmt.Errorf("--notify-proxy: %w", err)
+		}
+		c.notifyNetwork.Proxy = proxy
 	}
 	return c, nil
 }
@@ -473,6 +492,8 @@ func serve(args []string) error {
 	// set up by an older conductord (a 0600 file beside the CLI's credentials) is imported
 	// once. With none, the integration serves only its setup flow. GitHub can deliver
 	// webhooks only to a public URL; anywhere else the poller finds pull requests itself.
+	// One key source for everything conductord seals, so a key file is created at most once.
+	secretKey := &secretbox.Source{Env: cfg.secretKeyEnv, Path: cfg.secretKeyFile}
 	githubCreds, err := githubapp.DefaultPath()
 	if err != nil {
 		return err
@@ -483,13 +504,23 @@ func serve(args []string) error {
 	}
 	gh, ghErr := api.NewGitHub(api.GitHubOptions{
 		CredentialsPath: githubCreds, API: cfg.githubAPI, Web: cfg.githubWeb,
-		SecretKey: &secretbox.Source{Env: cfg.secretKeyEnv, Path: cfg.secretKeyFile},
+		SecretKey: secretKey,
 		BaseURL:   selfEndpoint, WebhookURL: webhookURL, Poll: cfg.githubPoll, Logger: logger,
 	})
 
 	ops := cfg.ops
 	ops.BaseContext = life
 	svc := coord.New(store)
+	// Notification channels and the relay that delivers the outbox to them. Messages link to
+	// the dashboard only when it has a public address; a loopback link helps nobody in Slack.
+	dashboardURL := ""
+	if cfg.publicURL != "" && !isLoopbackURL(cfg.publicURL) {
+		dashboardURL = strings.TrimRight(cfg.publicURL, "/")
+	}
+	notifier := notify.New(store, svc, notify.Options{
+		SecretKey: secretKey, Network: cfg.notifyNetwork, DashboardURL: dashboardURL,
+		Poll: cfg.notifyPoll, Logger: logger,
+	})
 	server := api.New(store, svc, api.Options{
 		Logger:       logger,
 		Web:          web.Handler(),
@@ -500,6 +531,7 @@ func serve(args []string) error {
 		PeerStatus:   peerStatus,
 		LocalLogin:   api.LocalLoginOptions{DefaultMode: defaultMode, ForcedMode: cfg.securityMode},
 		GitHub:       gh,
+		Notify:       notifier,
 		Ops:          ops,
 		SSO:          cfg.sso,
 	})
@@ -534,6 +566,9 @@ func serve(args []string) error {
 	}
 	if !cfg.noScheduler {
 		goBackground("scheduler", sched.Run)
+	}
+	if cfg.notifyPoll >= 0 {
+		goBackground("notification relay", notifier.Run)
 	}
 
 	httpServer := &http.Server{

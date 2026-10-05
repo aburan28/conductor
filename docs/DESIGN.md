@@ -1323,6 +1323,87 @@ Where the harness supports pre-tool interception:
 
 Where it does not, the Git watcher detects drift after the tool batch and pauses before publication or the next turn.
 
+### 17.5 Issue tracker sync
+
+Conductor does not replace the team's tracker (§3.2); it reads from it. A separate task
+backlog is an adoption tax, so a project can opt in to having its tracker's issues become
+tasks, and to having each task's claim and completion written back to its issue.
+
+**Shape.** `internal/tracker` is tracker-neutral: the field mapping (title; body as objective;
+a `## Acceptance` section's list as acceptance criteria; both bounded as an API-filed task's
+are), the edit and state rules, the write-back plan, and their application. An adapter supplies
+`tracker.Item`s it read, by webhook or polling, and a `tracker.Remote` that comments, labels,
+and closes. GitHub Issues is the only adapter (`internal/api/github_issues.go`, through the
+GitHub App); Linear is the next one planned, then Jira. A new adapter needs a reader that
+produces Items and a Remote; the rules, storage, and idempotency come with the package.
+
+**Storage (migration 0011).** `tracker_configs` is the per-project opt-in: which label
+qualifies (or all issues), the in-progress label, the visibility of tasks from public
+repositories, who enabled it (imported tasks are created by them), and the import's resume
+point (the newest `updated_at` read, and the ETag of the last listing from it).
+`tracker_links` maps `(project, external_ref)` to its task — the key that makes an import
+idempotent whatever the task's status — and remembers what the issue last said (hashes, not
+text), whether it is open or public, and what the write-back has told it. Every decision is made
+and applied in one transaction that holds the link row, or, for a first import, a
+transaction-scoped advisory lock on the issue, so a webhook, a poll, a manual sync, and a second
+replica racing on one new issue create one task.
+
+**Rules.**
+
+- An open issue that qualifies and is not linked becomes a `ready` task (`external_ref
+  github:owner/repo#N`). An open task already naming the issue is linked instead. Closed
+  issues are never imported; removing the label does not drop a task.
+- Edits are last-writer-wins per field group (the title; the objective with its criteria). An
+  issue edit applies unless the task's copy was edited in Conductor since the last sync; then
+  the later of the two wins: the issue's `updated_at` against `tracker_links.task_edited_at`,
+  which a trigger on `tasks` stamps whenever the title, objective, or criteria change by any
+  path. (`tasks.updated_at` cannot serve: it moves on every claim and status change.) A
+  Conductor edit that wins stays until the issue's text changes again. A reading older than one
+  already applied is ignored, so deliveries may arrive in any order.
+- A closed issue cancels its task unless the task is finished or its work is landing
+  (verifying, review, merging, or an open pull request) — a pull request's `Closes #N` closes
+  the issue just before the merge completes the task, and the merge decides. If such a pull
+  request closes unmerged and the task returns to ready, the write-back pass cancels it then.
+- A reopened issue revives a task the sync cancelled (`cancelled_by_sync`) to `ready`. This is
+  the one edge out of `cancelled`, deliberately outside the state machine of §9: the sync's
+  cancellation mirrored the issue and ended the lease, bumped the fence, and released the
+  territory, so `ready` is exactly what a fresh import would produce, with the task's history
+  kept. A task a person cancelled stays cancelled.
+
+**Write-back.** Reconciled from state, not from events: a pass lists synced tasks whose
+`updated_at` moved past what the link last reconciled, and for each compares what the issue has
+been told with what it should be told. A claim posts one comment per claimant ("Claimed by
+`<handle>` via Conductor") and adds the in-progress label; a release (or any state without a
+live lease or landing work) removes it; done posts one comment linking the pull request and
+closes the issue, unless it is already closed. Each step is recorded as soon as GitHub accepts
+it, so delivery is at least once and a crash repeats at most the step in flight. Passes run on
+the poller's goroutine every 15 seconds and at the end of each poll, under the poller's advisory
+lock, so two replicas never post the same comment; each pass is bounded, and a rate limit
+(a 429, or a 403 that says so) makes the client refuse every call until GitHub's
+`Retry-After` (at least a minute) has passed.
+
+**Privacy.** Content flows one way: nothing written in Conductor — title, objective, criteria,
+progress, anything private — is sent to the tracker, whose readers may not be the team's.
+Comments are fixed words plus, at most, the claimant's handle and a pull request in the issue's
+own repository. A task imported from a public repository is `team_artifacts` by default, since
+its content is public already and hiding it would only suppress the write-back; one from a
+private repository gets the project's default visibility. A private task is never written back
+to a public issue (its label is still removed), and the claimant's handle appears only when the
+task is not private and either the repository is private or the task is shared at
+`team_artifacts` or above.
+
+**Delivery.** `issues` webhooks (opened, edited, closed, reopened, labeled, unlabeled) when
+webhooks are configured, applied before answering. The poller covers everything else, under its
+existing lock and lifecycle: per repository, one listing of issues updated since the resume
+point, oldest first, bounded to three pages, as a conditional request — an idle repository costs
+one 304, which does not count against GitHub's rate limit.
+
+**Permissions.** Issue sync needs `issues: write`. GitHub applies a manifest's permissions only
+when it creates an app, so an app created before issue sync lacks it, and every installation
+must accept a raised permission before it applies. `conductor github status` reports both gaps
+with the page to click; a project whose installation lacks the permission says so in its sync
+status instead of failing silently.
+
 ---
 
 ## 18. MCP contract
@@ -1796,6 +1877,20 @@ CREATE TABLE domain_events (
 
 Use an append-only domain event table plus an outbox in the same transaction as state changes. Build presence, dashboards, notifications, and analytics as projections. Do not require full event sourcing for every read path; current-state tables remain authoritative for efficient operations.
 
+### 23.4 Notifications
+
+Notifications are the outbox's consumer (`internal/notify`). A project has notification channels — a generic webhook (signed JSON), a Slack incoming webhook (Block Kit), or a Discord webhook — each subscribed to a list of event types from a fixed catalog of types the system actually emits; an entry may narrow `task.status_changed` to one target status (`task.status_changed:done`). Defaults favour what a team acts on: someone blocked by or converging on another's work, a newly detected conflict, work paused on a conflict, territory freed for someone who was waiting, stalls and lost leases, merges, tasks done or failed, budget levels, and usage-limit warnings. Channels are managed by maintainers and up.
+
+**Relay.** conductord runs a relay goroutine (beside the scheduler, awaited on shutdown). Each pass claims up to a batch of due, undelivered outbox rows in projects that have a channel, with `FOR UPDATE SKIP LOCKED` and a committed hold (`next_attempt_at` moved past the pass's lifetime) rather than a transaction held across HTTP calls, so replicas split the backlog and a crashed relay's rows come due again. Each claimed event is sent to every channel that subscribes to it and existed when it occurred; channels are sent to in parallel up to a bound, each channel's events in order, every request under a timeout. Per-(event, channel) state in `notification_deliveries` makes a retry go only to the channels that have not had it. Delivery is at least once; receivers deduplicate by event id.
+
+**Failure.** Backoff belongs to the channel, because what fails is the endpoint: a failed send sets the channel's `retry_after` (base doubled per consecutive failure, capped), and its queued events wait for it instead of each being tried. An event is given up for a channel after a number of failed attempts, after a 4xx refusal (other than 408 and 429), or once it is older than the notification window; the row is then marked delivered so retention treats it normally. Outbox rows of projects without a channel are never claimed and are bounded by the undelivered retention cap, as before.
+
+**Privacy.** A channel is project-wide and its receiver is outside every access check, so an event leaves only through `coord.ProjectEvents` applied for a project observer with no relation to the work — never the owner's or the actor's view — and then narrower: an event about a private task carries only what happened (status, phase, outcome), rendered as "a private task", with no ref, title, objective, or paths, and none of the territory the dashboard shows members. Message text is built from that narrowed payload alone.
+
+**Credentials and network.** URLs and webhook secrets are sealed under the server's secret key (§25, OPERATIONS.md) and never returned after creation. Webhook requests carry `X-Conductor-Timestamp` and `X-Conductor-Signature: sha256=HMAC(secret, timestamp "." body)`, so a receiver can reject forgeries and replays. Destinations must be `https` and public: the dialer refuses loopback, private, link-local, CGNAT and other non-public addresses on the address actually connected to, after DNS, connects without an HTTP proxy (whose address would be the one checked), and follows no redirects. Operators can allow private networks and plain HTTP explicitly. With an explicit forward proxy (`--notify-proxy`) the dialer reaches only the proxy, so the destination name is resolved and every address checked before the proxy is asked to connect (no CONNECT to a private target is ever sent); the residual risk is that the proxy resolves the name itself and may get a different answer.
+
+**Conflict events.** Three events exist for the coordination wedge. `conflict.blocked`: an intent check or start-work refused by territory another principal's task holds (aggregate: the holding task; payload: the requester, the holder's ref and the contested resources). `conflict.suggest_join`: a check or start pointed at similar work in flight (aggregate: the similar task; no similarity score, which would be an oracle against private intent). `conflict.detected`: a new edge of medium severity or worse in the merge-risk graph (aggregate: the edge; payload: both refs, kind, severity, suggestion, contested resources, and shared paths under `changed_paths`, which follows summary visibility), written at the narrower of the two tasks' visibilities. None carries the requester's summary or either task's title. Polling must not flood: `conflict_alerts` holds what was announced, written in the event's own transaction — one `blocked`/`suggest_join` per (requester, task, outcome) per 15-minute window, one `detected` per conflict while it stays open or acknowledged — so restarts and replicas agree, as with budget and stall alerts (§27.1).
+
 ---
 
 ## 24. Collaboration and authorization
@@ -2123,7 +2218,7 @@ token TTL, and `conductor sso unlink` or `conductor member remove` ends it at on
 Implemented so far: conductord serves operational metrics in the Prometheus text format at
 `/metrics` (loopback only, or behind a bearer token) — HTTP requests and latency by route
 pattern, scheduler pass duration and errors, active, reclaimed and outage-extended leases,
-events written by type, retention deletions, GitHub polls, event streams, and database pool
+events written by type, retention deletions, GitHub polls and issue write-backs, event streams, and database pool
 statistics — from a small standard-library registry (`internal/metrics`) rather than the
 Prometheus client, per §4's dependency posture. `/v1/ready` reports database, schema
 version, scheduler and poller health. The product metrics above are still served by the API

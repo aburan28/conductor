@@ -102,6 +102,7 @@ func (s *Server) routes() {
 	s.githubRoutes(m)
 	s.quotaRoutes(m)
 	s.lifecycleRoutes(m)
+	s.notifyRoutes(m)
 
 	// The mesh surface. /v1/peer/* is authenticated by the peer's mesh certificate (not a
 	// bearer token); /v1/peers is the same link table shown to project members.
