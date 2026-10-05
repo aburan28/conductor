@@ -362,7 +362,7 @@ func TestTaskCardShowsLeaseIdentifiersOnlyToTheHolder(t *testing.T) {
 // else through any read path.
 var privateMarkers = []string{
 	"ZQXTITLE", "ZQXOBJECTIVE", "ZQXCRITERION", "ZQXINTENT", "ZQXSUMMARY", "ZQXBLOCKER",
-	"ZQXHANDOFFWORK", "ZQXDECISION", "ZQXQUESTION",
+	"ZQXHANDOFFWORK", "ZQXDECISION", "ZQXQUESTION", "ZQXPATH", "ZQXWORKTREE",
 }
 
 // TestNoGETRouteLeaksAPrivateTask builds a private task with an attempt, progress, a handoff,
@@ -390,8 +390,13 @@ func TestNoGETRouteLeaksAPrivateTask(t *testing.T) {
 		"attempt_id": started.AttemptID, "fencing_epoch": started.FencingEpoch}
 	if code, body := h.do(h.aliceTok, http.MethodPost, "/v1/attempts/"+started.AttemptID+"/progress",
 		mergeMaps(fence, map[string]any{"phase": "implementing", "summary": "ZQXSUMMARY so far",
-			"blocker": "ZQXBLOCKER waiting", "tokens_in": 10, "cost_usd": 0.5})); code != http.StatusAccepted {
+			"blocker": "ZQXBLOCKER waiting", "tokens_in": 10, "cost_usd": 0.5,
+			"changed_paths": []string{"internal/billing/ZQXPATH.go"}})); code != http.StatusAccepted {
 		t.Fatalf("progress = %d\n%s", code, body)
+	}
+	if _, err := h.store.UpdateAttempt(ctx, started.AttemptID, db.AttemptProgress{
+		State: domain.AttemptRunning, WorktreePath: "/work/ZQXWORKTREE"}); err != nil {
+		t.Fatal(err)
 	}
 	if err := h.store.RecordDecision(ctx, domain.PolicyDecision{ProjectID: h.project.ID, TaskID: started.TaskID,
 		AttemptID: started.AttemptID, Kind: "route", Decision: "routed",
@@ -416,6 +421,9 @@ func TestNoGETRouteLeaksAPrivateTask(t *testing.T) {
 	// The owner sees their own words — otherwise this test proves nothing.
 	if _, body := h.do(h.aliceTok, http.MethodGet, "/v1/tasks/"+started.TaskID+"/handoff", nil); !strings.Contains(string(body), "ZQXHANDOFFWORK") {
 		t.Fatalf("the owner cannot see their own handoff:\n%s", body)
+	}
+	if _, body := h.do(h.aliceTok, http.MethodGet, "/v1/tasks/"+started.TaskID+"/attempts", nil); !strings.Contains(string(body), "ZQXPATH") || !strings.Contains(string(body), "ZQXWORKTREE") {
+		t.Fatalf("the owner cannot see their own attempt's paths:\n%s", body)
 	}
 
 	subst := map[string]string{
@@ -500,6 +508,8 @@ func assertRoutesCovered(t *testing.T, walked []string) {
 		"/github/setup":     true, // GitHub App installation pages
 		"/github/callback":  true,
 		"/github/installed": true,
+		"/mcp":              true, // GET is always 405: the gateway opens no server stream
+		"/mcp/{project}":    true,
 	}
 	have := map[string]bool{}
 	for _, w := range walked {
@@ -806,5 +816,132 @@ func TestUsageUploadsAreBounded(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Errorf("an oversized usage upload = %d, want 413", resp.StatusCode)
+	}
+}
+
+// A project-scoped token reaches its own project and nothing else: not its owner's sessions in
+// another project, not the machine's security mode or GitHub App, not other projects in a
+// listing.
+func TestScopedTokenStaysInItsProject(t *testing.T) {
+	h := newHarness(t)
+	other := h.secondProject("scope-sessions")
+	if err := h.store.AddMember(context.Background(), other.ID, h.alice.ID, domain.RoleProjectAdmin); err != nil {
+		t.Fatal(err)
+	}
+	// Alice's session in the other project, registered with her own login.
+	code, body := h.do(h.aliceTok, http.MethodPost, "/v1/projects/"+other.ID+"/sessions",
+		map[string]any{"harness": "claude"})
+	if code != http.StatusCreated {
+		t.Fatalf("register = %d\n%s", code, body)
+	}
+	var elsewhere domain.Session
+	_ = json.Unmarshal(body, &elsewhere)
+	here := h.registerSession(t, h.aliceTok, nil)
+
+	scoped, err := h.store.CreateScopedToken(context.Background(), h.alice.ID, h.project.ID, "attempt:y", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/heartbeat", "/close", "/capabilities"} {
+		if code, body := h.do(scoped, http.MethodPost, "/v1/sessions/"+elsewhere.ID+path, map[string]any{}); code != http.StatusNotFound {
+			t.Errorf("scoped token %s on a session in another project = %d, want 404\n%s", path, code, body)
+		}
+	}
+	if code, body := h.do(scoped, http.MethodPost, "/v1/sessions/"+here.ID+"/heartbeat", map[string]any{}); code != http.StatusOK {
+		t.Errorf("scoped token heartbeat in its own project = %d\n%s", code, body)
+	}
+	if code, _ := h.do(scoped, http.MethodPost, "/v1/projects/"+other.ID+"/work/start",
+		map[string]any{"summary": "escape"}); code != http.StatusNotFound {
+		t.Errorf("scoped token starting work in another project = %d, want 404", code)
+	}
+	if code, _ := h.do(scoped, http.MethodPost, "/v1/security", map[string]any{"security_mode": "enhanced"}); code != http.StatusForbidden {
+		t.Errorf("scoped token changing the security mode = %d, want 403", code)
+	}
+	// The GitHub App routes are mounted only when an app is configured; check the rule itself.
+	for _, pattern := range []string{"POST /v1/github/setup", "POST /v1/github/check", "POST /v1/security",
+		"POST /v1/tokens", "POST /v1/tokens/reset", "DELETE /v1/tokens/{name}"} {
+		if scopedRouteAllowed(pattern) {
+			t.Errorf("a scoped token may reach %s", pattern)
+		}
+	}
+	code, body = h.do(scoped, http.MethodGet, "/v1/whoami", nil)
+	if code != http.StatusOK || strings.Contains(string(body), other.ID) {
+		t.Errorf("scoped whoami = %d and lists other projects:\n%s", code, body)
+	}
+	if !strings.Contains(string(body), h.project.ID) {
+		t.Errorf("scoped whoami lost its own project:\n%s", body)
+	}
+}
+
+// A task's content is its creator's, its lease holder's, or a maintainer's to edit; its
+// visibility, its creator's or a maintainer's.
+func TestTaskEditAuthority(t *testing.T) {
+	h := newHarness(t)
+	_, malTok := h.member("mallory", domain.RoleContributor)
+	_, maintTok := h.member("maint", domain.RoleMaintainer)
+	private := h.startWork(h.aliceTok, map[string]any{"summary": "mine", "title": "Mine",
+		"visibility": "private"})
+	path := "/v1/tasks/" + private.TaskID
+	for name, body := range map[string]map[string]any{
+		"title":               {"title": "defaced"},
+		"objective":           {"objective": "defaced"},
+		"acceptance criteria": {"acceptance_criteria": []map[string]any{{"text": "defaced"}}},
+		"visibility":          {"visibility": "team_summary"},
+	} {
+		if code, _ := h.do(malTok, http.MethodPatch, path, body); code != http.StatusForbidden {
+			t.Errorf("another contributor editing the %s = %d, want 403", name, code)
+		}
+	}
+	task, _ := h.store.GetTask(context.Background(), private.TaskID)
+	if task.Title != "Mine" || task.Visibility != domain.VisibilityPrivate {
+		t.Fatalf("the task changed: %+v", task)
+	}
+
+	// The creator edits freely, criteria included.
+	if code, body := h.do(h.aliceTok, http.MethodPatch, path, map[string]any{
+		"title": "Mine, renamed", "acceptance_criteria": []map[string]any{{"text": "it works"}},
+	}); code != http.StatusOK {
+		t.Errorf("creator edit = %d\n%s", code, body)
+	}
+
+	// A lease holder who is not the creator may edit content but not publish the task.
+	// Bob claims it; then hand the task's authorship to alice so bob is holder, not creator.
+	bobs := h.startWork(h.bobTok, map[string]any{"summary": "bob holds", "title": "Bob holds"})
+	if _, err := h.store.Pool().Exec(context.Background(),
+		`UPDATE tasks SET created_by = $1::uuid, visibility = 'private' WHERE id = $2::uuid`, h.alice.ID, bobs.TaskID); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := h.do(h.bobTok, http.MethodPatch, "/v1/tasks/"+bobs.TaskID, map[string]any{"objective": "refined"}); code != http.StatusOK {
+		t.Errorf("lease holder editing content = %d\n%s", code, body)
+	}
+	if code, _ := h.do(h.bobTok, http.MethodPatch, "/v1/tasks/"+bobs.TaskID, map[string]any{"visibility": "team_summary"}); code != http.StatusForbidden {
+		t.Errorf("lease holder publishing someone else's private task = %d, want 403", code)
+	}
+
+	// A maintainer may, and it is on the record.
+	if code, body := h.do(maintTok, http.MethodPatch, path, map[string]any{"visibility": "team_summary"}); code != http.StatusOK {
+		t.Errorf("maintainer changing visibility = %d\n%s", code, body)
+	}
+	if !strings.Contains(strings.Join(h.auditActions(private.TaskID), ","), "task.edited_by_other") {
+		t.Error("a maintainer editing someone else's task was not audited")
+	}
+}
+
+// The transition rule is one exported helper, so every status-changing handler applies the
+// same authority — and the control plane acting on its own (merge reconciliation) is not
+// blocked by a rule meant to stop one principal acting on another's work.
+func TestTransitionAuthorityIsSharedAndExemptsTheSystem(t *testing.T) {
+	h := newHarness(t)
+	svc := coord.New(h.store)
+	task := h.createTask(t, h.bobTok, "Verified work")
+	full, _ := h.store.GetTask(context.Background(), task.ID)
+	full.Status = domain.TaskVerifying
+
+	author := coord.Caller{Principal: h.bob, Role: domain.RoleContributor}
+	if _, err := svc.AuthorizeTransition(context.Background(), author, full, domain.TaskDone); !errors.Is(err, domain.ErrNotPermitted) {
+		t.Errorf("author accepting own work = %v, want ErrNotPermitted", err)
+	}
+	if _, err := svc.AuthorizeTransition(context.Background(), coord.SystemCaller(), full, domain.TaskDone); err != nil {
+		t.Errorf("the system recording a merge = %v, want allowed", err)
 	}
 }

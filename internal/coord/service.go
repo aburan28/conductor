@@ -32,7 +32,16 @@ type Caller struct {
 	Principal domain.Principal
 	Role      domain.Role
 	SessionID domain.ID
+	// System marks the control plane acting on its own behalf — the scheduler, or merge
+	// reconciliation recording that a pull request landed. It is never derived from a
+	// request; only server code constructs it, with SystemCaller.
+	System bool
 }
+
+// SystemCaller is the caller for actions the control plane takes itself rather than on a
+// principal's request. Authority checks that exist to stop one principal acting on another's
+// work (AuthorizeTransition) do not apply to it; the state machine still does.
+func SystemCaller() Caller { return Caller{System: true} }
 
 // Viewer builds the privacy viewer for this caller.
 func (c Caller) Viewer() privacy.Viewer {
@@ -179,6 +188,97 @@ func (s *Service) assertLeaseAuthority(ctx context.Context, c Caller, fence doma
 		return fmt.Errorf("%w: this lease is held by another principal", domain.ErrNotPermitted)
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Transition authority
+// ---------------------------------------------------------------------------
+
+// ReviewTargets are the statuses that accept verified work. Moving a task into one of them
+// is a review decision, not a step of the work itself.
+var ReviewTargets = map[domain.TaskStatus]bool{
+	domain.TaskDone: true, domain.TaskMerging: true, domain.TaskReviewRequired: true,
+}
+
+// AuthorizeTransition is the single rule for who may move a task to a new status by request
+// (DESIGN.md §24.2). Every handler that changes a task's status on a principal's behalf calls
+// it; the store's state machine separately decides whether the move is legal at all.
+//
+//   - The control plane itself (SystemCaller: the scheduler, merge reconciliation) may make
+//     any legal move.
+//   - A maintainer or above may make any legal move.
+//   - Accepting verified work — into review_required, merging, or done — is a review
+//     decision for a reviewer or a maintainer, never the author or executor alone.
+//   - Every other move belongs to the task's creator or the holder of its live lease, and
+//     needs a contributor.
+//
+// It reports whether the caller acted on a task that is not theirs (neither creator nor lease
+// holder), which the handler records in the audit log.
+func (s *Service) AuthorizeTransition(ctx context.Context, c Caller, task domain.Task, to domain.TaskStatus) (bool, error) {
+	if c.System {
+		return false, nil
+	}
+	holds := false
+	if lease, err := s.Store.ActiveLeaseForTask(ctx, task.ID); err == nil {
+		holds = c.HoldsLease(lease)
+	} else if !errors.Is(err, domain.ErrNotFound) {
+		return false, err
+	}
+	mine := task.CreatedBy == c.Principal.ID || holds
+	switch {
+	case c.Role.Can(domain.RoleMaintainer):
+		return !mine, nil
+	case ReviewTargets[to] && task.Status != to:
+		if c.Role == domain.RoleReviewer {
+			return task.CreatedBy != c.Principal.ID, nil
+		}
+		return false, fmt.Errorf("%w: moving a task to %s is a review decision for a reviewer or maintainer",
+			domain.ErrNotPermitted, to)
+	case !c.Role.Can(domain.RoleContributor):
+		return false, fmt.Errorf("%w: role %s cannot move tasks", domain.ErrNotPermitted, c.Role)
+	case mine:
+		return false, nil
+	}
+	return false, fmt.Errorf("%w: only the task's creator, the holder of its lease, or a maintainer may move it",
+		domain.ErrNotPermitted)
+}
+
+// AuthorizeTaskEdit is the rule for changing a task's content (title, objective, acceptance
+// criteria, priority, labels, …): its creator, the holder of its live lease, or a maintainer.
+// Changing its visibility is narrower — the creator or a maintainer — because a lease holder
+// working someone else's private task must not be able to publish it. It reports whether the
+// caller edited a task that is not theirs.
+func (s *Service) AuthorizeTaskEdit(ctx context.Context, c Caller, task domain.Task, visibility bool) (bool, error) {
+	creator := task.CreatedBy == c.Principal.ID
+	if c.Role.Can(domain.RoleMaintainer) {
+		if creator {
+			return false, nil
+		}
+		lease, err := s.Store.ActiveLeaseForTask(ctx, task.ID)
+		if err != nil && !errors.Is(err, domain.ErrNotFound) {
+			return false, err
+		}
+		return err != nil || !c.HoldsLease(lease), nil
+	}
+	if !c.Role.Can(domain.RoleContributor) {
+		return false, fmt.Errorf("%w: role %s cannot edit tasks", domain.ErrNotPermitted, c.Role)
+	}
+	if visibility && !creator {
+		return false, fmt.Errorf("%w: only the task's creator or a maintainer may change its visibility",
+			domain.ErrNotPermitted)
+	}
+	if creator {
+		return false, nil
+	}
+	lease, err := s.Store.ActiveLeaseForTask(ctx, task.ID)
+	if err == nil && c.HoldsLease(lease) {
+		return false, nil
+	}
+	if err != nil && !errors.Is(err, domain.ErrNotFound) {
+		return false, err
+	}
+	return false, fmt.Errorf("%w: only the task's creator, the holder of its lease, or a maintainer may edit it",
+		domain.ErrNotPermitted)
 }
 
 // ---------------------------------------------------------------------------

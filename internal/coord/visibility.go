@@ -49,10 +49,13 @@ var (
 		"harness": true, "model_alias": true, "resolved_model": true, "reasoning_effort": true,
 		"role": true, "tier": true, "provider": true, "labels": true, "branch": true,
 		"error": true, "similarity": true, "workflow_sha": true, "tokens": true,
+		// Which files an attempt touched and where it ran describe the work, so they follow
+		// the task's summary visibility — the same rule privacy.ProjectAttempt applies.
+		"changed_paths": true, "worktree": true,
 	}
 	// eventKeysArtifacts is what team_artifacts adds: commits, files, and check results.
 	eventKeysArtifacts = map[string]bool{
-		"commit_sha": true, "base_sha": true, "changed_paths": true, "worktree": true,
+		"commit_sha": true, "base_sha": true,
 		"exit_code": true, "command_id": true, "duration_ms": true,
 	}
 	// eventKeysSponsor is an attempt's spend, which privacy.ProjectAttempt shows only to its

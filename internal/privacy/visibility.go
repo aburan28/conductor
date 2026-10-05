@@ -216,6 +216,17 @@ type AttemptView struct {
 	TokensOut int64   `json:"tokens_out,omitempty"`
 	CostUSD   float64 `json:"cost_usd,omitempty"`
 	Turns     int     `json:"turns,omitempty"`
+
+	// Redacted marks a view whose task detail (changed paths, worktree path) was withheld
+	// because the task is private and the viewer is neither its owner nor the attempt's sponsor.
+	Redacted bool `json:"redacted,omitempty"`
+}
+
+// AttemptTask is what ProjectAttempt needs to know about the attempt's task: whose it is and
+// how widely it is shared.
+type AttemptTask struct {
+	Owner      Owner
+	Visibility domain.Visibility
 }
 
 // AttemptPolicy controls whether execution identity is published, per DESIGN.md §20.2
@@ -226,17 +237,20 @@ type AttemptPolicy struct {
 }
 
 // ProjectAttempt applies visibility rules to one attempt.
-func ProjectAttempt(v Viewer, a domain.Attempt, sponsor Owner, policy AttemptPolicy) AttemptView {
+//
+// The files an attempt changed and the directory it ran in describe the work itself, so they
+// follow the task's visibility like its title does: a private task's attempts show them only
+// to the task's owner and the attempt's sponsor. Everyone else still sees the attempt's state,
+// branch, and provenance — coordination state, as for the task.
+func ProjectAttempt(v Viewer, a domain.Attempt, sponsor Owner, task AttemptTask, policy AttemptPolicy) AttemptView {
 	view := AttemptView{
 		ID:               a.ID,
 		AttemptNumber:    a.AttemptNumber,
 		State:            a.State,
 		Role:             a.Role,
 		Branch:           a.Branch,
-		WorktreePath:     a.WorktreePath,
 		BaseSHA:          a.BaseCommitSHA,
 		CommitSHA:        a.CommitSHA,
-		ChangedPaths:     a.ChangedPaths,
 		WorkflowSHA:      a.WorkflowSHA,
 		ProjectConfigSHA: a.ProjectConfigSHA,
 		RouterPolicyVer:  a.RouterPolicyVer,
@@ -247,6 +261,12 @@ func ProjectAttempt(v Viewer, a domain.Attempt, sponsor Owner, policy AttemptPol
 	}
 
 	self := v.IsSelf(sponsor)
+	if self || v.IsSelf(task.Owner) || task.Visibility.AtLeast(domain.VisibilityTeamSummary) {
+		view.WorktreePath = a.WorktreePath
+		view.ChangedPaths = a.ChangedPaths
+	} else if a.WorktreePath != "" || len(a.ChangedPaths) > 0 {
+		view.Redacted = true
+	}
 	if self || policy.PublishHarnessIdentity {
 		view.Harness = a.Harness
 	}

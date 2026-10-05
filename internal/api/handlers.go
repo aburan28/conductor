@@ -136,6 +136,7 @@ func (s *Server) whoami(w http.ResponseWriter, r *http.Request, p domain.Princip
 		s.fail(w, r, err)
 		return
 	}
+	projects = inTokenScope(r, projects)
 	type projectRef struct {
 		ID   domain.ID   `json:"id"`
 		Slug string      `json:"slug"`
@@ -155,6 +156,7 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request, p domain.P
 		s.fail(w, r, err)
 		return
 	}
+	projects = inTokenScope(r, projects)
 	s.ok(w, r, http.StatusOK, map[string]any{"projects": projects})
 }
 
@@ -255,13 +257,9 @@ func (s *Server) registerSession(w http.ResponseWriter, r *http.Request, p domai
 // setSessionCapabilities updates what a live session advertises, for when someone switches
 // model or raises effort without restarting the session.
 func (s *Server) setSessionCapabilities(w http.ResponseWriter, r *http.Request, p domain.Principal) {
-	session, err := s.store.GetSession(r.Context(), r.PathValue("session"))
+	session, err := s.ownSession(r, p)
 	if err != nil {
 		s.fail(w, r, err)
-		return
-	}
-	if session.PrincipalID != p.ID {
-		s.fail(w, r, domain.ErrNotPermitted)
 		return
 	}
 	var body domain.SessionCapabilities
@@ -450,13 +448,9 @@ type heartbeatSessionBody struct {
 }
 
 func (s *Server) heartbeatSession(w http.ResponseWriter, r *http.Request, p domain.Principal) {
-	session, err := s.store.GetSession(r.Context(), r.PathValue("session"))
+	session, err := s.ownSession(r, p)
 	if err != nil {
 		s.fail(w, r, err)
-		return
-	}
-	if session.PrincipalID != p.ID {
-		s.fail(w, r, domain.ErrNotPermitted)
 		return
 	}
 	var body heartbeatSessionBody
@@ -497,13 +491,9 @@ func (s *Server) listSessions(w http.ResponseWriter, r *http.Request, p domain.P
 }
 
 func (s *Server) closeSession(w http.ResponseWriter, r *http.Request, p domain.Principal) {
-	session, err := s.store.GetSession(r.Context(), r.PathValue("session"))
+	session, err := s.ownSession(r, p)
 	if err != nil {
 		s.fail(w, r, err)
-		return
-	}
-	if session.PrincipalID != p.ID {
-		s.fail(w, r, domain.ErrNotPermitted)
 		return
 	}
 	if err := s.store.CloseSession(r.Context(), session.ID); err != nil {
@@ -788,7 +778,8 @@ func (s *Server) getTaskCard(w http.ResponseWriter, r *http.Request, p domain.Pr
 	}
 
 	// A card for someone else's private task exposes territory only.
-	if task.Visibility == domain.VisibilityPrivate && owner.ID != caller.Principal.ID {
+	redacted := task.Visibility == domain.VisibilityPrivate && owner.ID != caller.Principal.ID
+	if redacted {
 		task.Title, task.Objective, task.ExternalRef = "(private)", "", ""
 		task.AcceptanceCriteria = nil
 	}
@@ -809,6 +800,10 @@ func (s *Server) getTaskCard(w http.ResponseWriter, r *http.Request, p domain.Pr
 
 	card := taskcard.FromTask(task, project.Slug, owner.Handle, attempt, lease,
 		reservations, task.DependsOn, project.Config.RequiredChecks)
+	if redacted && (attempt == nil || attempt.SponsorPrincipal != caller.Principal.ID) {
+		// Where the work runs is task detail, as in privacy.ProjectAttempt.
+		card.Worktree = ""
+	}
 	if lease != nil && card.Lease != nil {
 		// Everyone may see that the task is held, by whom, and until when — that is what
 		// stops a collision. Only the holder sees the lease id and fencing epoch, which are
@@ -830,15 +825,20 @@ func (s *Server) getTaskCard(w http.ResponseWriter, r *http.Request, p domain.Pr
 }
 
 type patchTaskBody struct {
-	Title      *string            `json:"title"`
-	Objective  *string            `json:"objective"`
-	Priority   *int               `json:"priority"`
-	RiskLevel  *domain.RiskLevel  `json:"risk_level"`
-	Visibility *domain.Visibility `json:"visibility"`
-	ModelAlias *string            `json:"model_alias"`
-	Labels     *[]string          `json:"labels"`
+	Title              *string                       `json:"title"`
+	Objective          *string                       `json:"objective"`
+	AcceptanceCriteria *[]domain.AcceptanceCriterion `json:"acceptance_criteria"`
+	Priority           *int                          `json:"priority"`
+	RiskLevel          *domain.RiskLevel             `json:"risk_level"`
+	Visibility         *domain.Visibility            `json:"visibility"`
+	ModelAlias         *string                       `json:"model_alias"`
+	Labels             *[]string                     `json:"labels"`
 }
 
+// patchTask edits a task. Who may (coord.AuthorizeTaskEdit): the creator, the holder of its
+// live lease, or a maintainer; changing visibility needs the creator or a maintainer. Before,
+// any contributor could rewrite a teammate's title and objective, or publish their private
+// task.
 func (s *Server) patchTask(w http.ResponseWriter, r *http.Request, p domain.Principal) {
 	task, caller, err := s.taskFor(r, p, domain.RoleContributor)
 	if err != nil {
@@ -850,20 +850,25 @@ func (s *Server) patchTask(w http.ResponseWriter, r *http.Request, p domain.Prin
 		s.fail(w, r, err)
 		return
 	}
-	// Only the owner or a maintainer may change a task's visibility; otherwise anyone could
-	// downgrade someone else's private work to team-visible.
-	if body.Visibility != nil && task.CreatedBy != p.ID && !caller.Role.Can(domain.RoleMaintainer) {
-		s.fail(w, r, fmt.Errorf("%w: only the owner or a maintainer may change visibility",
-			domain.ErrNotPermitted))
+	others, err := s.svc.AuthorizeTaskEdit(r.Context(), caller, task, body.Visibility != nil)
+	if err != nil {
+		s.fail(w, r, err)
 		return
 	}
 	if _, err := s.store.PatchTask(r.Context(), task.ID, db.TaskPatch{
-		Title: body.Title, Objective: body.Objective, Priority: body.Priority,
-		RiskLevel: body.RiskLevel, Visibility: body.Visibility, ModelAlias: body.ModelAlias,
-		Labels: body.Labels,
+		Title: body.Title, Objective: body.Objective, AcceptanceCriteria: body.AcceptanceCriteria,
+		Priority: body.Priority, RiskLevel: body.RiskLevel, Visibility: body.Visibility,
+		ModelAlias: body.ModelAlias, Labels: body.Labels,
 	}); err != nil {
 		s.fail(w, r, err)
 		return
+	}
+	if others {
+		detail := map[string]any{}
+		if body.Visibility != nil {
+			detail["from"], detail["to"] = string(task.Visibility), string(*body.Visibility)
+		}
+		s.auditOthersWork(r, caller, task, "task.edited_by_other", detail)
 	}
 	view, err := s.svc.TaskView(r.Context(), caller, task.ID)
 	if err != nil {
@@ -1043,54 +1048,6 @@ type transitionBody struct {
 	To domain.TaskStatus `json:"to"`
 }
 
-// reviewTargets are the statuses that accept verified work. Moving a task into one of them
-// is a review decision, not a step of the work itself.
-var reviewTargets = map[domain.TaskStatus]bool{
-	domain.TaskDone: true, domain.TaskMerging: true, domain.TaskReviewRequired: true,
-}
-
-// authorizeTransition is the rule for moving a task by hand (DESIGN.md §24.2):
-//
-//   - a maintainer or above may make any legal transition;
-//   - accepting verified work — into review_required, merging, or done — is a review
-//     decision, made by a reviewer or a maintainer, never by the author or executor alone;
-//   - every other move is the business of the task's creator or the holder of its live
-//     lease, and needs a contributor.
-//
-// The state machine still decides which transitions are legal; this decides who may ask.
-// Before, any contributor could cancel, reset, or complete anyone's task.
-func (s *Server) authorizeTransition(r *http.Request, caller coord.Caller, task domain.Task, to domain.TaskStatus) (bool, error) {
-	if caller.Role.Can(domain.RoleMaintainer) {
-		others := task.CreatedBy != caller.Principal.ID
-		if lease, err := s.store.ActiveLeaseForTask(r.Context(), task.ID); err == nil {
-			others = others && !caller.HoldsLease(lease)
-		}
-		return others, nil
-	}
-	if reviewTargets[to] && task.Status != to {
-		if caller.Role == domain.RoleReviewer {
-			return task.CreatedBy != caller.Principal.ID, nil
-		}
-		return false, fmt.Errorf("%w: moving a task to %s is a review decision for a reviewer or maintainer",
-			domain.ErrNotPermitted, to)
-	}
-	if !caller.Role.Can(domain.RoleContributor) {
-		return false, fmt.Errorf("%w: role %s cannot move tasks", domain.ErrNotPermitted, caller.Role)
-	}
-	if task.CreatedBy == caller.Principal.ID {
-		return false, nil
-	}
-	lease, err := s.store.ActiveLeaseForTask(r.Context(), task.ID)
-	if err == nil && caller.HoldsLease(lease) {
-		return false, nil
-	}
-	if err != nil && !errors.Is(err, domain.ErrNotFound) {
-		return false, err
-	}
-	return false, fmt.Errorf("%w: only the task's creator, the holder of its lease, or a maintainer may move it",
-		domain.ErrNotPermitted)
-}
-
 func (s *Server) transitionTask(w http.ResponseWriter, r *http.Request, p domain.Principal) {
 	// Reviewer is the floor here, below contributor: a reviewer may make review decisions
 	// and nothing else (authorizeTransition).
@@ -1111,7 +1068,7 @@ func (s *Server) transitionTask(w http.ResponseWriter, r *http.Request, p domain
 		s.fail(w, r, fmt.Errorf("%w: status is required", domain.ErrInvalidArgument))
 		return
 	}
-	others, err := s.authorizeTransition(r, caller, task, body.Status)
+	others, err := s.svc.AuthorizeTransition(r.Context(), caller, task, body.Status)
 	if err != nil {
 		s.fail(w, r, err)
 		return

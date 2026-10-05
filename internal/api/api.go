@@ -161,6 +161,38 @@ func tokenProjectScope(r *http.Request) domain.ID {
 	return id
 }
 
+// scopedGlobalRoutes are the routes that name no project resource but that a project-scoped
+// token may still use: identity, read-only listings (filtered to the scope where they list
+// projects), the lease heartbeat and runner registration (both authorized against the
+// project they touch), and the MCP gateway (which calls back into this API with the same
+// token, so every tool call is scoped in turn).
+var scopedGlobalRoutes = map[string]bool{
+	"GET /v1/whoami": true, "GET /v1/projects": true, "GET /v1/tokens": true,
+	"GET /v1/peers": true, "GET /v1/security": true, "GET /v1/github/status": true,
+	"POST /v1/leases/heartbeat": true, "POST /v1/runners/register": true,
+	"POST /mcp": true, "GET /mcp": true, "DELETE /mcp": true,
+	"POST /mcp/{project}": true, "GET /mcp/{project}": true, "DELETE /mcp/{project}": true,
+}
+
+// scopedRouteAllowed reports whether a project-scoped token may reach a route. Routes that
+// address a project or a resource inside one are allowed, because their handlers authorize
+// against that resource's project through coord.Authorize, which applies the scope (sessions
+// and runners, which are checked by owner instead, apply it themselves). Everything else —
+// the machine's security mode, GitHub App setup, token administration — is server- or
+// principal-wide, and a credential handed to one attempt's agent has no business there.
+func scopedRouteAllowed(pattern string) bool {
+	if scopedGlobalRoutes[pattern] {
+		return true
+	}
+	for _, param := range []string{"{project}", "{task}", "{attempt}", "{assignment}",
+		"{reservation}", "{conflict}", "{ticket}", "{session}", "{runner}"} {
+		if strings.Contains(pattern, param) {
+			return true
+		}
+	}
+	return false
+}
+
 // authenticate resolves the bearer token to a principal.
 //
 // Tokens are matched by SHA-256 hash, so a database dump contains no usable credential, and
@@ -242,6 +274,10 @@ func (s *Server) authenticateWith(allowQueryToken bool, next func(http.ResponseW
 		ctx := context.WithValue(r.Context(), principalKey, principal)
 		ctx = context.WithValue(ctx, tokenNameKey, name)
 		if info.ProjectID != "" {
+			if !scopedRouteAllowed(r.Pattern) {
+				s.fail(w, r, fmt.Errorf("%w: a project-scoped token cannot use %s", domain.ErrNotPermitted, r.Pattern))
+				return
+			}
 			ctx = context.WithValue(ctx, tokenScopeKey, info.ProjectID)
 			// coord.Authorize enforces the scope, so every project-scoped handler inherits it
 			// without having to remember to.
@@ -525,6 +561,42 @@ func fenceFrom(r *http.Request, body fenceCarrier) domain.Fence {
 }
 
 type fenceCarrier interface{ fence() domain.Fence }
+
+// ownSession loads a session the caller registered. Sessions are authorized by owner rather
+// than by project role, so the token's project scope is applied here: a scoped token cannot
+// heartbeat, close, or re-declare its owner's sessions in another project. Another
+// principal's session and a session outside the scope are the same 404.
+func (s *Server) ownSession(r *http.Request, p domain.Principal) (domain.Session, error) {
+	session, err := s.store.GetSession(r.Context(), r.PathValue("session"))
+	if err != nil {
+		if isBadUUID(err) {
+			return domain.Session{}, domain.ErrNotFound
+		}
+		return domain.Session{}, err
+	}
+	if scope := tokenProjectScope(r); scope != "" && session.ProjectID != scope {
+		return domain.Session{}, domain.ErrNotFound
+	}
+	if session.PrincipalID != p.ID {
+		return domain.Session{}, domain.ErrNotPermitted
+	}
+	return session, nil
+}
+
+// inTokenScope filters a project listing to the token's scope, if it has one.
+func inTokenScope(r *http.Request, projects []domain.Project) []domain.Project {
+	scope := tokenProjectScope(r)
+	if scope == "" {
+		return projects
+	}
+	out := make([]domain.Project, 0, 1)
+	for _, p := range projects {
+		if p.ID == scope {
+			out = append(out, p)
+		}
+	}
+	return out
+}
 
 // execProject resolves the project and authorizes the caller for execution endpoints, which
 // accept the runner role as well as contributors (coord.Caller.CanExecute).
