@@ -53,6 +53,8 @@ Work
   conductor task create              file new work
   conductor task claim <ref|--next>  take a task and its territory
   conductor task release <ref>       hand a task back
+  conductor task done <ref>          the work merged: finish it and free its territory
+  conductor task reopen <ref>        send finished-but-unmerged work back to the queue
   conductor task handoff <ref>       hand off to another harness
   conductor task assign <ref>        offer work to a session that meets a capability floor
   conductor inbox                    work offered to this session

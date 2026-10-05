@@ -55,7 +55,7 @@ export const ConductorPlugin = async ({ $, directory, worktree } = {}) => {
         if (!EDIT_TOOLS.has(tool) && !/edit|write|patch/.test(tool)) return;
         const file = editPath(output && output.args);
         if (!file) return;
-        const r = await runConductor($, cwd, ["hook", "pre-tool", "--tool", tool, "--path", file]);
+        const r = await runConductor($, cwd, ["hook", "pre-tool", "--auto-reserve", "--tool", tool, "--path", file]);
         if (r.code === 2) {
           blocked = (r.stderr || "another session holds this file").trim();
         }

@@ -240,3 +240,38 @@ func TestMCPPublishResultRecordsEvidence(t *testing.T) {
 		t.Errorf("attempt commit = %q, %v", attempt.CommitSHA, err)
 	}
 }
+
+// `conductor task done` on work still claimed: the holder completes it in one step; anyone
+// else is refused.
+func TestCompleteFinishesClaimedWork(t *testing.T) {
+	h := newHarness(t)
+	taskID := h.readyTask("merged by hand")
+	var claimed struct {
+		Fence domain.Fence `json:"fence"`
+	}
+	if code := h.jsonDo(h.aliceTok, http.MethodPost, "/v1/tasks/"+taskID+"/claim",
+		map[string]any{"scopes": []map[string]any{{"resource": "path:internal/loop/d.go"}}}, &claimed); code != http.StatusOK {
+		t.Fatalf("claim = %d", code)
+	}
+	if code := h.jsonDo(h.bobTok, http.MethodPost, "/v1/tasks/"+taskID+"/complete", nil, nil); code != http.StatusForbidden {
+		t.Errorf("completing someone else's claim = %d, want 403", code)
+	}
+	var out struct {
+		Task struct {
+			Status domain.TaskStatus `json:"status"`
+		} `json:"task"`
+	}
+	if code := h.jsonDo(h.aliceTok, http.MethodPost, "/v1/tasks/"+taskID+"/complete", nil, &out); code != http.StatusOK || out.Task.Status != domain.TaskDone {
+		t.Fatalf("complete = %d %s", code, out.Task.Status)
+	}
+	if held, _ := h.store.ReservationsForTask(context.Background(), taskID); len(held) != 0 {
+		t.Errorf("a completed task still holds %d reservation(s)", len(held))
+	}
+	if err := h.store.AssertFence(context.Background(), claimed.Fence); err == nil {
+		t.Error("the completed claim's fence still passes")
+	}
+	// Nothing left to complete.
+	if code := h.jsonDo(h.aliceTok, http.MethodPost, "/v1/tasks/"+taskID+"/complete", nil, nil); code != http.StatusConflict {
+		t.Errorf("completing a done task = %d, want 409", code)
+	}
+}

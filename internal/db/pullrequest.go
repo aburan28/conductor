@@ -135,19 +135,49 @@ func (s *Store) PullRequestMerged(ctx context.Context, taskID domain.ID, url str
 			return noRows(err)
 		}
 		out.From, out.Status = from, from
-		path := mergePath(from)
-		if len(path) == 0 {
-			return nil
-		}
-		task, err := updateTaskStatusTx(ctx, tx, taskID, domain.TaskDone, "pull request merged",
-			path[:len(path)-1]...)
-		if err != nil {
-			return fmt.Errorf("complete %s on merge: %w", out.TaskRef, err)
-		}
-		out.Status, out.Changed = task.Status, true
-		return nil
+		return completeTx(ctx, tx, taskID, from, "pull request merged", &out)
 	})
 	return out, err
+}
+
+// CompleteWork marks a task's work as landed by hand — `conductor task done` on a task that
+// is still claimed or running, when it merged without the GitHub App to say so. It is the
+// same walk a merge takes (mergePath), so it ends the lease and releases the territory. A
+// task already done is left alone; one that was never claimed is refused.
+func (s *Store) CompleteWork(ctx context.Context, taskID domain.ID, reason string) (PullRequestOutcome, error) {
+	var out PullRequestOutcome
+	err := s.Tx(ctx, func(tx pgx.Tx) error {
+		var from domain.TaskStatus
+		if err := tx.QueryRow(ctx,
+			`SELECT ref, status FROM tasks WHERE id = $1::uuid FOR UPDATE`, taskID,
+		).Scan(&out.TaskRef, &from); err != nil {
+			return noRows(err)
+		}
+		out.From, out.Status = from, from
+		if from == domain.TaskDone {
+			return nil
+		}
+		if len(mergePath(from)) == 0 {
+			return fmt.Errorf("%w: %s is %s; only claimed or finished work can be completed",
+				domain.ErrIllegalTransition, out.TaskRef, from)
+		}
+		return completeTx(ctx, tx, taskID, from, reason, &out)
+	})
+	return out, err
+}
+
+// completeTx walks a task from `from` to done along mergePath.
+func completeTx(ctx context.Context, tx pgx.Tx, taskID domain.ID, from domain.TaskStatus, reason string, out *PullRequestOutcome) error {
+	path := mergePath(from)
+	if len(path) == 0 {
+		return nil
+	}
+	task, err := updateTaskStatusTx(ctx, tx, taskID, domain.TaskDone, reason, path[:len(path)-1]...)
+	if err != nil {
+		return fmt.Errorf("complete %s: %w", out.TaskRef, err)
+	}
+	out.Status, out.Changed = task.Status, true
+	return nil
 }
 
 // PullRequestClosed records that a task's pull request closed without merging.

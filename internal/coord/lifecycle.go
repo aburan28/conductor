@@ -8,6 +8,7 @@ import (
 
 	"github.com/adamburan/conductor/internal/db"
 	"github.com/adamburan/conductor/internal/domain"
+	"github.com/adamburan/conductor/internal/resource"
 )
 
 // UnboundClaimWindow is how long a claim made with no session behind it stays alive waiting
@@ -103,6 +104,28 @@ func (s *Service) ReserveForSession(ctx context.Context, principal domain.Princi
 	if source == "" {
 		source = domain.SourceObserved
 	}
+	// What the task already holds is not asked for twice: the hook's view of the claim's
+	// scopes can lag a reservation made a moment ago through another path.
+	held, err := s.Store.ReservationsForTask(ctx, task.ID)
+	if err != nil {
+		return SessionScopeResult{}, err
+	}
+	have := map[string]bool{}
+	for _, r := range held {
+		have[r.Resource()] = true
+	}
+	fresh := requests[:0:0]
+	for _, r := range requests {
+		if parsed, err := resource.Parse(r.Resource); err == nil && have[parsed.String()] {
+			continue
+		}
+		fresh = append(fresh, r)
+	}
+	if len(fresh) == 0 {
+		return SessionScopeResult{ExpandScopeResult: ExpandScopeResult{Outcome: domain.OutcomeAllow},
+			TaskID: task.ID, TaskRef: task.Ref}, nil
+	}
+	requests = fresh
 	fence := domain.Fence{TaskID: lease.TaskID, AttemptID: lease.AttemptID,
 		LeaseID: lease.ID, FencingEpoch: lease.FencingEpoch}
 	result, err := s.ExpandScope(ctx, caller, fence, session.ProjectID, requests, source)

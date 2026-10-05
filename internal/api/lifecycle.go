@@ -1,6 +1,8 @@
 package api
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/adamburan/conductor/internal/domain"
@@ -14,6 +16,49 @@ func (s *Server) lifecycleRoutes(m *http.ServeMux) {
 	m.HandleFunc("POST /v1/sessions/{session}/adopt", auth(s.adoptClaims))
 	m.HandleFunc("POST /v1/sessions/{session}/scopes", auth(s.sessionScopes))
 	m.HandleFunc("POST /v1/attempts/{attempt}/evidence", auth(s.publishEvidence))
+	m.HandleFunc("POST /v1/tasks/{task}/complete", auth(s.completeTask))
+}
+
+// completeTask finishes work that is still claimed or running in one step: the person
+// working it merged it (without the GitHub App to say so) and is saying so. The ordinary
+// transition route cannot express that — running -> done skips edges, and the live lease and
+// attempt have to end with it — so this walks the same path a merge does.
+//
+// Only the holder of the task's live lease may do this (or a maintainer): it ends that lease.
+// A task waiting to merge (verifying and on) has no lease and goes through the transition
+// route, which is where status authority for everyone else lives.
+func (s *Server) completeTask(w http.ResponseWriter, r *http.Request, p domain.Principal) {
+	task, caller, err := s.taskFor(r, p, domain.RoleContributor)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	lease, err := s.store.ActiveLeaseForTask(r.Context(), task.ID)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			s.fail(w, r, fmt.Errorf("%w: %s holds no live claim; mark finished work done with the transition route",
+				domain.ErrIllegalTransition, task.Ref))
+			return
+		}
+		s.fail(w, r, err)
+		return
+	}
+	if lease.HolderPrincipal != p.ID && !caller.Role.Can(domain.RoleMaintainer) {
+		s.fail(w, r, fmt.Errorf("%w: only the claim's holder or a maintainer may complete %s",
+			domain.ErrNotPermitted, task.Ref))
+		return
+	}
+	out, err := s.store.CompleteWork(r.Context(), task.ID, "marked done by "+p.Handle)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	view, err := s.svc.TaskView(r.Context(), caller, task.ID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.ok(w, r, http.StatusOK, map[string]any{"task": view, "from": out.From})
 }
 
 type evidenceBody struct {

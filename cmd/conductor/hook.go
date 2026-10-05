@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/adamburan/conductor/internal/domain"
 	"github.com/adamburan/conductor/internal/localstate"
 	"github.com/adamburan/conductor/internal/privacy"
+	"github.com/adamburan/conductor/internal/resource"
 )
 
 // Hooks are how a coding tool asks Conductor a question at the moment it matters — "may I
@@ -168,12 +170,25 @@ func judgePreTool(d coord.IntentDecision, self string) preToolVerdict {
 		others = append(others, c)
 	}
 	for _, c := range others {
-		if c.Outcome.Blocks() {
-			return preToolVerdict{Block: true, Message: fmt.Sprintf(
-				"Conductor: %s holds %s for %s (%s). Wait for it, split your scope, or join their task "+
-					"with coord_start_work(attach_to: %q). Run conductor_check_conflicts to see the current holders.",
-				c.HolderOwner, c.ResourceKey, c.HolderTaskRef, c.HolderMode, c.HolderTaskRef)}
+		if !c.Outcome.Blocks() {
+			continue
 		}
+		if c.PendingMerge() {
+			// The holder is not editing: their finished change to this file is waiting to
+			// merge. Editing now would build on contents that are about to change under you.
+			pr := ""
+			if c.HolderPullRequest != "" {
+				pr = " (" + c.HolderPullRequest + ")"
+			}
+			return preToolVerdict{Block: true, Message: fmt.Sprintf(
+				"Conductor: %s's %s changed %s and is waiting to merge%s. The file stays reserved until "+
+					"that merges or %s is marked done. Wait for the merge, or build on their branch.",
+				c.HolderOwner, c.HolderTaskRef, c.ResourceKey, pr, c.HolderTaskRef)}
+		}
+		return preToolVerdict{Block: true, Message: fmt.Sprintf(
+			"Conductor: %s holds %s for %s (%s). Wait for it, split your scope, or join their task "+
+				"with coord_start_work(attach_to: %q). Run conductor_check_conflicts to see the current holders.",
+			c.HolderOwner, c.ResourceKey, c.HolderTaskRef, c.HolderMode, c.HolderTaskRef)}
 	}
 	if len(others) > 0 {
 		c := others[0]
@@ -192,6 +207,7 @@ func hookPreTool(ctx context.Context, args []string) error {
 	project := fs.String("project", "", "project id or slug")
 	strict := fs.Bool("strict", false, "block when Conductor cannot be reached, instead of failing open")
 	requireClaim := fs.Bool("require-claim", false, "block edits from a session that holds no task")
+	autoReserve := fs.Bool("auto-reserve", true, "reserve a file under the session's claim the first time it is edited outside the claimed scope (=false only reports it)")
 	asJSON := fs.Bool("json", false, "print the decision and verdict to stderr")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -228,13 +244,10 @@ func hookPreTool(ctx context.Context, args []string) error {
 	ctx, cancel := context.WithTimeout(ctx, hookTimeout)
 	defer cancel()
 
-	excludeTask := os.Getenv("CONDUCTOR_TASK_ID")
+	sessionID := os.Getenv("CONDUCTOR_SESSION_ID")
+	claim := claimFromEnv(ctx, api, ref, sessionID)
+	excludeTask := claim.ID
 	hasClaim := excludeTask != ""
-	if sessionID := os.Getenv("CONDUCTOR_SESSION_ID"); excludeTask == "" && sessionID != "" {
-		if active := activeTaskFor(ctx, api, ref, sessionID); active.ID != "" {
-			excludeTask, hasClaim = active.ID, true
-		}
-	}
 	if *requireClaim && !hasClaim {
 		return blockEdit("Conductor: this session holds no task. Claim one first (coord_start_work, or " +
 			"`conductor task claim --next`), then edit.")
@@ -254,21 +267,154 @@ func hookPreTool(ctx context.Context, args []string) error {
 	if *asJSON {
 		_ = json.NewEncoder(os.Stderr).Encode(map[string]any{"decision": decision, "verdict": verdict})
 	}
-	switch {
-	case verdict.Block:
+	if verdict.Block {
 		return blockEdit(verdict.Message)
-	case verdict.Warning != "":
-		// Exit 0 with a JSON body: the edit proceeds and the model sees the warning.
+	}
+
+	// The edit goes ahead. What remains is making it visible: an edit outside the claim's
+	// scope is scope expansion, and an edit with no claim at all is invisible to everyone.
+	notes := []string{}
+	if verdict.Warning != "" {
+		notes = append(notes, verdict.Warning)
+	}
+	if hasClaim {
+		if note := expandOwnScope(ctx, api, claim, rel, *autoReserve); note != "" {
+			notes = append(notes, note)
+		}
+	} else if note := unclaimedEditNote(sessionID, cwd); note != "" {
+		notes = append(notes, note)
+	}
+	if len(notes) > 0 {
+		// Exit 0 with a JSON body: the edit proceeds and the model sees the notes.
+		text := strings.Join(notes, " ")
 		out := map[string]any{"hookSpecificOutput": map[string]any{
 			"hookEventName":            "PreToolUse",
 			"permissionDecision":       "allow",
-			"permissionDecisionReason": verdict.Warning,
-			"additionalContext":        verdict.Warning,
+			"permissionDecisionReason": text,
+			"additionalContext":        text,
 		}}
 		body, _ := json.Marshal(out)
 		fmt.Println(string(body))
 	}
 	return nil
+}
+
+// claimFromEnv finds the claim this hook's session is working under: a runner-launched
+// attempt names its task and fence in the environment; a wrapped session is looked up by its
+// session id.
+func claimFromEnv(ctx context.Context, api *client.Client, project, sessionID string) activeTask {
+	if taskID := os.Getenv("CONDUCTOR_TASK_ID"); taskID != "" {
+		claim := activeTask{ID: taskID, Ref: os.Getenv("CONDUCTOR_TASK_REF"), FetchedAt: time.Now()}
+		claim.Fence = domain.Fence{TaskID: taskID, AttemptID: os.Getenv("CONDUCTOR_ATTEMPT_ID"),
+			LeaseID: os.Getenv("CONDUCTOR_LEASE_ID")}
+		if n, err := strconv.ParseInt(os.Getenv("CONDUCTOR_FENCING_EPOCH"), 10, 64); err == nil {
+			claim.Fence.FencingEpoch = n
+		}
+		var view privacy.TaskView
+		if err := api.Get(ctx, "/v1/tasks/"+taskID, &view); err == nil {
+			claim.Ref, claim.Scopes = view.Ref, view.Scopes
+		}
+		return claim
+	}
+	if sessionID == "" {
+		return activeTask{}
+	}
+	claim := activeTaskFor(ctx, api, project, sessionID)
+	claim.SessionID = sessionID
+	return claim
+}
+
+// coveredBy reports whether a repository path falls inside any of a claim's scopes.
+func coveredBy(scopes []string, rel string) bool {
+	want, err := resource.Parse("path:" + rel)
+	if err != nil {
+		return true // not a path Conductor can reason about; do not nag about it
+	}
+	for _, sc := range scopes {
+		held, err := resource.Parse(sc)
+		if err != nil {
+			continue
+		}
+		if held.Type == domain.ResourceRepo || resource.Overlaps(want, held) {
+			return true
+		}
+	}
+	return false
+}
+
+// expandOwnScope handles an edit outside the caller's own claimed scope.
+//
+// Scope drift is normal — the work turns out to need an adjacent file — but unreported it is
+// invisible: the claim says one thing, the diff says another, and a teammate who checks the
+// file is told it is free. With auto-reserve (the default, and what `conductor integrate`
+// configures) the file is reserved under the claim on its first edit, as an `observed`
+// reservation, and the model is told so. Without it the model is told to report the expansion
+// itself. Only the path is sent, never the edit.
+func expandOwnScope(ctx context.Context, api *client.Client, claim activeTask, rel string, autoReserve bool) string {
+	if coveredBy(claim.Scopes, rel) {
+		return ""
+	}
+	ref := firstNonEmptyString(claim.Ref, "your task")
+	if !autoReserve {
+		return fmt.Sprintf("Conductor: %s is outside %s's claimed scope. Report the scope expansion "+
+			"(coord_expand_scope, or `conductor scope add %s path:%s`) so teammates can see it.", rel, ref, ref, rel)
+	}
+	scopes := []domain.ScopeRequest{{Resource: "path:" + rel, Mode: domain.ModeWriteExclusive}}
+	var result coord.ExpandScopeResult
+	var err error
+	switch {
+	case claim.SessionID != "":
+		var out coord.SessionScopeResult
+		err = api.Post(ctx, "/v1/sessions/"+claim.SessionID+"/scopes",
+			map[string]any{"scopes": scopes, "source": domain.SourceObserved}, &out)
+		result = out.ExpandScopeResult
+		if err == nil && out.NoClaim {
+			return ""
+		}
+	case claim.Fence.LeaseID != "":
+		err = api.Post(ctx, "/v1/tasks/"+claim.ID+"/scopes", map[string]any{
+			"attempt_id": claim.Fence.AttemptID, "lease_id": claim.Fence.LeaseID,
+			"fencing_epoch": claim.Fence.FencingEpoch,
+			"scopes":        scopes, "source": domain.SourceObserved,
+		}, &result)
+	default:
+		return ""
+	}
+	if err != nil {
+		var apiErr *client.APIError
+		if errors.As(err, &apiErr) && apiErr.Blocked() {
+			return fmt.Sprintf("Conductor: %s is outside %s's claimed scope and could not be reserved: %s",
+				rel, ref, result.Advice)
+		}
+		return fmt.Sprintf("Conductor: %s is outside %s's claimed scope (reserving it failed: %v). "+
+			"Report the scope expansion with coord_expand_scope.", rel, ref, err)
+	}
+	// Remember it, so the next edit of the same file costs nothing.
+	claim.Scopes = append(claim.Scopes, "path:"+rel)
+	if claim.SessionID != "" {
+		writeHookCache("session-"+claim.SessionID, claim)
+	}
+	return fmt.Sprintf("Conductor: %s was outside %s's claimed scope, so it is now reserved for %s "+
+		"(scope expansion recorded).", rel, ref, ref)
+}
+
+// unclaimedNoticeEvery bounds how often a session with no claim is reminded of it.
+const unclaimedNoticeEvery = 10 * time.Minute
+
+// unclaimedEditNote reminds a session that holds no task that its edits reserve nothing. It
+// does not block (that is --require-claim) and it does not repeat on every edit.
+func unclaimedEditNote(sessionID, cwd string) string {
+	key := "unclaimed-" + firstNonEmptyString(sessionID, cwd)
+	var last struct {
+		At time.Time `json:"at"`
+	}
+	if readHookCache(key, &last) && time.Since(last.At) < unclaimedNoticeEvery {
+		return ""
+	}
+	last.At = time.Now()
+	writeHookCache(key, last)
+	return "Conductor: this session holds no task, so its edits reserve nothing and teammates cannot " +
+		"see them. Claim the work first (coord_start_work, or `conductor task claim`) to protect it."
 }
 
 // blockEdit is the one hard answer a hook gives: exit 2, reason on stderr.
@@ -315,7 +461,12 @@ func selfHandle(ctx context.Context, api *client.Client, creds client.Credential
 type activeTask struct {
 	ID        string    `json:"task_id"`
 	Ref       string    `json:"task_ref"`
+	Scopes    []string  `json:"scopes,omitempty"`
 	FetchedAt time.Time `json:"fetched_at"`
+	// SessionID and Fence say how to act on the claim: through the wrapped session, or with
+	// a runner attempt's fence. Neither is cached.
+	SessionID string       `json:"-"`
+	Fence     domain.Fence `json:"-"`
 }
 
 // activeTaskFor finds the task a session holds, caching the answer briefly so a burst of
@@ -337,7 +488,7 @@ func activeTaskFor(ctx context.Context, api *client.Client, project, sessionID s
 			found.Ref = s.ActiveTaskRef
 			var view privacy.TaskView
 			if err := api.Get(ctx, "/v1/tasks/"+s.ActiveTaskRef+client.Query("project", project), &view); err == nil {
-				found.ID = view.ID
+				found.ID, found.Scopes = view.ID, view.Scopes
 			}
 			break
 		}
