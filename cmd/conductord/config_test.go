@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,6 +13,8 @@ import (
 
 	"github.com/adamburan/conductor/internal/admin"
 	"github.com/adamburan/conductor/internal/api"
+	"github.com/adamburan/conductor/internal/db"
+	"github.com/adamburan/conductor/internal/domain"
 )
 
 func writeConfig(t *testing.T, body string) string {
@@ -169,5 +173,57 @@ func TestConfigCheckCommand(t *testing.T) {
 	}
 	if code := configCommand([]string{"lint"}, &out, &errOut); code != 2 {
 		t.Errorf("unknown subcommand = %d", code)
+	}
+}
+
+// The first principal of a new organization becomes its org_admin, so someone can reach the
+// admin area; re-running bootstrap to recover a login never demotes them.
+func TestBootstrapMakesTheFirstPrincipalOrgAdmin(t *testing.T) {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		t.Skip("DATABASE_URL not set")
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CONDUCTOR_STATE_DIR", t.TempDir())
+	org := fmt.Sprintf("boot-%d", time.Now().UnixNano())
+	repo := t.TempDir()
+	run := func(extra ...string) {
+		t.Helper()
+		args := append([]string{"--dsn", dsn, "--org", org, "--project", "app", "--principal", "ada", "--repo", repo, "--no-login"}, extra...)
+		if err := bootstrap(args); err != nil {
+			t.Fatal(err)
+		}
+	}
+	role := func(handle string) domain.Role {
+		t.Helper()
+		ctx := context.Background()
+		store, err := db.Open(ctx, dsn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		o, _ := store.GetOrganizationBySlug(ctx, org)
+		p, _ := store.GetProjectBySlug(ctx, o.ID, "app")
+		pr, _ := store.GetPrincipalByHandle(ctx, o.ID, handle)
+		r, _ := store.RoleIn(ctx, p.ID, pr.ID)
+		return r
+	}
+	run()
+	if r := role("ada"); r != domain.RoleOrgAdmin {
+		t.Fatalf("first principal = %s, want org_admin", r)
+	}
+	run()
+	if r := role("ada"); r != domain.RoleOrgAdmin {
+		t.Errorf("re-running bootstrap demoted ada to %s", r)
+	}
+	run("--role", "contributor")
+	if r := role("ada"); r != domain.RoleContributor {
+		t.Errorf("--role contributor = %s", r)
+	}
+	if err := bootstrap([]string{"--dsn", dsn, "--org", org, "--project", "app", "--principal", "ben", "--repo", repo, "--no-login"}); err != nil {
+		t.Fatal(err)
+	}
+	if r := role("ben"); r != domain.RoleProjectAdmin {
+		t.Errorf("a later principal in an existing organization = %s, want project_admin", r)
 	}
 }
