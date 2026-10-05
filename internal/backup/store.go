@@ -199,21 +199,25 @@ func isTrue(s string) bool {
 // keyed by checkpoint id rather than by machine, because moving between machines is their
 // purpose: a bundle pushed from a laptop is pulled onto a workstation under the same key.
 //
-//	<prefix>/checkpoints/<id>.json   the manifest, in the clear: ids, paths, hashes, no content
-//	<prefix>/checkpoints/<id>.ckpt   the sealed bundle
+//	<prefix>/checkpoints/<id>.json   an index entry, in the clear: id, time, harness, size
+//	<prefix>/checkpoints/<id>.ckpt   the sealed bundle, manifest included
+//
+// The index entry is deliberately not the manifest. A manifest carries the harness's title
+// for the conversation, the note, the working directory, the repository, and the machine
+// name: no transcript, but plenty about what someone was doing, which is content.
 
 // ErrUnsealed is returned when a caller tries to push a plaintext checkpoint.
 var ErrUnsealed = errors.New("refusing to upload an unsealed checkpoint; set CONDUCTOR_CHECKPOINT_KEY")
 
-// PutCheckpoint uploads a sealed bundle and its manifest.
-func (s *Store) PutCheckpoint(ctx context.Context, id string, manifest, sealed []byte, isSealed func([]byte) bool) error {
+// PutCheckpoint uploads a sealed bundle and its index entry (checkpoint.IndexEntry).
+func (s *Store) PutCheckpoint(ctx context.Context, id string, index, sealed []byte, isSealed func([]byte) bool) error {
 	if isSealed != nil && !isSealed(sealed) {
 		return ErrUnsealed
 	}
 	if err := s.s3.Put(ctx, s.checkpointKey(id, ".ckpt"), sealed, "application/octet-stream"); err != nil {
 		return err
 	}
-	return s.s3.Put(ctx, s.checkpointKey(id, ".json"), manifest, "application/json")
+	return s.s3.Put(ctx, s.checkpointKey(id, ".json"), index, "application/json")
 }
 
 // GetCheckpoint downloads a sealed bundle. ErrNotFound when there is none.
@@ -221,7 +225,7 @@ func (s *Store) GetCheckpoint(ctx context.Context, id string) ([]byte, error) {
 	return s.s3.Get(ctx, s.checkpointKey(id, ".ckpt"))
 }
 
-// GetCheckpointManifest downloads a manifest. ErrNotFound when there is none.
+// GetCheckpointManifest downloads a checkpoint's index entry. ErrNotFound when there is none.
 func (s *Store) GetCheckpointManifest(ctx context.Context, id string) ([]byte, error) {
 	return s.s3.Get(ctx, s.checkpointKey(id, ".json"))
 }

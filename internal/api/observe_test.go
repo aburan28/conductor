@@ -61,7 +61,8 @@ func TestRequestIDAndAccessLog(t *testing.T) {
 
 	// A caller's request ID is propagated; the access log names the route pattern and the
 	// principal, at Info.
-	req, _ := http.NewRequest(http.MethodGet, ts.URL+h.projectPath("")+"?token="+h.aliceTok, nil)
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+h.projectPath(""), nil)
+	req.Header.Set("Authorization", "Bearer "+h.aliceTok)
 	req.Header.Set("X-Request-Id", "trace-abc.123")
 	resp, err := ts.Client().Do(req)
 	if err != nil {

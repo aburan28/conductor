@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"time"
 
 	"github.com/adamburan/conductor/internal/coord"
 	"github.com/adamburan/conductor/internal/db"
@@ -50,7 +51,20 @@ type Backend interface {
 
 	// HeartbeatRunner keeps the advertised capacity fresh.
 	HeartbeatRunner(ctx context.Context, runnerID domain.ID, inFlight int) error
+
+	// MintAttemptToken issues the credential the agent of one attempt uses to reach the
+	// control plane: confined to this project, expiring after ttl, and named so the runner
+	// can revoke it the moment the attempt ends. The operator's own token never reaches the
+	// agent.
+	MintAttemptToken(ctx context.Context, attemptID domain.ID, ttl time.Duration) (token, name string, err error)
+
+	// RevokeToken revokes a token MintAttemptToken issued.
+	RevokeToken(ctx context.Context, name string) error
 }
+
+// attemptTokenName names the per-attempt credential, so `conductor token list` shows what it
+// is for and the runner can revoke exactly it.
+func attemptTokenName(attemptID domain.ID) string { return "attempt:" + attemptID }
 
 // ClaimRequest asks for the next dispatchable task.
 type ClaimRequest struct {

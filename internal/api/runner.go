@@ -12,7 +12,7 @@ import (
 // and holds no database password).
 
 func (s *Server) runnerSnapshot(w http.ResponseWriter, r *http.Request, p domain.Principal) {
-	project, caller, err := s.project(r, p, domain.RoleContributor)
+	project, caller, err := s.execProject(r, p)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -31,8 +31,13 @@ func (s *Server) attemptBrief(w http.ResponseWriter, r *http.Request, p domain.P
 		s.fail(w, r, err)
 		return
 	}
-	caller, err := s.svc.Authorize(r.Context(), p, attempt.ProjectID, domain.RoleContributor)
+	caller, err := s.svc.AuthorizeExecution(r.Context(), p, attempt.ProjectID)
 	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	// The brief carries the task's full content and live fence; it is for the executor.
+	if err := s.svc.AuthorizeBrief(r.Context(), caller, attempt); err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -50,8 +55,12 @@ func (s *Server) setAttemptRoute(w http.ResponseWriter, r *http.Request, p domai
 		s.fail(w, r, err)
 		return
 	}
-	caller, err := s.svc.Authorize(r.Context(), p, attempt.ProjectID, domain.RoleContributor)
+	caller, err := s.svc.AuthorizeExecution(r.Context(), p, attempt.ProjectID)
 	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if err := s.svc.AuthorizeAttemptControl(r.Context(), caller, attempt); err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -82,8 +91,12 @@ func (s *Server) setAttemptState(w http.ResponseWriter, r *http.Request, p domai
 		s.fail(w, r, err)
 		return
 	}
-	caller, err := s.svc.Authorize(r.Context(), p, attempt.ProjectID, domain.RoleContributor)
+	caller, err := s.svc.AuthorizeExecution(r.Context(), p, attempt.ProjectID)
 	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if err := s.svc.AuthorizeAttemptControl(r.Context(), caller, attempt); err != nil {
 		s.fail(w, r, err)
 		return
 	}

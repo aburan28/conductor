@@ -132,6 +132,16 @@ func ReadManifest(r io.Reader) (Manifest, error) {
 	return m, m.Validate()
 }
 
+// Limits on what Open will unpack. A checkpoint is transcript-sized — kilobytes to tens of
+// megabytes — and is held in memory, so a bundle that claims more is refused before it is
+// read rather than after it has exhausted the machine. Compression makes the archive's own
+// size no guide: a few kilobytes of gzip can expand to gigabytes.
+var (
+	MaxMemberBytes int64 = 512 << 20
+	MaxBundleBytes int64 = 2 << 30
+	MaxMembers           = 100_000
+)
+
 // Open reads a whole archive and verifies every member against the manifest. A member the
 // manifest does not list, a listed member that is missing, or a hash that does not match
 // is an error: a bundle is trusted entirely or not at all.
@@ -143,6 +153,8 @@ func Open(r io.Reader) (*Bundle, error) {
 	tr := tar.NewReader(gz)
 	b := &Bundle{files: map[string][]byte{}}
 	var haveManifest bool
+	var total int64
+	members := 0
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -155,12 +167,27 @@ func Open(r io.Reader) (*Bundle, error) {
 			continue
 		}
 		name := path.Clean(hdr.Name)
-		if strings.HasPrefix(name, "../") || strings.HasPrefix(name, "/") {
+		if name == ".." || strings.HasPrefix(name, "../") || strings.HasPrefix(name, "/") {
 			return nil, fmt.Errorf("checkpoint bundle: member %q escapes the bundle", hdr.Name)
 		}
-		data, err := io.ReadAll(tr)
+		if members++; members > MaxMembers {
+			return nil, fmt.Errorf("checkpoint bundle: more than %d members", MaxMembers)
+		}
+		if hdr.Size < 0 || hdr.Size > MaxMemberBytes {
+			return nil, fmt.Errorf("checkpoint bundle: member %s is %d bytes, over the %d-byte limit",
+				name, hdr.Size, MaxMemberBytes)
+		}
+		if total += hdr.Size; total > MaxBundleBytes {
+			return nil, fmt.Errorf("checkpoint bundle: members exceed the %d-byte limit", MaxBundleBytes)
+		}
+		// The header's size is what tar will deliver, but read through a limit anyway so
+		// the bound holds whatever the reader does.
+		data, err := io.ReadAll(io.LimitReader(tr, hdr.Size+1))
 		if err != nil {
 			return nil, fmt.Errorf("checkpoint bundle: reading %s: %w", name, err)
+		}
+		if int64(len(data)) > hdr.Size {
+			return nil, fmt.Errorf("checkpoint bundle: member %s is larger than its header says", name)
 		}
 		if name == ManifestPath {
 			if err := json.Unmarshal(data, &b.Manifest); err != nil {

@@ -41,9 +41,9 @@ type Options struct {
 	// PermissionMode is passed to harnesses that support one.
 	PermissionMode string
 	// MCPEndpoint is the control-plane URL injected into the agent's MCP config so it can
-	// coordinate from inside its own session.
+	// coordinate from inside its own session. The credential beside it is minted per attempt
+	// (Backend.MintAttemptToken); the runner's own token never reaches the agent.
 	MCPEndpoint string
-	MCPToken    string
 	MCPCommand  string
 	// HarnessMCPServers are extra MCP servers to expose to an attempt, keyed by the harness
 	// driving it. A cairn search worker is the motivating case: it needs the cairn node's
@@ -259,10 +259,11 @@ func (r *Runner) execute(ctx context.Context, snap coord.RunnerSnapshot, claim d
 	if err != nil {
 		return err
 	}
-	mcpConfig, err := r.writeMCPConfig(ws.Path, project, claim.Fence, decision.Harness)
+	mcpConfig, cleanupMCP, err := r.prepareMCP(ctx, project, claim, decision.Harness)
 	if err != nil {
 		return err
 	}
+	defer cleanupMCP()
 
 	// --- Launch -------------------------------------------------------------
 	if err := r.backend.SetAttemptState(ctx, claim.Attempt.ID,
@@ -641,12 +642,58 @@ func writeCard(worktreePath, taskRef, rendered string) (string, error) {
 	return path, nil
 }
 
-// writeMCPConfig drops an MCP server config into the worktree so the agent can call the
-// coordination tools from inside its own session.
+// prepareMCP gives the attempt's agent its coordination channel: a credential minted for this
+// attempt alone, and an MCP config that carries it, written outside the worktree.
 //
-// The token written here is the runner's, and the file lives in a worktree that is removed
-// on success — it is a short-lived, machine-local credential, not a shared secret.
-func (r *Runner) writeMCPConfig(dir string, project domain.Project, fence domain.Fence, harnessKind string) (string, error) {
+// Both choices are about what the agent can do with what it can read. The credential is
+// confined to this project and expires shortly after the attempt's own timeout; it is revoked
+// as soon as the attempt ends, so a copy that outlives the attempt is worthless. And the
+// config file lives in a private directory of the runner's, never in the worktree: the runner
+// commits the worktree with `git add -A`, so a file there is one deleted .gitignore away from
+// being pushed. The returned cleanup revokes the token and removes the directory.
+func (r *Runner) prepareMCP(ctx context.Context, project domain.Project, claim db.ClaimResult, harnessKind string) (string, func(), error) {
+	noop := func() {}
+	if r.opts.MCPEndpoint == "" {
+		return "", noop, nil
+	}
+	token, name, err := r.backend.MintAttemptToken(ctx, claim.Attempt.ID, r.opts.AttemptTimeout+15*time.Minute)
+	if err != nil {
+		// The attempt can still run and be supervised; only the agent's own coordination
+		// calls are lost. Handing it the runner's credential instead is not an option.
+		r.opts.Logger.Warn("could not mint an attempt credential; the agent runs without the conductor MCP server",
+			"task", claim.Task.Ref, "error", err)
+		token = ""
+	}
+	revoke := func() {
+		if name == "" || token == "" {
+			return
+		}
+		if err := r.backend.RevokeToken(context.WithoutCancel(ctx), name); err != nil {
+			r.opts.Logger.Warn("could not revoke the attempt credential; it expires on its own",
+				"task", claim.Task.Ref, "error", err)
+		}
+	}
+	dir, err := os.MkdirTemp("", "conductor-attempt-*")
+	if err != nil {
+		revoke()
+		return "", noop, err
+	}
+	cleanup := func() {
+		revoke()
+		_ = os.RemoveAll(dir)
+	}
+	path, err := r.writeMCPConfig(dir, project, claim.Fence, harnessKind, token)
+	if err != nil {
+		cleanup()
+		return "", noop, err
+	}
+	return path, cleanup, nil
+}
+
+// writeMCPConfig writes an MCP server config into dir (a private directory, see prepareMCP)
+// so the agent can call the coordination tools from inside its own session. With no token the
+// conductor server is left out, since it could not authenticate.
+func (r *Runner) writeMCPConfig(dir string, project domain.Project, fence domain.Fence, harnessKind, token string) (string, error) {
 	if r.opts.MCPEndpoint == "" {
 		return "", nil
 	}
@@ -667,28 +714,29 @@ func (r *Runner) writeMCPConfig(dir string, project domain.Project, fence domain
 		}
 		servers[name] = entry
 	}
-	servers["conductor"] = map[string]any{
-		"command": r.opts.MCPCommand,
-		"args":    []string{"--endpoint", r.opts.MCPEndpoint},
-		"env": map[string]string{
-			"CONDUCTOR_TOKEN":         r.opts.MCPToken,
-			"CONDUCTOR_PROJECT":       project.ID,
-			"CONDUCTOR_TASK_ID":       fence.TaskID,
-			"CONDUCTOR_ATTEMPT_ID":    fence.AttemptID,
-			"CONDUCTOR_LEASE_ID":      fence.LeaseID,
-			"CONDUCTOR_FENCING_EPOCH": fmt.Sprintf("%d", fence.FencingEpoch),
-		},
+	if token != "" {
+		servers["conductor"] = map[string]any{
+			"command": r.opts.MCPCommand,
+			"args":    []string{"--endpoint", r.opts.MCPEndpoint},
+			"env": map[string]string{
+				"CONDUCTOR_TOKEN":         token,
+				"CONDUCTOR_PROJECT":       project.ID,
+				"CONDUCTOR_TASK_ID":       fence.TaskID,
+				"CONDUCTOR_ATTEMPT_ID":    fence.AttemptID,
+				"CONDUCTOR_LEASE_ID":      fence.LeaseID,
+				"CONDUCTOR_FENCING_EPOCH": fmt.Sprintf("%d", fence.FencingEpoch),
+			},
+		}
 	}
 	cfg := map[string]any{"mcpServers": servers}
 	body, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return "", err
 	}
-	runtimeDir := filepath.Join(dir, ".conductor", "runtime")
-	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
-	path := filepath.Join(runtimeDir, "mcp.json")
+	path := filepath.Join(dir, "mcp.json")
 	// 0600: the file carries a bearer token.
 	if err := os.WriteFile(path, body, 0o600); err != nil {
 		return "", err
@@ -701,6 +749,10 @@ func (r *Runner) writeMCPConfig(dir string, project domain.Project, fence domain
 // The runner runs them, not the agent. That is the difference between evidence and a claim:
 // a model saying "tests pass" is not accepted without a runner-observed exit code
 // (DESIGN.md §25.5).
+//
+// A check runs code the agent may just have written — a check is `make test`, and the agent
+// can edit the Makefile — so it gets the strict environment (harness.CheckEnv): no tokens,
+// keys, passwords, cloud or model-provider settings, or SSH agent from the runner.
 func (r *Runner) runChecks(ctx context.Context, dir string, checks []string) []domain.ValidationResult {
 	var out []domain.ValidationResult
 	for i, check := range checks {
@@ -708,7 +760,7 @@ func (r *Runner) runChecks(ctx context.Context, dir string, checks []string) []d
 		runCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 		cmd := exec.CommandContext(runCtx, "sh", "-c", check)
 		cmd.Dir = dir
-		cmd.Env = os.Environ()
+		cmd.Env = harness.CheckEnv()
 		err := cmd.Run()
 		cancel()
 
