@@ -331,11 +331,26 @@ address bar. If the endpoint you are logged in against is loopback (`127.0.0.1`)
 that a teammate cannot reach it and shows how to expose the control plane and pass a public
 `--endpoint`.
 
+A token is minted only for a **new** account. If the handle already belongs to someone in your
+organization (they are in another project, say), `invite` and `member add` add them to this
+project and print no token or link: they keep signing in with their own credentials, which now
+reach this project (`conductor login --project myrepo` switches their default). Handing the
+inviter a fresh token for an existing account would let any project admin sign in as anyone.
+
+Inviting someone who is already a member is refused rather than quietly changing their role.
+Roles change with `conductor member role`, which never grants a role above your own, never
+touches someone who outranks you, and never demotes the project's last administrator:
+
+```bash
+conductor member role rachel maintainer
+```
+
 The longer form still works, and is what a script or CI wants:
 
 ```bash
-conductor member add rachel --role contributor   # prints a `conductor login …` line, once
+conductor member add rachel --role contributor   # a new account: prints a `conductor login …` line, once
 conductor member list
+conductor member role rachel reviewer            # change a member's role
 conductor member remove rachel                   # also revokes their tokens
 conductor token create --save                    # mint one more; the old ones stay valid
 conductor token reset --save                     # rotate: one replacement, everything else revoked

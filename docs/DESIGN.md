@@ -1828,7 +1828,15 @@ what an `observer` can):
   `done` — is a review decision for a `reviewer` or a maintainer, never the author or executor
   alone. Every other move belongs to the task's creator or the holder of its live lease, and
   needs a `contributor`. The state machine (§9) still decides what is legal; these rules decide
-  who may ask. Acting on someone else's task or lease is audited.
+  who may ask. The rule is one function, `coord.Service.AuthorizeTransition`, which every
+  handler that changes a status on a principal's behalf calls; the control plane acting on its
+  own (`coord.SystemCaller`: the scheduler, merge reconciliation) is not subject to it.
+- **Editing a task** (`PATCH /v1/tasks/{task}`): its content — title, objective, acceptance
+  criteria, priority, labels — belongs to its creator, the holder of its live lease, or a
+  maintainer; its visibility to its creator or a maintainer only, so a lease holder working
+  someone else's private task cannot publish it (`coord.Service.AuthorizeTaskEdit`).
+
+Acting on someone else's task or lease is audited.
 
 ### 24.3 Field-level authorization
 
@@ -1884,8 +1892,11 @@ Bearer tokens in this build:
   bootstrap token it printed before, so re-running bootstrap to recover a login retires the old one.
 - A token can be confined to one project (`POST /v1/tokens` with `project`). Every
   project-scoped authorization goes through `coord.Authorize`, which treats any other project as
-  nonexistent; a scoped token also cannot create, reset, or revoke tokens. The runner mints one
-  per attempt for the agent it launches (§25.3).
+  nonexistent; sessions and runners, authorized by owner, apply the scope themselves; listings
+  of projects are filtered to it. A scoped token reaches only routes that address a project or
+  a resource inside one, plus identity and read-only listings: never token administration, the
+  machine's security mode, or GitHub App setup. The runner mints one per attempt for the agent
+  it launches (§25.3).
 - Token creation, invite-minted tokens, bootstrap, runner registration, role changes, conflict
   resolutions, and actions on other people's tasks and leases are written to the audit log; a
   failed audit write is logged rather than dropped.
@@ -1986,7 +1997,8 @@ the narrower of the visibility they were written with and their task's current v
 territory only for another member's private task, summary fields from `team_summary`, commits,
 paths, and check results from `team_artifacts`, and an attempt's spend only to its sponsor; a
 handoff bundle, a task's validation results, and its policy-decision rationale follow the task's
-visibility; lease ids and fencing epochs appear on a task card only for the lease holder. Server
+visibility; an attempt's changed paths and worktree path are shown to others from
+`team_summary` up (`privacy.ProjectAttempt`; the same tier as in events); lease ids and fencing epochs appear on a task card only for the lease holder. Server
 faults return `internal error` with a request id, and the detail goes to the server log.
 
 ---
