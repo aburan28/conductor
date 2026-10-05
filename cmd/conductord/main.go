@@ -80,7 +80,7 @@ func serve(args []string) error {
 		"host:port of the DNS server used for --peer-discover-dns lookups (default: system DNS). For a laptop-local directory: 127.0.0.1:15353")
 	securityMode := fs.String("security-mode", envOr("CONDUCTOR_SECURITY_MODE", ""),
 		"local: this machine's owner can sign in without a token; enhanced: tokens only, everywhere. "+
-			"Unset: local when bound to loopback, enhanced otherwise, changeable with `conductor security`")
+			"Unset: local when bound to loopback, enhanced otherwise, changeable with 'conductor security'")
 	githubPoll := fs.Duration("github-poll", 2*time.Minute,
 		"how often the GitHub App re-checks open pull requests (negative disables polling)")
 	githubAPI := fs.String("github-api", envOr("CONDUCTOR_GITHUB_API", ""), "GitHub API base URL (GitHub Enterprise: https://HOST/api/v3)")
