@@ -979,6 +979,14 @@ that produced it.
 | `.conductor/models.yaml` | model aliases (roles), capability floors, concrete profiles |
 | `.conductor/WORKFLOW.md` | the prose contract every agent reads; required checks; protected scopes |
 
+**These files are code, not just settings, wherever a `conductor worker` runs.** The harness
+`command`, `arg_template`, and `mcp_servers` in `project.yaml` are executed by the worker, and
+the required checks run as `sh -c` inside the worktree the agent just edited — an edited
+`Makefile` included. The worker runs them as its own user with no sandbox; it strips credentials
+from their environment (and hands the agent a short-lived, project-scoped token instead of
+yours), but it cannot stop code from reading that user's files. Run a worker only for
+repositories and teammates you would let run code on that machine (DESIGN.md §25.3).
+
 ---
 
 ## License
