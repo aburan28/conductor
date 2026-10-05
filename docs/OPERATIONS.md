@@ -33,6 +33,7 @@ The metrics, all prefixed `conductor_`:
 | `retention_deleted_total{table}` | counter | |
 | `github_polls_total{outcome}` | counter | `ok`, `error`, `skipped` (another replica polled). |
 | `github_webhooks_deferred_total` | counter | Deliveries left to the poller because the check pool was full. |
+| `github_issue_writebacks_total{outcome}` | counter | Synced issues the write-back updated: `ok`, `error`, `forbidden` (the installation lacks `issues: write`), `rate_limited`. |
 | `event_streams_open`, `event_stream_feeds`, `event_streams_rejected_total` | gauges, counter | Open dashboards, projects being polled for them, connections refused by the caps. |
 | `db_pool_*` | gauges, counters | `acquired_conns`, `idle_conns`, `total_conns`, `max_conns`, `acquires_total`, `empty_acquires_total`, `acquire_wait_seconds_total`. |
 
@@ -190,6 +191,9 @@ agree on lives in Postgres:
 - the GitHub App's credentials, pending setup links, and the check run posted on each
   commit. Polling is gated by an advisory lock, so one replica polls at a time and another
   takes over when it dies. An app set up through one replica is served by all within 15s.
+- issue sync's settings, resume point, and what each synced issue has been told
+  (`tracker_configs`, `tracker_links`). The write-back runs under the poller's lock, so two
+  replicas never comment on the same claim.
 
 What stays per process:
 

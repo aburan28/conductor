@@ -283,16 +283,31 @@ func Sign(secret string, body []byte) string {
 // ---------------------------------------------------------------------------
 
 // Permissions Conductor asks for, and why. Nothing here can push code or change settings:
-// the app reads what a pull request changes and writes one check run about it.
+// the app reads what a pull request changes and writes one check run about it, and on
+// repositories whose issues are synced into tasks it comments on, labels, and closes those
+// issues.
 var Permissions = map[string]string{
 	"metadata":      "read",  // required by every app
 	"contents":      "read",  // the files a push or pull request changes
 	"pull_requests": "read",  // pull request events and their file lists
 	"checks":        "write", // the "Conductor" check run on each pull request
+	"issues":        "write", // issue sync: read issues; comment, label, and close them
 }
 
 // Events Conductor subscribes to. Installation events are always delivered.
-var Events = []string{"pull_request", "push"}
+var Events = []string{"pull_request", "push", "issues"}
+
+// Grants reports whether a permission set (an installation's or the app's) grants name at
+// level or above: write implies read.
+func Grants(perms map[string]string, name, level string) bool {
+	switch perms[name] {
+	case "write", "admin":
+		return true
+	case "read":
+		return level == "read"
+	}
+	return false
+}
 
 // ManifestOptions shapes the app GitHub creates.
 type ManifestOptions struct {
@@ -320,7 +335,8 @@ func Manifest(o ManifestOptions) ([]byte, error) {
 		"default_permissions": Permissions,
 		"default_events":      Events,
 		"description": "Conductor coordinates people and coding agents working the same repository. " +
-			"It reads which files a pull request changes and reports, as a check run, whether anyone else is already working on them.",
+			"It reads which files a pull request changes and reports, as a check run, whether anyone else is already working on them. " +
+			"On repositories that opt in, it turns issues into tasks and notes on each issue when its task is claimed and done.",
 	}
 	if o.WebhookURL != "" {
 		m["hook_attributes"] = map[string]any{"url": o.WebhookURL, "active": true}
@@ -361,6 +377,10 @@ type Client struct {
 
 	mu     sync.Mutex
 	tokens map[int64]installationToken
+	// backoffUntil is set when GitHub answers with a rate limit: until then every call fails
+	// at once instead of reaching GitHub, which is what GitHub asks of an integration that
+	// hit a secondary limit (retrying early extends it).
+	backoffUntil time.Time
 }
 
 type installationToken struct {
@@ -393,6 +413,9 @@ func (c *Client) Credentials() Credentials { return c.creds }
 type APIError struct {
 	Status  int
 	Message string
+	// RetryAfter is how long GitHub asked the caller to wait, for a rate-limited answer.
+	RetryAfter time.Duration
+	limited    bool
 }
 
 func (e *APIError) Error() string { return fmt.Sprintf("github: %d %s", e.Status, e.Message) }
@@ -400,36 +423,78 @@ func (e *APIError) Error() string { return fmt.Sprintf("github: %d %s", e.Status
 // NotFound reports a 404, which GitHub also returns for "not installed here".
 func (e *APIError) NotFound() bool { return e.Status == http.StatusNotFound }
 
+// RateLimited reports a primary or secondary rate limit (a 429, or a 403 that says so), as
+// opposed to a 403 for a missing permission.
+func (e *APIError) RateLimited() bool { return e.Status == http.StatusTooManyRequests || e.limited }
+
+// Forbidden reports a 403 that is not a rate limit: the token lacks a permission, as when an
+// installation has not accepted one the app asks for.
+func (e *APIError) Forbidden() bool { return e.Status == http.StatusForbidden && !e.limited }
+
+// Rate limits. A secondary limit says to wait at least a minute when GitHub names no time;
+// an hour bounds a reset time that is wrong or far off.
+const (
+	defaultBackoff = time.Minute
+	maxBackoff     = time.Hour
+)
+
+// call is one request to GitHub. header carries conditional-request headers (If-None-Match).
+type call struct {
+	method, path, bearer string
+	body, out            any
+	header               http.Header
+}
+
 func (c *Client) do(ctx context.Context, method, path, bearer string, body, out any) error {
+	_, _, err := c.send(ctx, call{method: method, path: path, bearer: bearer, body: body, out: out})
+	return err
+}
+
+// send performs a call and returns the response status and headers. A 304 Not Modified
+// answer to a conditional request is not an error, and leaves out untouched.
+func (c *Client) send(ctx context.Context, k call) (int, http.Header, error) {
+	c.mu.Lock()
+	until := c.backoffUntil
+	c.mu.Unlock()
+	if now := c.Now(); now.Before(until) {
+		return 0, nil, &APIError{Status: http.StatusTooManyRequests, limited: true, RetryAfter: until.Sub(now),
+			Message: "rate limited by GitHub; not calling it again until " + until.UTC().Format(time.RFC3339)}
+	}
 	var rd io.Reader
-	if body != nil {
-		b, err := json.Marshal(body)
+	if k.body != nil {
+		b, err := json.Marshal(k.body)
 		if err != nil {
-			return err
+			return 0, nil, err
 		}
 		rd = bytes.NewReader(b)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.API+path, rd)
+	req, err := http.NewRequestWithContext(ctx, k.method, c.API+k.path, rd)
 	if err != nil {
-		return err
+		return 0, nil, err
+	}
+	for name, v := range k.header {
+		req.Header[name] = v
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	req.Header.Set("User-Agent", "conductor")
-	if bearer != "" {
-		req.Header.Set("Authorization", "Bearer "+bearer)
+	if k.bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+k.bearer)
 	}
-	if body != nil {
+	if k.body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return err
+		return 0, nil, err
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {
-		return err
+		return 0, nil, err
+	}
+	if resp.StatusCode == http.StatusNotModified {
+		return resp.StatusCode, resp.Header, nil
 	}
 	if resp.StatusCode/100 != 2 {
 		var e struct {
@@ -439,12 +504,54 @@ func (c *Client) do(ctx context.Context, method, path, bearer string, body, out 
 		if e.Message == "" {
 			e.Message = http.StatusText(resp.StatusCode)
 		}
-		return &APIError{Status: resp.StatusCode, Message: e.Message}
+		apiErr := &APIError{Status: resp.StatusCode, Message: e.Message}
+		if wait, limited := c.rateLimit(resp, e.Message); limited {
+			apiErr.limited, apiErr.RetryAfter = true, wait
+			c.mu.Lock()
+			if t := c.Now().Add(wait); t.After(c.backoffUntil) {
+				c.backoffUntil = t
+			}
+			c.mu.Unlock()
+		}
+		return resp.StatusCode, resp.Header, apiErr
 	}
-	if out != nil && len(data) > 0 {
-		return json.Unmarshal(data, out)
+	if k.out != nil && len(data) > 0 {
+		return resp.StatusCode, resp.Header, json.Unmarshal(data, k.out)
 	}
-	return nil
+	return resp.StatusCode, resp.Header, nil
+}
+
+// rateLimit reads whether a failed response is a rate limit and how long to wait, the way
+// GitHub documents it: Retry-After when present, else the primary limit's reset time when
+// none remains, else at least a minute for a secondary limit (a 403 whose message says so).
+func (c *Client) rateLimit(resp *http.Response, message string) (time.Duration, bool) {
+	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests {
+		return 0, false
+	}
+	wait := time.Duration(0)
+	limited := resp.StatusCode == http.StatusTooManyRequests ||
+		strings.Contains(strings.ToLower(message), "rate limit")
+	if v := resp.Header.Get("Retry-After"); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil {
+			wait, limited = time.Duration(secs)*time.Second, true
+		}
+	}
+	if resp.Header.Get("X-RateLimit-Remaining") == "0" {
+		limited = true
+		if reset, err := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil && wait == 0 {
+			wait = time.Unix(reset, 0).Sub(c.Now())
+		}
+	}
+	if !limited {
+		return 0, false
+	}
+	if wait < defaultBackoff {
+		wait = defaultBackoff
+	}
+	if wait > maxBackoff {
+		wait = maxBackoff
+	}
+	return wait, true
 }
 
 // ConvertManifest exchanges the code GitHub redirected back with for the new app's
@@ -500,6 +607,9 @@ type Installation struct {
 	Account string `json:"account"`
 	Type    string `json:"target_type"`
 	HTMLURL string `json:"html_url,omitempty"`
+	// Permissions are what the installation has accepted, which lags what the app asks for
+	// until an owner accepts a new permission on the installation's settings page.
+	Permissions map[string]string `json:"permissions,omitempty"`
 }
 
 // Installations lists where the app is installed.
@@ -509,10 +619,11 @@ func (c *Client) Installations(ctx context.Context) ([]Installation, error) {
 		return nil, err
 	}
 	var raw []struct {
-		ID      int64  `json:"id"`
-		HTMLURL string `json:"html_url"`
-		Type    string `json:"target_type"`
-		Account struct {
+		ID          int64             `json:"id"`
+		HTMLURL     string            `json:"html_url"`
+		Type        string            `json:"target_type"`
+		Permissions map[string]string `json:"permissions"`
+		Account     struct {
 			Login string `json:"login"`
 		} `json:"account"`
 	}
@@ -521,7 +632,7 @@ func (c *Client) Installations(ctx context.Context) ([]Installation, error) {
 	}
 	out := make([]Installation, 0, len(raw))
 	for _, r := range raw {
-		out = append(out, Installation{ID: r.ID, Account: r.Account.Login, Type: r.Type, HTMLURL: r.HTMLURL})
+		out = append(out, Installation{ID: r.ID, Account: r.Account.Login, Type: r.Type, HTMLURL: r.HTMLURL, Permissions: r.Permissions})
 	}
 	return out, nil
 }

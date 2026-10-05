@@ -473,6 +473,7 @@ conductor checkpoint capture --note "tests pass"         # snapshot a session: t
 conductor checkpoint resume 9a474a --account work        # continue it under another login, or --harness codex
 conductor security [local|enhanced]                       # sign in without a token on this machine, or tokens only
 conductor github setup | link | status                    # a "Conductor" check on every pull request
+conductor github issues enable --label conductor          # labelled GitHub issues become tasks
 conductor integrate cursor                                # wire a coding tool to this project (MCP + hooks)
 conductor route T-42                                      # what would this route to, and why — before spending a token
 conductor dispatch T-42                                   # send work to a model by policy, through the queue
@@ -551,8 +552,8 @@ projects in their organization can be linked, so another tenant on a shared cont
 neither take the app over nor read a repository through it. In a check run, a private task
 appears as "a private task", and a public repository gets no task references or owners at
 all. A pull request's own task is excluded only for a branch in the repository itself, never
-a fork's. The app asks for read access to contents and pull requests and write access to checks only. It
-cannot push, merge, or change settings. Its credentials are kept in Conductor's database, so
+a fork's. The app asks for read access to contents and pull requests, and write access to
+checks and issues (issues only for issue sync, below). It cannot push, merge, or change settings. Its credentials are kept in Conductor's database, so
 every `conductord` sharing it serves the same app, with the private key and secrets sealed
 under a key that is not in the database (`~/.conductor/secret.key`, `--secret-key-file`, or
 `CONDUCTOR_SECRET_KEY`; replicas must share it — see docs/OPERATIONS.md). An app saved by an
@@ -575,6 +576,62 @@ task still being worked is left alone. Without webhooks, the poller does the sam
 pull requests closed since its last pass (and looks up any linked pull request that left the
 open list), so a pull request opened and merged between two polls still completes its task.
 Seeing the same merge twice changes nothing and announces nothing.
+
+#### GitHub Issues as tasks
+
+A team's backlog already lives in its issue tracker. Issue sync keeps it there: opt a linked
+project in, and its repository's issues become Conductor tasks without anyone filing them twice.
+
+```bash
+conductor github issues enable                 # open issues labelled `conductor` become tasks
+conductor github issues enable --all           # ...or every open issue
+conductor github issues enable --no-progress-label --public-visibility team_summary
+conductor github issues status                 # settings, how many imported, the last problem
+conductor github issues sync                   # import now instead of at the next poll
+conductor github issues disable
+```
+
+- **Import.** Each qualifying open issue becomes a `ready` task with external_ref
+  `github:owner/repo#N`: the issue's title, its body as the objective (comments stripped,
+  bounded like any objective, the full text a click away), and the list under a `## Acceptance`
+  (or `## Acceptance criteria`) heading as acceptance criteria. Importing is idempotent: the
+  webhook, the poller, `sync`, and a second replica all find the same task. An open task that
+  already names the issue in its external_ref is linked rather than duplicated. Removing the
+  label later does not drop the task.
+- **Edits, last writer wins.** An edit to the issue's title, or to its body, reaches the task
+  unless the task's copy was also edited in Conductor since the last sync; then whichever edit
+  is later wins (the issue's `updated_at` against when the task's text was edited). A Conductor
+  edit that wins stays until the issue's text changes again. Content only ever flows from
+  GitHub to Conductor.
+- **Close and reopen.** Closing an issue cancels its task, unless the task is done or its work
+  is landing (verifying, in review, or an open pull request): a pull request's `Closes #N`
+  closes the issue moments before the merge completes the task, and the merge decides.
+  Reopening an issue brings back a task the sync cancelled; one a person cancelled stays.
+- **Write-back.** A claim adds one comment, "Claimed by `<handle>` via Conductor", and the
+  `in-progress` label (configurable, or off); a release removes the label. When the task is done
+  (by `conductor task done` or by its pull request merging) the issue gets one comment linking
+  the pull request and is closed, unless it is closed already. Comments are written once per
+  claimant and once per completion, in fixed words.
+- **Privacy.** Nothing written in Conductor reaches GitHub: no title, objective, criteria, or
+  progress. A task imported from a public repository is `team_artifacts` (configurable), since
+  every word of it is public already; one from a private repository gets the project's default
+  visibility. A private task is never written back to a public repository's issue, and its
+  claimant is never named; on a public repository only `team_artifacts` and `shared_debug`
+  tasks name their claimant. A pull request is linked only when it is in the issue's own
+  repository.
+- **Delivery and rate limits.** `issues` webhooks when GitHub can reach Conductor; otherwise the
+  poller lists only issues changed since its last pass, as a conditional request, so an idle
+  repository costs a 304 that GitHub does not count. The write-back runs every 15 seconds on the
+  poller's lock, bounded per pass, and stops for as long as GitHub asks when it hits a rate
+  limit.
+- **Permissions.** Issue sync needs the app's `issues: write` permission, which apps created
+  before it existed lack: GitHub applies a manifest's permissions only when it creates the app.
+  `conductor github status` says so, with the app-settings page to grant it and each
+  installation's page where GitHub asks its owner to accept the new permission.
+
+Task lists, `conductor task show`, and the dashboard's task detail link to the issue. GitHub
+is the only tracker for now; the sync's rules live in `internal/tracker`, behind a small
+adapter interface, and Linear is the next adapter planned.
 
 ### Connecting your coding tool
 
@@ -1018,7 +1075,8 @@ Implemented and exercised by tests:
 - A GitHub App created in one click through GitHub's manifest flow. It posts a "Conductor"
   check run on each pull request that overlaps reserved or in-flight work, links the pull
   request to its task, and completes the task when it merges — by webhook, or by polling when
-  GitHub cannot reach the daemon.
+  GitHub cannot reach the daemon. Opt-in issue sync turns a repository's labelled issues into
+  tasks and writes each task's claim and completion back to its issue.
 - Session portability: `conductor checkpoint` bundles a session's native transcript, working
   tree, and a harness-neutral continuation into one file — taken periodically by `conductor
   wrap`, by Claude Code and OpenCode hooks, at shutdown, and on an agent's own `coord_checkpoint`
@@ -1069,9 +1127,11 @@ Not built, and where the design says it goes:
   rather than binding the bidirectional JSON-RPC App Server.
 - **OIDC** (§25.1). Authentication is bearer tokens hashed at rest; there is no identity
   provider integration.
-- **Merge queue, tracker sync, symbol/tree-sitter indexing** (§29, §30 phase 5). Pull requests
-  are integrated as far as the check run and merge-to-done above; nothing queues or performs
+- **Merge queue, symbol/tree-sitter indexing** (§29, §30 phase 5). Pull requests are
+  integrated as far as the check run and merge-to-done above; nothing queues or performs
   merges.
+- **Tracker sync beyond GitHub Issues** (§17.5). GitHub Issues sync is built; Linear is the
+  next adapter, then Jira.
 - **Codex** is profiled as `gpt-5.3-codex` in `.conductor/models.yaml` but left disabled until
   someone verifies it against their account; its `exec --json` stream adapter is tested against
   fixture transcripts built from Codex's documented event schema, not a live run. **OpenCode**

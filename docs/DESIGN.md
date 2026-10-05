@@ -1323,6 +1323,87 @@ Where the harness supports pre-tool interception:
 
 Where it does not, the Git watcher detects drift after the tool batch and pauses before publication or the next turn.
 
+### 17.5 Issue tracker sync
+
+Conductor does not replace the team's tracker (§3.2); it reads from it. A separate task
+backlog is an adoption tax, so a project can opt in to having its tracker's issues become
+tasks, and to having each task's claim and completion written back to its issue.
+
+**Shape.** `internal/tracker` is tracker-neutral: the field mapping (title; body as objective;
+a `## Acceptance` section's list as acceptance criteria; both bounded as an API-filed task's
+are), the edit and state rules, the write-back plan, and their application. An adapter supplies
+`tracker.Item`s it read, by webhook or polling, and a `tracker.Remote` that comments, labels,
+and closes. GitHub Issues is the only adapter (`internal/api/github_issues.go`, through the
+GitHub App); Linear is the next one planned, then Jira. A new adapter needs a reader that
+produces Items and a Remote; the rules, storage, and idempotency come with the package.
+
+**Storage (migration 0011).** `tracker_configs` is the per-project opt-in: which label
+qualifies (or all issues), the in-progress label, the visibility of tasks from public
+repositories, who enabled it (imported tasks are created by them), and the import's resume
+point (the newest `updated_at` read, and the ETag of the last listing from it).
+`tracker_links` maps `(project, external_ref)` to its task — the key that makes an import
+idempotent whatever the task's status — and remembers what the issue last said (hashes, not
+text), whether it is open or public, and what the write-back has told it. Every decision is made
+and applied in one transaction that holds the link row, or, for a first import, a
+transaction-scoped advisory lock on the issue, so a webhook, a poll, a manual sync, and a second
+replica racing on one new issue create one task.
+
+**Rules.**
+
+- An open issue that qualifies and is not linked becomes a `ready` task (`external_ref
+  github:owner/repo#N`). An open task already naming the issue is linked instead. Closed
+  issues are never imported; removing the label does not drop a task.
+- Edits are last-writer-wins per field group (the title; the objective with its criteria). An
+  issue edit applies unless the task's copy was edited in Conductor since the last sync; then
+  the later of the two wins: the issue's `updated_at` against `tracker_links.task_edited_at`,
+  which a trigger on `tasks` stamps whenever the title, objective, or criteria change by any
+  path. (`tasks.updated_at` cannot serve: it moves on every claim and status change.) A
+  Conductor edit that wins stays until the issue's text changes again. A reading older than one
+  already applied is ignored, so deliveries may arrive in any order.
+- A closed issue cancels its task unless the task is finished or its work is landing
+  (verifying, review, merging, or an open pull request) — a pull request's `Closes #N` closes
+  the issue just before the merge completes the task, and the merge decides. If such a pull
+  request closes unmerged and the task returns to ready, the write-back pass cancels it then.
+- A reopened issue revives a task the sync cancelled (`cancelled_by_sync`) to `ready`. This is
+  the one edge out of `cancelled`, deliberately outside the state machine of §9: the sync's
+  cancellation mirrored the issue and ended the lease, bumped the fence, and released the
+  territory, so `ready` is exactly what a fresh import would produce, with the task's history
+  kept. A task a person cancelled stays cancelled.
+
+**Write-back.** Reconciled from state, not from events: a pass lists synced tasks whose
+`updated_at` moved past what the link last reconciled, and for each compares what the issue has
+been told with what it should be told. A claim posts one comment per claimant ("Claimed by
+`<handle>` via Conductor") and adds the in-progress label; a release (or any state without a
+live lease or landing work) removes it; done posts one comment linking the pull request and
+closes the issue, unless it is already closed. Each step is recorded as soon as GitHub accepts
+it, so delivery is at least once and a crash repeats at most the step in flight. Passes run on
+the poller's goroutine every 15 seconds and at the end of each poll, under the poller's advisory
+lock, so two replicas never post the same comment; each pass is bounded, and a rate limit
+(a 429, or a 403 that says so) makes the client refuse every call until GitHub's
+`Retry-After` (at least a minute) has passed.
+
+**Privacy.** Content flows one way: nothing written in Conductor — title, objective, criteria,
+progress, anything private — is sent to the tracker, whose readers may not be the team's.
+Comments are fixed words plus, at most, the claimant's handle and a pull request in the issue's
+own repository. A task imported from a public repository is `team_artifacts` by default, since
+its content is public already and hiding it would only suppress the write-back; one from a
+private repository gets the project's default visibility. A private task is never written back
+to a public issue (its label is still removed), and the claimant's handle appears only when the
+task is not private and either the repository is private or the task is shared at
+`team_artifacts` or above.
+
+**Delivery.** `issues` webhooks (opened, edited, closed, reopened, labeled, unlabeled) when
+webhooks are configured, applied before answering. The poller covers everything else, under its
+existing lock and lifecycle: per repository, one listing of issues updated since the resume
+point, oldest first, bounded to three pages, as a conditional request — an idle repository costs
+one 304, which does not count against GitHub's rate limit.
+
+**Permissions.** Issue sync needs `issues: write`. GitHub applies a manifest's permissions only
+when it creates an app, so an app created before issue sync lacks it, and every installation
+must accept a raised permission before it applies. `conductor github status` reports both gaps
+with the page to click; a project whose installation lacks the permission says so in its sync
+status instead of failing silently.
+
 ---
 
 ## 18. MCP contract
@@ -2069,7 +2150,7 @@ faults return `internal error` with a request id, and the detail goes to the ser
 Implemented so far: conductord serves operational metrics in the Prometheus text format at
 `/metrics` (loopback only, or behind a bearer token) — HTTP requests and latency by route
 pattern, scheduler pass duration and errors, active, reclaimed and outage-extended leases,
-events written by type, retention deletions, GitHub polls, event streams, and database pool
+events written by type, retention deletions, GitHub polls and issue write-backs, event streams, and database pool
 statistics — from a small standard-library registry (`internal/metrics`) rather than the
 Prometheus client, per §4's dependency posture. `/v1/ready` reports database, schema
 version, scheduler and poller health. The product metrics above are still served by the API

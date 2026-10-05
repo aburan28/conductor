@@ -120,11 +120,19 @@ func TestManifest(t *testing.T) {
 	if hook["active"] != false {
 		t.Error("a manifest without a public webhook URL must leave the hook inactive")
 	}
+	// Conductor writes check runs and, for issue sync, issue comments, labels, and state.
+	// Nothing that can change code or settings: contents and pull requests stay read-only.
 	perms := m["default_permissions"].(map[string]any)
 	for p, level := range perms {
-		if level == "write" && p != "checks" {
-			t.Errorf("permission %s is %v; Conductor writes nothing but check runs", p, level)
+		if level == "write" && p != "checks" && p != "issues" {
+			t.Errorf("permission %s is %v; Conductor writes nothing but check runs and issue notes", p, level)
 		}
+	}
+	if perms["issues"] != "write" || perms["contents"] != "read" {
+		t.Errorf("permissions = %v; issue sync needs issues: write, and contents must stay read-only", perms)
+	}
+	if events := toStrings(m["default_events"]); !contains(events, "issues") {
+		t.Errorf("default_events = %v; issue sync needs the issues event", events)
 	}
 	raw, _ = Manifest(ManifestOptions{Name: "c", BaseURL: "https://c.example", WebhookURL: "https://c.example/github/webhook"})
 	_ = json.Unmarshal(raw, &m)
@@ -348,4 +356,21 @@ func TestParseRemote(t *testing.T) {
 			t.Errorf("ParseRemote(%q) succeeded", bad)
 		}
 	}
+}
+
+func toStrings(v any) []string {
+	var out []string
+	for _, x := range v.([]any) {
+		out = append(out, x.(string))
+	}
+	return out
+}
+
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }

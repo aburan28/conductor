@@ -82,6 +82,18 @@ type CreateTaskParams struct {
 // The human-facing ref (T-42) comes from a per-project counter bumped inside the same
 // transaction, so refs are dense and monotonic even under concurrent creation.
 func (s *Store) CreateTask(ctx context.Context, p CreateTaskParams) (domain.Task, error) {
+	var out domain.Task
+	err := s.Tx(ctx, func(tx pgx.Tx) error {
+		var err error
+		out, err = createTaskTx(ctx, tx, p)
+		return err
+	})
+	return out, err
+}
+
+// createTaskTx is CreateTask inside the caller's transaction, for a task created together
+// with something that must not exist without it (an imported issue's link, tracker.go).
+func createTaskTx(ctx context.Context, tx pgx.Tx, p CreateTaskParams) (domain.Task, error) {
 	if p.Status == "" {
 		p.Status = domain.TaskProposed
 	}
@@ -114,52 +126,48 @@ func (s *Store) CreateTask(ctx context.Context, p CreateTaskParams) (domain.Task
 		return domain.Task{}, err
 	}
 
-	var out domain.Task
-	err = s.Tx(ctx, func(tx pgx.Tx) error {
-		var seq int64
-		var orgID domain.ID
-		if err := tx.QueryRow(ctx, `
-			UPDATE projects SET task_seq = task_seq + 1
-			 WHERE id = $1::uuid
-			RETURNING task_seq, organization_id::text`, p.ProjectID).Scan(&seq, &orgID); err != nil {
-			return noRows(err)
-		}
-		ref := "T-" + strconv.FormatInt(seq, 10)
+	var seq int64
+	var orgID domain.ID
+	if err := tx.QueryRow(ctx, `
+		UPDATE projects SET task_seq = task_seq + 1
+		 WHERE id = $1::uuid
+		RETURNING task_seq, organization_id::text`, p.ProjectID).Scan(&seq, &orgID); err != nil {
+		return domain.Task{}, noRows(err)
+	}
+	ref := "T-" + strconv.FormatInt(seq, 10)
 
-		out, err = scanTask(tx.QueryRow(ctx, `
-			INSERT INTO tasks (organization_id, project_id, ref, parent_id, external_ref,
-			        title, objective, acceptance_criteria, status, visibility, priority,
-			        risk_level, base_sha, workflow_sha, intent_fingerprint, intent_minhash,
-			        model_alias, harness_pref, budget, features, max_attempts, created_by, labels)
-			VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5, $6, $7, $8, $9, $10, $11,
-			        $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22::uuid, $23)
-			RETURNING `+strings.ReplaceAll(taskColumns, "t.", "tasks."),
-			orgID, p.ProjectID, ref, nullable(p.ParentID), nullableText(p.ExternalRef),
-			p.Title, p.Objective, criteria, p.Status, p.Visibility, p.Priority,
-			p.RiskLevel, p.BaseSHA, p.WorkflowSHA, nullableText(p.Fingerprint), p.MinHash,
-			p.ModelAlias, p.HarnessPref, budget, features, p.MaxAttempts, p.CreatedBy,
-			normalizeLabels(p.Labels),
-		).Scan)
-		if err != nil {
-			return err
-		}
+	out, err := scanTask(tx.QueryRow(ctx, `
+		INSERT INTO tasks (organization_id, project_id, ref, parent_id, external_ref,
+		        title, objective, acceptance_criteria, status, visibility, priority,
+		        risk_level, base_sha, workflow_sha, intent_fingerprint, intent_minhash,
+		        model_alias, harness_pref, budget, features, max_attempts, created_by, labels)
+		VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5, $6, $7, $8, $9, $10, $11,
+		        $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22::uuid, $23)
+		RETURNING `+strings.ReplaceAll(taskColumns, "t.", "tasks."),
+		orgID, p.ProjectID, ref, nullable(p.ParentID), nullableText(p.ExternalRef),
+		p.Title, p.Objective, criteria, p.Status, p.Visibility, p.Priority,
+		p.RiskLevel, p.BaseSHA, p.WorkflowSHA, nullableText(p.Fingerprint), p.MinHash,
+		p.ModelAlias, p.HarnessPref, budget, features, p.MaxAttempts, p.CreatedBy,
+		normalizeLabels(p.Labels),
+	).Scan)
+	if err != nil {
+		return domain.Task{}, err
+	}
 
-		for _, dep := range p.DependsOn {
-			if _, err := tx.Exec(ctx, `
-				INSERT INTO task_dependencies (task_id, depends_on_id)
-				VALUES ($1::uuid, $2::uuid) ON CONFLICT DO NOTHING`, out.ID, dep); err != nil {
-				return err
-			}
+	for _, dep := range p.DependsOn {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO task_dependencies (task_id, depends_on_id)
+			VALUES ($1::uuid, $2::uuid) ON CONFLICT DO NOTHING`, out.ID, dep); err != nil {
+			return domain.Task{}, err
 		}
-		if len(p.DependsOn) > 0 {
-			if err := assertNoCycle(ctx, tx, out.ID); err != nil {
-				return err
-			}
-			out.DependsOn = p.DependsOn
+	}
+	if len(p.DependsOn) > 0 {
+		if err := assertNoCycle(ctx, tx, out.ID); err != nil {
+			return domain.Task{}, err
 		}
-		return nil
-	})
-	return out, err
+		out.DependsOn = p.DependsOn
+	}
+	return out, nil
 }
 
 // assertNoCycle walks the dependency graph from taskID and fails if it reaches itself.
