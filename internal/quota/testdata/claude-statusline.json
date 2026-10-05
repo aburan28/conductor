@@ -1,0 +1,15 @@
+{
+  "cwd": "/work/repo",
+  "session_id": "abc123",
+  "session_name": "my-session",
+  "transcript_path": "/home/someone/.claude/projects/-work-repo/abc123.jsonl",
+  "model": {"id": "claude-opus", "display_name": "Opus"},
+  "workspace": {"current_dir": "/work/repo", "project_dir": "/work/repo", "added_dirs": []},
+  "version": "2.1.290",
+  "cost": {"total_cost_usd": 0.01234, "total_duration_ms": 45000},
+  "context_window": {"total_input_tokens": 15500, "used_percentage": 8},
+  "rate_limits": {
+    "five_hour": {"used_percentage": 23.5, "resets_at": 1738425600},
+    "seven_day": {"used_percentage": 41.2, "resets_at": 1738857600}
+  }
+}

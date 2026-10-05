@@ -92,6 +92,7 @@ func cmdDoctor(ctx context.Context, args []string) error {
 		return emit(out)
 	}
 	printDoctor(os.Stdout, out)
+	printQuotaDoctor(ctx)
 	return nil
 }
 

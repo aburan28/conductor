@@ -15,7 +15,7 @@ import (
 	"github.com/adamburan/conductor/internal/domain"
 )
 
-// The tool set is intentionally short (DESIGN.md §18). Twelve tools, each mapping to one API
+// The tool set is intentionally short (DESIGN.md §18). Thirteen tools, each mapping to one API
 // call — except coord_checkpoint, which is local to the machine the agent runs on. `conductor_check_conflicts` is separated out from `coord_start_work` because it is
 // the one an agent should reach for reflexively before editing — the cheapest possible call
 // that prevents the most expensive possible mistake.
@@ -222,6 +222,7 @@ func toolDefinitions() []map[string]any {
 				},
 			},
 		},
+		quotaToolDefinition(),
 		{
 			"name": "coord_project_status",
 			"description": "Who is working on what right now, plus open conflicts. Shows tasks, owners, scopes, and " +
@@ -262,6 +263,8 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		return s.delegate(ctx, raw)
 	case "coord_checkpoint":
 		return s.checkpointTool(ctx, raw)
+	case "coord_quota":
+		return s.quotaTool(ctx, raw)
 	case "coord_project_status":
 		return s.projectStatus(ctx)
 	default:

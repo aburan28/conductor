@@ -213,6 +213,22 @@ Run ` + "`conductor budget <subcommand> -h`" + ` for its flags.
 `},
 	{name: "usage", group: "Coordinate", subs: []string{"sync"},
 		summary: "tokens and cost over time, by day, harness, model, or person"},
+	{name: "quota", group: "Coordinate",
+		subs:    []string{"statusline", "report", "suggest"},
+		summary: "how close each subscription login is to its usage limit",
+		topic: `conductor quota — how close each Claude, Codex, or Cursor login is to its limit
+
+Usage:
+  conductor quota [--json] [--local] [--watch]   used %, window, reset time, source, freshness
+  conductor quota statusline install|uninstall    feed Claude Code's limits in via its status line
+  conductor quota report                          record a reading from your own script
+  conductor quota suggest                         the login or tool with the most room left
+
+Example:
+  conductor quota --watch
+
+Sources, and which are documented or not: docs/USAGE_LIMITS.md.
+`},
 
 	// Work
 	{name: "task", group: "Work", short: true,

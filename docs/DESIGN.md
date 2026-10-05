@@ -2250,6 +2250,13 @@ through `os.Root` with no symbolic link followed and nothing written under `.git
 tracked patch is applied first and can itself create the link a later file would be written
 through.
 
+Usage limits are what most often strand a session, so the sidecar also watches them
+(`docs/USAGE_LIMITS.md`): it reads each subscription login's rolling-window state from what
+the tool exposes locally, reports it under the principal's own name (`quota_snapshots`, read
+back only by that principal; project members see counts), raises `quota.warning` /
+`quota.exhausted` once per window per level, and at the critical threshold takes a checkpoint
+at once and prints the resume command for the login or harness with the most headroom.
+
 ---
 
 ## 28. Deployment design

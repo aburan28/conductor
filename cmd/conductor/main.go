@@ -121,6 +121,8 @@ func runCommand(ctx context.Context, name string, args []string) error {
 		return cmdToken(ctx, args)
 	case "doctor":
 		return cmdDoctor(ctx, args)
+	case "quota":
+		return cmdQuota(ctx, args)
 	case "dashboard":
 		return cmdDashboard(args)
 	case "status":

@@ -99,6 +99,7 @@ func (s *Server) routes() {
 	s.queueRoutes(m)
 	s.localRoutes(m)
 	s.githubRoutes(m)
+	s.quotaRoutes(m)
 	s.lifecycleRoutes(m)
 
 	// The mesh surface. /v1/peer/* is authenticated by the peer's mesh certificate (not a

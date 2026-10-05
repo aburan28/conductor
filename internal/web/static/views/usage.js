@@ -5,6 +5,7 @@ import { table } from '../components/table.js';
 import { stackedBars, hbars } from '../components/chart.js';
 import { fmtTokens, fmtUSD, fmtDay, shortID } from '../lib/format.js';
 import { prefs } from '../lib/store.js';
+import { loadQuota, quotaCard } from './quota-card.js';
 
 const DIMS = [['day', 'Day'], ['hour', 'Hour'], ['harness', 'Harness'], ['model', 'Model'], ['effort', 'Effort'], ['principal', 'Person'], ['source', 'Source'], ['session', 'Session']];
 const WINDOWS = [['24h', '24h'], ['7d', '7 days'], ['30d', '30 days'], ['custom', 'Custom']];
@@ -31,9 +32,10 @@ export default defineView({
       const cq = ctx.api.query({ since, until: state.window === 'custom' ? state.until : '', by: `${chartTime},${chartSeries}`, harness: state.harness, model: state.model });
       try { chartRows = (await ctx.api.get(ctx.api.project(ctx.project, '/usage' + cq))).rows || []; } catch (_) { chartRows = []; }
     }
-    return { report, chartRows, chartSeries: chartSeries || 'harness', chartTime };
+    const quota = await loadQuota(ctx);
+    return { report, chartRows, chartSeries: chartSeries || 'harness', chartTime, quota };
   },
-  draw({ report, chartRows, chartSeries, chartTime }, ctx, { refresh, state }) {
+  draw({ report, chartRows, chartSeries, chartTime, quota }, ctx, { refresh, state }) {
     const rows = report.rows || [];
     const total = report.total || {};
     const dimKey = { day: 'period', hour: 'period', harness: 'harness', model: 'model', effort: 'reasoning_effort', principal: 'principal', source: 'source', session: 'external_session_id' };
@@ -86,7 +88,7 @@ export default defineView({
     const seriesDim = state.dims.find(d => d !== 'day' && d !== 'hour');
     const share = seriesDim && rows.length ? card({ title: `Share by ${seriesDim}`, body: hbars({ rows: aggregate(rows, dimKey[seriesDim], modelText), label: r => r.key, value: r => r.total }) }) : null;
 
-    return h('div', { class: 'stack', style: { gap: '20px' } }, toolbar, kpis, chartCard, share ? h('div', { class: 'grid-2' }, tableCard, share) : tableCard);
+    return h('div', { class: 'stack', style: { gap: '20px' } }, toolbar, kpis, quotaCard(quota), chartCard, share ? h('div', { class: 'grid-2' }, tableCard, share) : tableCard);
   },
 });
 
