@@ -41,12 +41,15 @@
                 <a class="btn" href="./docs/">Read the docs</a>
               </div>
               <div class="cmdline" id="quickstart">
-                <code>make up</code>
+                <code>git clone https://github.com/aburan28/conductor &amp;&amp; cd conductor &amp;&amp; make install-local up</code>
                 <button class="copy-btn" type="button" data-copy>Copy</button>
               </div>
               <p class="lede" style="font-size: 14px; margin-top: 10px;">
-                Postgres on <code>:55432</code>, the control plane on
+                Installs <code>conductor</code> into <code>~/.local/bin</code>, then runs
+                <code>conductor up</code>: your Postgres if one is running (Docker otherwise), the control plane on
                 <code>127.0.0.1:8080</code>, your CLI login saved — no token to copy, no second terminal.
+                Needs git and Go 1.25+; release binaries and other options are in the
+                <a href="./docs/quickstart.html">quickstart</a>.
               </p>
             </div>
             <div>
