@@ -58,6 +58,9 @@ func main() {
 		fmt.Println("conductord", version.Get())
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "config" {
+		os.Exit(configCommand(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "bootstrap" {
 		if err := bootstrap(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "bootstrap:", err)
@@ -102,6 +105,11 @@ type serveConfig struct {
 	verbose           bool
 	// sso is single sign-on, with its providers built from --sso-provider.
 	sso api.SSOOptions
+	// admin is what the config file locks for every organization, and the effective
+	// configuration the admin area shows (config.go).
+	admin api.AdminOptions
+	// warnings are problems config check reports without failing.
+	warnings []string
 }
 
 // usageError is a command line flag could not parse. flag has already reported it, with
@@ -130,9 +138,19 @@ func exitCode(err error, stderr io.Writer) int {
 // Everything that can be checked without touching the network or the filesystem is checked
 // here, so a bad invocation fails before anything starts.
 func parseServeConfig(args []string, output io.Writer) (*serveConfig, error) {
+	return parseServeConfigMode(args, output, false)
+}
+
+// parseServeConfigMode is parseServeConfig; checkOnly (conductord config check) reports a
+// missing database as a warning rather than an error, since checking a file does not need
+// one.
+func parseServeConfigMode(args []string, output io.Writer, checkOnly bool) (*serveConfig, error) {
 	c := &serveConfig{}
 	fs := flag.NewFlagSet("conductord", flag.ContinueOnError)
 	fs.SetOutput(output)
+	configPath := fs.String("config", envOr("CONDUCTOR_CONFIG", ""),
+		"server config file (YAML; see README \"For enterprises\"). Flags and environment variables override it; "+
+			"its features, branding and policy sections lock those settings for every organization")
 	fs.StringVar(&c.addr, "addr", envOr("CONDUCTOR_ADDR", "127.0.0.1:8080"), "listen address")
 	fs.StringVar(&c.dsn, "dsn", envOr("DATABASE_URL", ""), "PostgreSQL connection string")
 	fs.DurationVar(&c.tick, "tick", 2*time.Second, "scheduler tick interval")
@@ -228,6 +246,7 @@ func parseServeConfig(args []string, output io.Writer) (*serveConfig, error) {
 Usage:
   conductord [flags]
   conductord bootstrap [flags]     create an organization, project, principal, and token
+  conductord config check [flags]  validate the config file and flags, and print the effective configuration
   conductord --version             print the version and exit
 
 Flags:
@@ -238,8 +257,15 @@ Flags:
 		// flag has already printed the error and the usage text.
 		return nil, usageError{err}
 	}
+	file, fromFile, err := applyConfigFile(fs, *configPath)
+	if err != nil {
+		return nil, err
+	}
 	if c.dsn == "" {
-		return nil, errors.New("no database configured: pass --dsn or set DATABASE_URL")
+		if !checkOnly {
+			return nil, errors.New("no database configured: pass --dsn, set DATABASE_URL, or set database.url_env in the config file")
+		}
+		c.warnings = append(c.warnings, "no database is configured (--dsn, DATABASE_URL, or database.url_env); the server would refuse to start")
 	}
 	c.secretKeyEnv = os.Getenv(secretbox.EnvKey)
 	if c.secretKeyFile == "" {
@@ -272,7 +298,6 @@ Flags:
 	if (c.tlsCert == "") != (c.tlsKey == "") {
 		return nil, errors.New("--tls-cert and --tls-key must be given together")
 	}
-	var err error
 	c.meshPeers, err = peers.mergeEnv(os.Getenv("CONDUCTOR_PEERS"))
 	if err != nil {
 		return nil, err
@@ -320,7 +345,14 @@ Binding 127.0.0.1 needs none of these.`, c.addr)
 	if c.shutdownTimeout <= 0 {
 		return nil, errors.New("--shutdown-timeout must be positive")
 	}
-	if err := c.parseSSO(*ssoSpecs, os.Getenv("CONDUCTOR_SSO_PROVIDERS"), *ssoAutoProvision); err != nil {
+	var fileProviders []sso.Config
+	if file != nil {
+		fileProviders = file.Providers()
+		c.admin.Locks = file.Locks()
+		c.admin.ConfigFile = file.Path
+	}
+	ssoSource, err := c.parseSSO(*ssoSpecs, os.Getenv("CONDUCTOR_SSO_PROVIDERS"), fileProviders, *ssoAutoProvision)
+	if err != nil {
 		return nil, err
 	}
 	if *notifyProxy != "" {
@@ -330,24 +362,30 @@ Binding 127.0.0.1 needs none of these.`, c.addr)
 		}
 		c.notifyNetwork.Proxy = proxy
 	}
+	c.admin.Config = effectiveConfig(fs, fromFile, c.sso.Providers, ssoSource)
 	return c, nil
 }
 
 // parseSSO builds the single sign-on providers and checks the whole configuration, including
-// the public URL every redirect URI is built from, before anything starts.
-func (c *serveConfig) parseSSO(flags []string, env, autoProvision string) error {
-	specs := flags
+// the public URL every redirect URI is built from, before anything starts. Providers come
+// from --sso-provider, else CONDUCTOR_SSO_PROVIDERS, else the config file — one source, never
+// a mix — and it reports which.
+func (c *serveConfig) parseSSO(flags []string, env string, file []sso.Config, autoProvision string) (string, error) {
+	specs, source := flags, "flag"
 	if len(specs) == 0 {
-		specs = strings.FieldsFunc(env, func(r rune) bool { return r == ';' || r == '\n' })
+		specs, source = strings.FieldsFunc(env, func(r rune) bool { return r == ';' || r == '\n' }), "env"
 	}
 	configs, err := sso.ParseSpecs(specs, os.Getenv)
 	if err != nil {
-		return err
+		return "", err
+	}
+	if len(configs) == 0 && len(file) > 0 {
+		configs, source = file, "file"
 	}
 	for _, cfg := range configs {
 		p, err := sso.New(cfg, sso.Options{})
 		if err != nil {
-			return err
+			return "", err
 		}
 		c.sso.Providers = append(c.sso.Providers, p)
 	}
@@ -360,7 +398,7 @@ func (c *serveConfig) parseSSO(flags []string, env, autoProvision string) error 
 		}
 		c.sso.PublicURL = scheme + "://" + displayHost(c.addr)
 	}
-	return api.ValidateSSOOptions(c.sso)
+	return source, api.ValidateSSOOptions(c.sso)
 }
 
 // stringFlags is a repeatable string flag.
@@ -534,6 +572,7 @@ func serve(args []string) error {
 		Notify:       notifier,
 		Ops:          ops,
 		SSO:          cfg.sso,
+		Admin:        cfg.admin,
 	})
 	if ghErr == nil {
 		ghErr = gh.Refresh(life)
@@ -715,7 +754,8 @@ func bootstrap(args []string) error {
 	projectSlug := fs.String("project", "", "project slug (defaults to the repository directory name)")
 	handle := fs.String("principal", envOr("USER", "operator"), "principal handle")
 	repo := fs.String("repo", ".", "path to the repository this project coordinates")
-	role := fs.String("role", string(domain.RoleProjectAdmin), "role to grant the principal")
+	role := fs.String("role", "", "role to grant the principal (default: org_admin for the first principal of a new organization, "+
+		"so someone can reach the admin area; otherwise the role they already hold, or project_admin)")
 	endpoint := fs.String("endpoint", envOr("CONDUCTOR_PUBLIC_URL", "http://localhost:8080"),
 		"control plane URL saved into this machine's login")
 	noLogin := fs.Bool("no-login", false, "do not write this machine's login file; print the token only")
@@ -754,8 +794,10 @@ func bootstrap(args []string) error {
 	// Idempotent: re-running bootstrap should mint a fresh token, not fail because the org
 	// already exists.
 	org, err := store.GetOrganizationBySlug(ctx, *orgSlug)
+	newOrg := false
 	if errors.Is(err, domain.ErrNotFound) {
 		org, err = store.CreateOrganization(ctx, *orgSlug, *orgSlug)
+		newOrg = true
 	}
 	if err != nil {
 		return fmt.Errorf("organization: %w", err)
@@ -807,7 +849,19 @@ func bootstrap(args []string) error {
 	}
 
 	// Bootstrap holds database credentials, so it may set a role outright; re-running it
-	// converges on what was asked for.
+	// converges on what was asked for. Asked for nothing, it never demotes: re-running
+	// bootstrap to recover a login keeps the role the principal has.
+	if *role == "" {
+		current, err := store.RoleIn(ctx, project.ID, principal.ID)
+		switch {
+		case newOrg:
+			*role = string(domain.RoleOrgAdmin)
+		case err == nil:
+			*role = string(current)
+		default:
+			*role = string(domain.RoleProjectAdmin)
+		}
+	}
 	if err := store.UpsertMember(ctx, project.ID, principal.ID, domain.Role(*role)); err != nil {
 		return fmt.Errorf("membership: %w", err)
 	}
