@@ -25,6 +25,8 @@ type command struct {
 	summary string
 	// subs are the subcommands, for completion and for the help listing.
 	subs []string
+	// nested are the subcommands of a subcommand (github issues enable), for completion.
+	nested map[string][]string
 	// short marks the commands the bare `conductor help` page shows.
 	short bool
 	// topic is the help page printed for `conductor help <name>` and `<name> -h`. Empty means
@@ -415,8 +417,9 @@ Run ` + "`conductor token <subcommand> -h`" + ` for its flags.
 `},
 	{name: "security", group: "Team and access", subs: []string{"status", "local", "enhanced"},
 		summary: "sign in without a token on this machine, or require tokens everywhere"},
-	{name: "github", group: "Team and access", subs: []string{"setup", "install", "link", "status", "check"},
-		summary: "create the GitHub App, link a repo, see what it checks"},
+	{name: "github", group: "Team and access", subs: []string{"setup", "install", "link", "status", "check", "issues"},
+		nested:  map[string][]string{"issues": {"enable", "disable", "status", "sync"}},
+		summary: "create the GitHub App, link a repo, sync its issues into tasks"},
 
 	// Other
 	{name: "hook", group: "Other", subs: []string{"pre-tool", "session-start", "session-end", "checkpoint"},

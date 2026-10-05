@@ -53,6 +53,7 @@ func TestBashCompletionCompletes(t *testing.T) {
 		{"conductor ta", 1, "task"},
 		{"conductor task han", 2, "handoff"},
 		{"conductor help che", 2, "checkpoint"},
+		{"conductor github issues ena", 3, "enable"},
 	}
 	for _, c := range cases {
 		script := "source " + path + "; COMP_WORDS=(" + c.words + "); COMP_CWORD=" +
