@@ -110,6 +110,27 @@ func TestServeConfigOperationsFlags(t *testing.T) {
 	}
 }
 
+// The notification relay is on, and confined to public https destinations, unless the
+// operator says otherwise.
+func TestServeConfigNotifyFlags(t *testing.T) {
+	clearEnv(t)
+	c, err := parseServeConfigQuiet([]string{"--dsn", "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.notifyPoll <= 0 || c.notifyNetwork.AllowPrivate || c.notifyNetwork.AllowHTTP {
+		t.Errorf("defaults: poll %v, network %+v", c.notifyPoll, c.notifyNetwork)
+	}
+	c, err = parseServeConfigQuiet([]string{"--dsn", "x", "--notify-poll", "-1s",
+		"--notify-allow-private-networks", "--notify-allow-http"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.notifyPoll >= 0 || !c.notifyNetwork.AllowPrivate || !c.notifyNetwork.AllowHTTP {
+		t.Errorf("flags: poll %v, network %+v", c.notifyPoll, c.notifyNetwork)
+	}
+}
+
 func TestServeConfigRejects(t *testing.T) {
 	clearEnv(t)
 	for name, args := range map[string][]string{
