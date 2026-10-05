@@ -367,6 +367,10 @@ func (s *Store) AuthenticateTokenInfo(ctx context.Context, token string) (domain
 		 WHERE token_hash = $1
 		   AND revoked_at IS NULL
 		   AND (expires_at IS NULL OR expires_at > now())
+		   -- A deactivated principal (SCIM, the admin area) authenticates nowhere, whatever
+		   -- tokens it still holds; deactivation revokes them too, this is the backstop.
+		   AND NOT EXISTS (SELECT 1 FROM principals p
+		                    WHERE p.id = api_tokens.principal_id AND p.deactivated_at IS NOT NULL)
 		RETURNING principal_id::text, name, COALESCE(project_id::text, ''), expires_at`,
 		hashToken(token),
 	).Scan(&p.ID, &info.Name, &info.ProjectID, &info.ExpiresAt)
@@ -547,12 +551,18 @@ func (s *Store) Audit(ctx context.Context, orgID, projectID, actor domain.ID, ac
 	// Auditing must never fail the operation it is recording, but a lost audit line must not
 	// be silent either: an audit trail with unexplained gaps is worse than useless, because it
 	// is trusted. The failure is logged with identifiers only, like the record itself.
-	if _, err := s.pool.Exec(context.WithoutCancel(ctx), `
+	var id int64
+	var at time.Time
+	if err := s.pool.QueryRow(context.WithoutCancel(ctx), `
 		INSERT INTO audit_log (organization_id, project_id, actor_principal,
 		                       action, target_type, target_id, detail)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7)`,
-		orgID, nullable(projectID), nullable(actor), action, targetType, targetID, body); err != nil {
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7)
+		RETURNING id, created_at`,
+		orgID, nullable(projectID), nullable(actor), action, targetType, targetID, body).Scan(&id, &at); err != nil {
 		slog.Error("audit record not written", "action", action, "target_type", targetType,
 			"target_id", targetID, "error", err)
+		return
 	}
+	s.notifyAudit(AuditEntry{ID: id, At: at, OrganizationID: orgID, ProjectID: projectID, ActorID: actor,
+		Action: action, TargetType: targetType, TargetID: targetID, Detail: payload})
 }
