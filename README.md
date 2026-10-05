@@ -1040,9 +1040,11 @@ Not built, and where the design says it goes:
   rather than binding the bidirectional JSON-RPC App Server.
 - **OIDC** (§25.1). Authentication is bearer tokens hashed at rest; there is no identity
   provider integration.
-- **Merge queue, tracker sync, symbol/tree-sitter indexing** (§29, §30 phase 5). Pull requests
-  are integrated as far as the check run and merge-to-done above; nothing queues or performs
+- **Merge queue, symbol/tree-sitter indexing** (§29, §30 phase 5). Pull requests are
+  integrated as far as the check run and merge-to-done above; nothing queues or performs
   merges.
+- **Tracker sync beyond GitHub Issues** (§17.5). GitHub Issues sync is built; Linear is the
+  next adapter, then Jira.
 - **Codex** is profiled as `gpt-5.3-codex` in `.conductor/models.yaml` but left disabled until
   someone verifies it against their account; its `exec --json` stream adapter is tested against
   fixture transcripts built from Codex's documented event schema, not a live run. **OpenCode**
