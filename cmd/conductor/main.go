@@ -139,6 +139,8 @@ func runCommand(ctx context.Context, name string, args []string) error {
 		return cmdCheckpoint(ctx, args)
 	case "security":
 		return cmdSecurity(ctx, args)
+	case "sso":
+		return cmdSSO(ctx, args)
 	case "github":
 		return cmdGitHub(ctx, args)
 	case "inbox":

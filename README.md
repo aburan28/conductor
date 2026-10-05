@@ -442,6 +442,99 @@ Or run the scripted demo, which reproduces the scenario above end to end:
 make e2e
 ```
 
+### Single sign-on
+
+A team with Google Workspace, GitHub, Okta, Auth0, Keycloak or any other OpenID Connect
+provider can sign in through it instead of passing tokens around. A sign-in ends with an
+ordinary Conductor token (named `sso:<provider>`, 12 hours by default), so roles, project
+scopes and enhanced security mode apply to it exactly as to any other token. Nobody gets in
+just by having an account at the provider: an administrator registers each person's address
+first, and their first sign-in links to that account.
+
+Every provider needs one redirect URI registered with it, exactly:
+
+```
+<--public-url>/v1/sso/<name>/callback        e.g. https://conductor.example.com/v1/sso/google/callback
+```
+
+`conductord` logs it for each provider at startup. SSO needs `--public-url` to be `https`
+(plain `http` only on a loopback address, for trying it out).
+
+**Google.** In the Google Cloud console, open *APIs & Services → OAuth consent screen* and
+configure it (*Internal* keeps it to your Workspace). Then *Credentials → Create credentials →
+OAuth client ID*, type *Web application*, and add the redirect URI above under *Authorized
+redirect URIs*. Start `conductord` with the client id, and the secret in the environment:
+
+```bash
+export CONDUCTOR_SSO_GOOGLE_CLIENT_SECRET='GOCSPX-…'      # or client-secret-file=/run/secrets/google
+conductord --addr 0.0.0.0:8443 --tls-cert cert.pem --tls-key key.pem \
+  --public-url https://conductor.example.com \
+  --sso-provider name=google,issuer=https://accounts.google.com,client-id=1234-abc.apps.googleusercontent.com,domain=example.com
+```
+
+**GitHub.** GitHub is not an OpenID Connect provider for people, so it has its own type. Create
+an OAuth App (*Settings → Developer settings → OAuth Apps → New OAuth App*, or the same under
+your organization's settings), with *Homepage URL* your public URL and *Authorization callback
+URL* `https://conductor.example.com/v1/sso/github/callback`. Generate a client secret, then:
+
+```bash
+export CONDUCTOR_SSO_GITHUB_CLIENT_SECRET='…'
+conductord … --sso-provider name=github,client-id=Ov23li…,org=acme
+```
+
+`org=` admits only active members of that organization (repeat it to allow several); if the
+organization restricts OAuth App access, an owner has to approve the app once. GitHub Enterprise
+Server adds `api-url=https://HOST/api/v3,web-url=https://HOST`.
+
+**Any other OpenID Connect provider** (Okta, Auth0, Keycloak, …): register a web application
+with the redirect URI, and pass its issuer exactly as its
+`/.well-known/openid-configuration` states it, e.g.
+`--sso-provider name=okta,issuer=https://acme.okta.com,client-id=0oa…`. The provider must assert
+`email_verified`; one that does not (Microsoft Entra ID, for one) is refused rather than trusted
+with unverified addresses.
+
+| `--sso-provider` key | Meaning |
+|---|---|
+| `name` | lowercase id, used in the redirect URI, URLs and `conductor login --sso NAME` |
+| `type` | `oidc` (default) or `github` (the default when `name=github` and no issuer is given) |
+| `issuer`, `client-id` | the provider's issuer and this application's client id |
+| `client-secret-file`, `client-secret-env` | where the secret is; by default `CONDUCTOR_SSO_<NAME>_CLIENT_SECRET`. Never on the command line, where every user can read it |
+| `domain` | admit only verified addresses in this domain (repeatable) |
+| `org` | GitHub: admit only active members of this organization (repeatable) |
+| `label` | the button text, "Sign in with …" |
+| `api-url`, `web-url` | GitHub Enterprise Server |
+
+Several providers are several `--sso-provider` flags, or one `CONDUCTOR_SSO_PROVIDERS` variable
+with the specs separated by `;`.
+
+**Registering people.** A first sign-in links to the account whose registered address the
+provider verified, and only if that account does not sign in some other way already — an email
+address alone never takes over an account that has an identity:
+
+```bash
+conductor member add rachel --role contributor --email rachel@example.com --no-token
+conductor sso email bob bob@example.com         # an existing member
+```
+
+Setting someone's sign-in address, or unlinking their identity, takes an administrator of every
+project they belong to. Then they sign in — in the dashboard with **Sign in with Google**, or
+from a terminal (a browser opens, and the CLI listens on `127.0.0.1` for the result):
+
+```bash
+conductor login --endpoint https://conductor.example.com --sso google
+conductor sso status                    # providers, and the identities linked to you
+conductor sso link github               # add another provider to the account you are signed in as
+conductor sso unlink bob google         # administrators: remove an identity and end its sessions
+```
+
+To skip registering people, `--sso-auto-provision contributor --sso-default-project acme/web`
+gives a first sign-in that matches no registered address a new account in that project. It
+grants contributor, reviewer or observer, never more, and requires every provider to be
+restricted with `domain=` or `org=` — otherwise anyone with a Google account would be let in.
+`--sso-token-ttl` sets how long a sign-in lasts; signing in again re-checks the provider (an
+address still allowed, a membership still active). The design and threat model are in
+[DESIGN.md §25.7](docs/DESIGN.md).
+
 ---
 
 ## Daily use
@@ -1085,6 +1178,9 @@ Implemented and exercised by tests:
 - Isolated git worktrees, scope-drift detection, runner-attested validation, evidence manifests,
   handoff bundles, portable Markdown task cards.
 - Member and token administration, TLS, a loopback-by-default bind, and auth throttling.
+- Single sign-on through any OpenID Connect provider or GitHub, for the dashboard and the CLI,
+  issuing ordinary tokens; external identities link only to accounts an administrator
+  registered (§25.7).
 - Daemon-to-daemon peering over mutual TLS: a private CA names every control plane in a
   mesh, each daemon dials its configured or DNS-discovered peers and keeps a live link
   table, and `conductor peers` reports it. Connectivity and identity only — no data is
@@ -1125,8 +1221,6 @@ Not built, and where the design says it goes:
   review a diff.
 - **Codex App Server driver** (§16.3). The Codex driver shells out to `codex exec --json`
   rather than binding the bidirectional JSON-RPC App Server.
-- **OIDC** (§25.1). Authentication is bearer tokens hashed at rest; there is no identity
-  provider integration.
 - **Merge queue, symbol/tree-sitter indexing** (§29, §30 phase 5). Pull requests are
   integrated as far as the check run and merge-to-done above; nothing queues or performs
   merges.

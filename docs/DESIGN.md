@@ -1993,7 +1993,7 @@ Do not solve privacy only with task-level rows; enforce visibility at serializat
 
 ### 25.1 Authentication
 
-- Humans: OIDC through the organization's identity provider.
+- Humans: OIDC through the organization's identity provider, or GitHub (§25.7).
 - CLI/session adapters: short-lived device/session token scoped to one user and project.
 - Runners: mTLS or workload identity with short-lived JWTs.
 - AWS deployment: IAM roles for service accounts and instance profiles where practical.
@@ -2126,6 +2126,74 @@ handoff bundle, a task's validation results, and its policy-decision rationale f
 visibility; an attempt's changed paths and worktree path are shown to others from
 `team_summary` up (`privacy.ProjectAttempt`; the same tier as in events); lease ids and fencing epochs appear on a task card only for the lease holder. Server
 faults return `internal error` with a request id, and the detail goes to the server log.
+
+### 25.7 Single sign-on
+
+Humans can sign in through an OpenID Connect provider (Google, Okta, Entra, Auth0, Keycloak,
+…) or GitHub's OAuth flow (`conductord --sso-provider`, `internal/sso`, `internal/api/sso.go`).
+SSO is a **token issuer, not a second authentication path**: a successful sign-in mints an
+ordinary bearer token named `sso:<provider>` (12 hours by default, `--sso-token-ttl`, capped at
+90 days like every human token), and the API authenticates it exactly like any other. Roles,
+project scopes, enhanced security mode, the failed-authentication throttle and revocation apply
+unchanged; local sign-in is untouched, and SSO works in both security modes.
+
+**Flow.** `GET /v1/sso/{provider}/start` creates a sign-in with a random state, nonce and PKCE
+(S256) verifier, stores it in `sso_logins` (state hashed; Postgres, so any replica can finish a
+sign-in another began) and redirects to the provider. The redirect URI is
+`<public URL>/v1/sso/<provider>/callback`, built from configuration and never from the request,
+and is the one URL registered with the provider. The callback consumes the state once (an
+`UPDATE … RETURNING`, so a replay finds nothing, on any replica), redeems the code, verifies the
+identity, maps it to a principal and attaches a one-time ticket (two minutes, hashed) to the
+sign-in. The ticket goes back in a URL fragment and is exchanged for the token at
+`POST /v1/sso/redeem`. The CLI (`conductor login --sso`) runs the same flow with a loopback
+listener on `127.0.0.1:<random port>` (RFC 8252): the provider redirects to conductord, which
+holds the client secret, and conductord forwards the ticket to the loopback address.
+
+**Verification.** ID tokens are verified with the standard library: RS256 or ES256 only (`none`
+and HMAC refused before a key is consulted), a key from the issuer's JWKS matching `kid` and
+type (refetched at most every 30 seconds on an unknown `kid`, which is what rotation looks like,
+and hourly otherwise), `iss` equal to the configured issuer and to the discovery document's,
+`aud` containing the client id and `azp` equal to it when present, `exp`/`iat`/`nbf` with two
+minutes of skew, the nonce from this sign-in, and `email_verified` true. GitHub has no ID token:
+the identity is GitHub's answer for the access token just redeemed — the numeric user id, the
+verified primary address from `/user/emails`, and active membership of an allowed organization.
+Providers that do not assert `email_verified` (Entra ID among them) are refused, because an
+unverified address is exactly what an account takeover would supply.
+
+**Identity mapping.** An external account is named by issuer and subject (GitHub: instance URL
+and user id), never by email: `external_identities` is unique on (issuer, subject) and on
+(principal, issuer). A first sign-in links to the human principal whose administrator-registered
+address (`conductor member add --email`, `conductor sso email`) the provider verified, and only
+while that principal has no linked identity at all — decided in the insert itself. Further
+identities are linked by the signed-in principal (`conductor sso link`), which proves control
+of both accounts; a session from local sign-in cannot link. A principal with no project
+membership is refused, so removing someone from their last project is not undone by signing in.
+Without `--sso-auto-provision`, an unregistered address is refused; with it, a new account
+joins `--sso-default-project` as contributor, reviewer or observer, and every provider must
+then restrict who it admits (`domain=` or `org=`).
+
+**Threats and what answers them.**
+
+| Threat | Defence |
+|---|---|
+| Login CSRF: an attacker sends a victim the callback URL of the attacker's own sign-in | dashboard sign-ins are bound to the starting browser by an HttpOnly, SameSite=Lax cookie (`__Host-` and Secure over https); the callback and the redemption both require it |
+| A stolen or intercepted ticket (history, another local program catching the loopback redirect, a page steering the browser to the loopback port) | the ticket is single-use, two minutes, and redeemable only with the browser's cookie or the CLI's PKCE verifier, checked in the same statement that consumes it, so a failed attempt does not burn it |
+| Replayed callback, state or code | state is single-use and expires in ten minutes; the code is bound to the PKCE verifier and the nonce to the ID token |
+| Forged or substituted ID token | signature under the issuer's published key, `iss`/`aud`/`azp`/time checks; an algorithm-confusion token (`none`, HS256) is refused |
+| Mix-up between providers | each provider has its own callback path, and a state is accepted only on the path of the provider it was issued for |
+| Open redirect | `next` admits a same-origin path only; the CLI's redirect must be `http://127.0.0.1` or `http://[::1]` with a port |
+| Account takeover by email | linking by address needs an address an administrator registered and the provider verified, and never attaches to a principal that already has an identity; setting someone's address, or unlinking them, needs an administrator of every project they belong to |
+| A second IdP account taking over a principal | unique (principal, issuer); first-sign-in linking only to principals with no identity; adding identities needs the existing login |
+| Brute force and flooding | callback and redemption failures count against the authentication throttle; unauthenticated sign-in starts are capped (10 000 in flight) and expired rows are pruned |
+| A secret on the command line | client secrets are read only from `CONDUCTOR_SSO_<NAME>_CLIENT_SECRET`, a named variable, or a file; `client-secret=` is refused |
+| Enhanced mode bypass | SSO never mints a `local:` token, and an `sso:` token is an ordinary credential that enhanced mode does not need to revoke |
+
+What it does not defend against: a compromised identity provider, or a compromised mailbox at
+an address an administrator registered, signs in as that principal — that is what delegating
+authentication means. The PKCE verifier and nonce of a sign-in in flight are stored in plaintext
+for up to ten minutes; they are useless without the authorization code and the client secret.
+Revoking someone at the provider does not end their current `sso:` token; it expires within the
+token TTL, and `conductor sso unlink` or `conductor member remove` ends it at once.
 
 ---
 

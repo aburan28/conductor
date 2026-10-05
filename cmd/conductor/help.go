@@ -87,13 +87,16 @@ Example:
 		topic: `conductor login — save the endpoint, token, and default project this CLI uses
 
 On the machine running the control plane no token is needed; elsewhere use the token from
-a teammate's ` + "`conductor invite`" + ` (or ` + "`conductor join <link>`" + `).
+a teammate's ` + "`conductor invite`" + ` (or ` + "`conductor join <link>`" + `), or --sso to sign in
+through the team's identity provider (Google, GitHub, Okta, …) in your browser.
 
 Usage:
   conductor login [--endpoint URL] [--token TOKEN] [--project SLUG]
+  conductor login --sso [PROVIDER] [--endpoint URL] [--project SLUG]
 
 Example:
   conductor login --endpoint https://conductor.example.com --token cdt_…
+  conductor login --endpoint https://conductor.example.com --sso google
 `},
 	{name: "doctor", group: "Get started", short: true, flags: true,
 		summary: "check this machine: database, daemon, versions, git, harnesses",
@@ -438,6 +441,25 @@ Run ` + "`conductor token <subcommand> -h`" + ` for its flags.
 `},
 	{name: "security", group: "Team and access", subs: []string{"status", "local", "enhanced"},
 		summary: "sign in without a token on this machine, or require tokens everywhere"},
+	{name: "sso", group: "Team and access", subs: []string{"status", "link", "unlink", "email"},
+		summary: "single sign-on: providers, linked identities, sign-in addresses",
+		topic: `conductor sso — single sign-on through Google, GitHub, Okta, or any OpenID Connect provider
+
+Sign in with ` + "`conductor login --sso`" + `. A first sign-in links to the account an
+administrator registered the provider's verified address on; there is no self-service sign-up
+unless conductord runs with --sso-auto-provision.
+
+Usage:
+  conductor sso status                       providers, and the identities linked to you
+  conductor sso link [PROVIDER]              add a provider's account to your login
+  conductor sso email <handle> <address>     register the address a member signs in with (admin)
+  conductor sso unlink <handle> <provider>   remove a member's identity and its sessions (admin)
+
+Example:
+  conductor sso email rachel rachel@example.com
+
+Run ` + "`conductor sso <subcommand> -h`" + ` for its flags.
+`},
 	{name: "github", group: "Team and access", subs: []string{"setup", "install", "link", "status", "check", "issues"},
 		nested:  map[string][]string{"issues": {"enable", "disable", "status", "sync"}},
 		summary: "create the GitHub App, link a repo, sync its issues into tasks"},

@@ -34,9 +34,25 @@ export function renderConnect(root, { onConnect, error, note, token: initialToke
   }
   token.addEventListener('keydown', ev => { if (ev.key === 'Enter') { ev.preventDefault(); verify(); } });
 
+  // Single sign-on, when the server has providers configured. Each button is a plain link:
+  // the server redirects to the provider and back, and the dashboard reloads with a one-time
+  // ticket it redeems for a token. `next` brings the person back to the page they asked for.
+  const sso = h('div', { class: 'sso' });
+  createApi({}).get('/v1/sso/providers').then(out => {
+    const providers = (out && out.providers) || [];
+    if (!providers.length) return;
+    const next = encodeURIComponent(location.pathname + location.search);
+    sso.replaceChildren(
+      h('div', { class: 'btn-row' }, ...providers.map(p => h('a', {
+        class: 'btn primary', href: `/v1/sso/${encodeURIComponent(p.name)}/start?next=${next}`,
+      }, `Sign in with ${p.label || p.name}`))),
+      h('p', { class: 'hint' }, 'Or paste a token:'));
+  }).catch(() => {});
+
   root.replaceChildren(h('div', { class: 'connect' }, h('div', { class: 'card' }, h('div', { class: 'body' },
     h('div', { class: 'brand' }, h('div', { class: 'logo' }, icon('bolt', 15)), h('span', { class: 'name' }, 'Conductor')),
     h('p', { class: 'muted' }, 'Coordinate humans and coding agents on one repository. Sign in with a token from ', h('code', {}, 'conductord bootstrap'), ' or ', h('code', {}, 'conductor member add'), '.'),
+    sso,
     h('form', { class: 'form', onsubmit: ev => { ev.preventDefault(); projectSel.disabled ? verify() : connect(); } },
       h('label', { class: 'field' }, 'Token', token),
       h('div', { class: 'btn-row' }, h('button', { class: 'btn', type: 'button', onclick: verify }, 'Verify')),

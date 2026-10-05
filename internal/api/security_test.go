@@ -428,7 +428,7 @@ func TestNoGETRouteLeaksAPrivateTask(t *testing.T) {
 
 	subst := map[string]string{
 		"{project}": h.project.ID, "{task}": started.TaskID, "{attempt}": started.AttemptID,
-		"{session}": session.ID, "{ticket}": ticket.ID,
+		"{session}": session.ID, "{ticket}": ticket.ID, "{provider}": "google",
 	}
 	routes := []string{
 		"/v1/whoami", "/v1/projects", "/v1/projects/{project}", "/v1/projects/{project}/members",
@@ -446,6 +446,7 @@ func TestNoGETRouteLeaksAPrivateTask(t *testing.T) {
 		"/v1/tasks/{task}/validation", "/v1/attempts/{attempt}/brief",
 		"/v1/tokens", "/v1/peers", "/v1/security", "/v1/github/status",
 		"/v1/ready", "/metrics", "/v1/quota", "/v1/projects/{project}/quota",
+		"/v1/sso/providers", "/v1/sso/status", "/v1/sso/{provider}/start", "/v1/sso/{provider}/callback",
 		"/v1/projects/{project}/github/issues", "/v1/tasks/{task}/issue",
 		"/v1/projects/{project}/notifications",
 		// The stream is read separately below; it never ends on its own.

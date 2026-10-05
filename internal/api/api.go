@@ -57,6 +57,8 @@ type Server struct {
 	notify *notify.Notifier
 	// ops is the operational surface: lifetime context, background work, streams (observe.go).
 	ops *opsState
+	// sso is single sign-on; it has no providers when none are configured (sso.go).
+	sso *ssoState
 }
 
 type Options struct {
@@ -84,6 +86,8 @@ type Options struct {
 	// Ops configures metrics, request deadlines, stream caps and the server lifetime
 	// (observe.go).
 	Ops OpsOptions
+	// SSO configures sign-in through external identity providers (sso.go).
+	SSO SSOOptions
 }
 
 func New(store *db.Store, svc *coord.Service, opts Options) *Server {
@@ -104,6 +108,7 @@ func New(store *db.Store, svc *coord.Service, opts Options) *Server {
 		peerStatus:  opts.PeerStatus,
 		local:       opts.LocalLogin,
 		github:      opts.GitHub,
+		sso:         newSSOState(opts.SSO, opts.SelfEndpoint),
 		notify:      opts.Notify,
 	}
 	s.ops = newOpsState(store, s, opts.Ops)

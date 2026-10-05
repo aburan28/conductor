@@ -47,9 +47,14 @@ const frag = new URLSearchParams((location.hash || '').replace(/^#/, ''));
 const demoMode = params.get('demo') === '1' || frag.get('demo') === '1';
 const urlToken = frag.get('token') || params.get('token');
 const urlProject = frag.get('project') || params.get('project');
+// A single sign-on returns here with a one-time ticket (or the reason it failed) in the
+// fragment. The ticket is redeemed for a token by boot(); it is worthless without this
+// browser's sign-in cookie, and is stripped from the address bar like a token.
+const ssoTicket = frag.get('sso');
+const ssoError = frag.get('sso_error');
 if (urlToken) prefs.set('token', urlToken);
 if (urlProject) prefs.set('project', urlProject);
-if (urlToken || urlProject) {
+if (urlToken || urlProject || ssoTicket || ssoError) {
   params.delete('token'); params.delete('project');
   const query = params.toString() ? '?' + params : '';
   history.replaceState({}, '', location.pathname + query);
@@ -86,6 +91,15 @@ async function boot() {
     enter();
     return;
   }
+  if (ssoTicket) {
+    try {
+      const out = await createApi({}).post('/v1/sso/redeem', { ticket: ssoTicket });
+      return adoptToken(out.token);
+    } catch (err) {
+      return showConnect(err.message);
+    }
+  }
+  if (ssoError) return showConnect(ssoError);
   if (!s.token) {
     // On the machine running conductord, in local security mode, the owner is signed in
     // without a token. Anywhere else the request is refused and the token form appears with
