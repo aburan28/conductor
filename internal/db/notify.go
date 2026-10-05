@@ -183,16 +183,29 @@ func (s *Store) ClaimOutbox(ctx context.Context, limit int, hold time.Duration, 
 	if len(projects) == 0 {
 		projects = nil
 	}
+	// Candidates are read per project with a channel, through the (project_id, id) index of
+	// pending rows, so the pass never walks the pending rows of the projects without one —
+	// which retention keeps for weeks. The lock is then taken on the candidates by id.
 	rows, err := s.pool.Query(ctx, `
-		WITH picked AS (
+		WITH candidates AS (
+		    SELECT p.id
+		      FROM (SELECT DISTINCT project_id FROM notification_channels
+		             WHERE $3::uuid[] IS NULL OR project_id = ANY($3::uuid[])) c
+		     CROSS JOIN LATERAL (
+		           SELECT o.id FROM outbox_events o
+		            WHERE o.project_id = c.project_id
+		              AND o.delivered_at IS NULL
+		              AND (o.next_attempt_at IS NULL OR o.next_attempt_at <= now())
+		            ORDER BY o.id
+		            LIMIT $1) p),
+		picked AS (
 		    SELECT o.id FROM outbox_events o
-		     WHERE o.delivered_at IS NULL
-		       AND o.project_id IN (SELECT project_id FROM notification_channels)
-		       AND ($3::uuid[] IS NULL OR o.project_id = ANY($3::uuid[]))
+		     WHERE o.id IN (SELECT id FROM candidates)
+		       AND o.delivered_at IS NULL
 		       AND (o.next_attempt_at IS NULL OR o.next_attempt_at <= now())
 		     ORDER BY o.id
 		     LIMIT $1
-		     FOR UPDATE OF o SKIP LOCKED)
+		     FOR UPDATE SKIP LOCKED)
 		UPDATE outbox_events o
 		   SET next_attempt_at = now() + make_interval(secs => $2)
 		  FROM picked
