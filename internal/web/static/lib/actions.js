@@ -45,7 +45,7 @@ export function transitionTask(ctx, ref, current) {
       body: h('div', { class: 'form' }, h('label', { class: 'field' }, 'To status', sel),
         h('div', { class: 'hint' }, 'Illegal transitions are refused by the ledger; this does not bypass leases or evidence.')),
       actions: [{ label: 'Cancel' }, { label: 'Apply', kind: 'primary', onClick: async () => {
-        try { await ctx.api.post(ctx.api.task(ctx.project, ref, '/transition'), { to: sel.value }); toast(`${ref} → ${sel.value}`); resolve(true); }
+        try { await ctx.api.post(ctx.api.task(ctx.project, ref, '/transition'), { status: sel.value }); toast(`${ref} → ${sel.value}`); resolve(true); }
         catch (err) { toastError(err, 'Transition refused'); return false; }
       } }],
       onClose: () => resolve(false),
@@ -57,9 +57,33 @@ export function cancelTask(ctx, ref) {
   return confirmModal({ title: `Cancel ${ref}?`, message: 'The task leaves the queue and releases its reserved scopes.', confirmLabel: 'Cancel task', kind: 'danger' })
     .then(async ok => {
       if (!ok) return false;
-      try { await ctx.api.post(ctx.api.task(ctx.project, ref, '/transition'), { to: 'cancelled' }); toast(`Cancelled ${ref}`); return true; }
+      try { await ctx.api.post(ctx.api.task(ctx.project, ref, '/transition'), { status: 'cancelled' }); toast(`Cancelled ${ref}`); return true; }
       catch (err) { toastError(err, 'Cancel refused'); return false; }
     });
+}
+
+// The work landed: finished work waiting to merge is an ordinary transition; work still
+// claimed ends its claim in the same step (only its holder or a maintainer may). Either way
+// the task's territory is released.
+export function markDone(ctx, ref, status) {
+  const pendingMerge = ['verifying', 'review_required', 'merging'].includes(status);
+  return confirmModal({ title: `Mark ${ref} done?`, message: pendingMerge
+    ? 'Use this when the work has merged. The task closes and its reserved scopes are released.'
+    : 'Use this when the work has merged. The claim ends, the task closes, and its reserved scopes are released.',
+  confirmLabel: 'Mark done' }).then(async ok => {
+    if (!ok) return false;
+    try {
+      if (pendingMerge) await ctx.api.post(ctx.api.task(ctx.project, ref, '/transition'), { status: 'done' });
+      else await ctx.api.post(ctx.api.task(ctx.project, ref, '/complete'), {});
+      toast(`${ref} is done. Its scopes are free.`); return true;
+    } catch (err) { toastError(err, 'Could not mark done'); return false; }
+  });
+}
+
+// Send finished-but-unmerged work back to the queue (review asked for changes).
+export async function reopenTask(ctx, ref) {
+  try { await ctx.api.post(ctx.api.task(ctx.project, ref, '/transition'), { status: 'ready' }); toast(`${ref} is back in the queue`); return true; }
+  catch (err) { toastError(err, 'Could not reopen'); return false; }
 }
 
 export function assignTask(ctx, ref, sessions = []) {

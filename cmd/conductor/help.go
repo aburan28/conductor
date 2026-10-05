@@ -216,7 +216,7 @@ Run ` + "`conductor budget <subcommand> -h`" + ` for its flags.
 
 	// Work
 	{name: "task", group: "Work", short: true,
-		subs:    []string{"list", "show", "create", "claim", "release", "handoff", "assign", "export"},
+		subs:    []string{"list", "show", "create", "claim", "release", "done", "reopen", "handoff", "assign", "export"},
 		summary: "file, claim, release, and hand off work",
 		topic: `conductor task — file work, take it, and hand it back
 
@@ -226,6 +226,8 @@ Usage:
   conductor task create --title T [--scope R]  file new work
   conductor task claim <ref> | --next          take a task and its territory
   conductor task release <ref>                 hand a task back
+  conductor task done <ref>                    the work merged: finish it and free its territory
+  conductor task reopen <ref>                  send finished-but-unmerged work back to the queue
   conductor task handoff <ref> --to <harness>  hand off to another harness
   conductor task assign <ref>                  offer work to a session that meets a floor
   conductor task export <ref>                  write the Markdown task card
@@ -364,13 +366,14 @@ Run ` + "`conductor backup <subcommand> -h`" + ` for its flags.
 		summary: "give a teammate access with one link"},
 	{name: "join", group: "Team and access",
 		summary: "accept an invite link and log in"},
-	{name: "member", group: "Team and access", subs: []string{"add", "list", "remove"},
+	{name: "member", group: "Team and access", subs: []string{"add", "list", "role", "remove"},
 		summary: "see, add, or revoke who has access",
 		topic: `conductor member — who has access to this project
 
 Usage:
-  conductor member add <handle> [--role maintainer]   add someone; prints a token once
+  conductor member add <handle> [--role maintainer]   add someone; a new account gets a token once
   conductor member list
+  conductor member role <handle> <role>               change a member's role (never above your own)
   conductor member remove <handle>
 
 Example:

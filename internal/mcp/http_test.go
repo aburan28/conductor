@@ -285,3 +285,64 @@ func TestServeStdioBatchYieldsBatch(t *testing.T) {
 		t.Errorf("stdio batch returned %d responses, want 2", len(arr))
 	}
 }
+
+// Each session holds a gateway in memory. Without a bound, one member initializing in a loop
+// could exhaust the server; with one, a principal's leaked sessions crowd out only its own.
+func TestHTTPSessionsAreCappedPerPrincipalAndInTotal(t *testing.T) {
+	tr, _ := newHTTPTestTransport(t)
+	tr.maxPerPrincipal = 3
+	tr.maxTotal = 5
+
+	initAs := func(principal string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(
+			`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}`))
+		w := httptest.NewRecorder()
+		tr.Serve(w, r, principal, "token-"+principal, "demo")
+		return w
+	}
+	count := func(principal string) int {
+		tr.mu.Lock()
+		defer tr.mu.Unlock()
+		n := 0
+		for _, s := range tr.sessions {
+			if s.principalID == principal {
+				n++
+			}
+		}
+		return n
+	}
+
+	var first string
+	for i := 0; i < 10; i++ {
+		w := initAs("p-a")
+		if w.Code != http.StatusOK {
+			t.Fatalf("initialize %d = %d", i, w.Code)
+		}
+		if i == 0 {
+			first = w.Header().Get("Mcp-Session-Id")
+		}
+	}
+	if got := count("p-a"); got != 3 {
+		t.Errorf("principal holds %d sessions, want the cap of 3", got)
+	}
+	// The idlest session was the one evicted.
+	tr.mu.Lock()
+	_, stillThere := tr.sessions[first]
+	tr.mu.Unlock()
+	if stillThere {
+		t.Error("the principal's oldest session survived eviction")
+	}
+
+	// Two more principals fill the global table; the next is refused, not allowed to evict.
+	for _, p := range []string{"p-b", "p-c"} {
+		if w := initAs(p); w.Code != http.StatusOK {
+			t.Fatalf("initialize %s = %d", p, w.Code)
+		}
+	}
+	if w := initAs("p-d"); w.Code != http.StatusServiceUnavailable {
+		t.Errorf("initialize past the global cap = %d, want 503", w.Code)
+	}
+	if count("p-b") != 1 || count("p-c") != 1 {
+		t.Error("a new principal evicted someone else's session")
+	}
+}

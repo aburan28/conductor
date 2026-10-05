@@ -11,11 +11,9 @@ package db
 
 import (
 	"context"
-	"embed"
 	"errors"
 	"fmt"
-	"sort"
-	"strings"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -25,9 +23,6 @@ import (
 	"github.com/adamburan/conductor/internal/domain"
 )
 
-//go:embed migrations/*.sql
-var migrationFS embed.FS
-
 // Store is the handle every service takes. It is safe for concurrent use.
 type Store struct {
 	pool *pgxpool.Pool
@@ -36,19 +31,63 @@ type Store struct {
 	now func() time.Time
 }
 
-// Open connects to Postgres and verifies the connection.
-func Open(ctx context.Context, dsn string) (*Store, error) {
+// Default server-side bounds on a single statement and on a single lock wait. Every request
+// handler and scheduler step runs short statements, so a statement that takes this long is
+// hung — on a lock held by a stuck transaction, say — and failing it is what lets the
+// scheduler's next tick and the next request proceed.
+const (
+	DefaultStatementTimeout = 30 * time.Second
+	DefaultLockTimeout      = 10 * time.Second
+)
+
+// Options bounds what one database call may cost. The zero value applies the defaults above;
+// a negative duration disables that bound. A bound set in the DSN itself
+// (`?statement_timeout=...`) wins over both.
+type Options struct {
+	StatementTimeout time.Duration
+	LockTimeout      time.Duration
+}
+
+func (o Options) withDefaults() Options {
+	if o.StatementTimeout == 0 {
+		o.StatementTimeout = DefaultStatementTimeout
+	}
+	if o.LockTimeout == 0 {
+		o.LockTimeout = DefaultLockTimeout
+	}
+	return o
+}
+
+// Open connects to Postgres and verifies the connection. opts is optional; at most one is
+// used.
+func Open(ctx context.Context, dsn string, opts ...Options) (*Store, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("parse dsn: %w", err)
 	}
+	var o Options
+	if len(opts) > 0 {
+		o = opts[0]
+	}
+	o = o.withDefaults()
 	// The claim path takes short row locks and advisory locks; a starved pool turns those
-	// into queueing rather than errors, so keep some headroom.
+	// into queueing rather than errors, so keep some headroom. Note the floor is per
+	// process: N replicas hold up to N times this many connections.
 	if cfg.MaxConns < 8 {
 		cfg.MaxConns = 8
 	}
 	cfg.MaxConnLifetime = 30 * time.Minute
 	cfg.HealthCheckPeriod = 30 * time.Second
+	// Startup parameters rather than a SET per checkout: they apply to every connection the
+	// pool ever opens and cost no round trip. Migrate lifts them for its own connection.
+	setTimeout := func(name string, d time.Duration) {
+		if _, set := cfg.ConnConfig.RuntimeParams[name]; set || d < 0 {
+			return
+		}
+		cfg.ConnConfig.RuntimeParams[name] = strconv.FormatInt(d.Milliseconds(), 10)
+	}
+	setTimeout("statement_timeout", o.StatementTimeout)
+	setTimeout("lock_timeout", o.LockTimeout)
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
@@ -84,91 +123,6 @@ func (s *Store) Close() {
 	if s.pool != nil {
 		s.pool.Close()
 	}
-}
-
-// Migrate applies every embedded migration that has not been applied yet, in filename order.
-//
-// It takes a session-level advisory lock first, so two conductord processes starting at the
-// same moment cannot both try to create the same table.
-func (s *Store) Migrate(ctx context.Context) error {
-	conn, err := s.pool.Acquire(ctx)
-	if err != nil {
-		return err
-	}
-	defer conn.Release()
-
-	const migrationLock = 8712340001
-	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, migrationLock); err != nil {
-		return fmt.Errorf("acquire migration lock: %w", err)
-	}
-	defer func() {
-		_, _ = conn.Exec(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock($1)`, migrationLock)
-	}()
-
-	entries, err := migrationFS.ReadDir("migrations")
-	if err != nil {
-		return err
-	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql") {
-			names = append(names, e.Name())
-		}
-	}
-	sort.Strings(names)
-
-	applied := map[string]bool{}
-	rows, err := conn.Query(ctx, `SELECT version FROM schema_migrations`)
-	if err != nil {
-		// The very first run has no schema_migrations table yet; any other error is real.
-		var pgErr *pgconn.PgError
-		if !errors.As(err, &pgErr) || pgErr.Code != "42P01" {
-			return fmt.Errorf("read schema_migrations: %w", err)
-		}
-	} else {
-		for rows.Next() {
-			var v string
-			if err := rows.Scan(&v); err != nil {
-				rows.Close()
-				return err
-			}
-			applied[v] = true
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return err
-		}
-	}
-
-	for _, name := range names {
-		version := strings.TrimSuffix(name, ".sql")
-		if applied[version] {
-			continue
-		}
-		body, err := migrationFS.ReadFile("migrations/" + name)
-		if err != nil {
-			return err
-		}
-		// Each migration runs in its own transaction: a failure leaves the database at the
-		// last complete version rather than half-migrated.
-		tx, err := conn.Begin(ctx)
-		if err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, string(body)); err != nil {
-			_ = tx.Rollback(ctx)
-			return fmt.Errorf("migration %s: %w", name, err)
-		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO schema_migrations (version) VALUES ($1)`, version); err != nil {
-			_ = tx.Rollback(ctx)
-			return fmt.Errorf("record migration %s: %w", name, err)
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return fmt.Errorf("commit migration %s: %w", name, err)
-		}
-	}
-	return nil
 }
 
 // Tx runs fn inside a transaction, rolling back on error or panic.

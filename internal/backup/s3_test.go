@@ -295,3 +295,25 @@ func TestCanonicalURIEncodesReservedChars(t *testing.T) {
 		}
 	}
 }
+
+// An http:// endpoint sends signed requests and sealed bundles in the clear and lets anyone on
+// the path answer for the bucket; it takes the explicit Insecure setting.
+func TestPlainHTTPEndpointNeedsInsecure(t *testing.T) {
+	_, srv := newFakeS3(t)
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	c := New(S3Config{Bucket: "b", Region: "us-east-1", AccessKey: "AK", SecretKey: "SK",
+		Endpoint: "http://" + u.Host, PathStyle: true})
+	if err := c.Put(context.Background(), "k", []byte("x"), "text/plain"); err == nil ||
+		!strings.Contains(err.Error(), "INSECURE") {
+		t.Errorf("Put over http without Insecure = %v, want a refusal", err)
+	}
+	c = New(S3Config{Bucket: "b", Region: "us-east-1", AccessKey: "AK", SecretKey: "SK",
+		Endpoint: "ftp://" + u.Host, PathStyle: true, Insecure: true})
+	if err := c.Put(context.Background(), "k", []byte("x"), "text/plain"); err == nil {
+		t.Error("an ftp:// endpoint was accepted")
+	}
+	if err := testClient(srv).Put(context.Background(), "k", []byte("x"), "text/plain"); err != nil {
+		t.Errorf("Put over http with Insecure: %v", err)
+	}
+}

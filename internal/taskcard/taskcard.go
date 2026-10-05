@@ -48,9 +48,13 @@ type Card struct {
 	Artifacts          []string `yaml:"-"`
 }
 
+// CardLease describes the task's live lease. ID and FencingEpoch are the identifiers that act
+// on the lease, so a card rendered for anyone but the holder leaves them empty and they are
+// omitted; Holder and ExpiresAt are what every reader needs to avoid a collision.
 type CardLease struct {
-	ID           string    `yaml:"id"`
-	FencingEpoch int64     `yaml:"fencing_epoch"`
+	ID           string    `yaml:"id,omitempty"`
+	FencingEpoch int64     `yaml:"fencing_epoch,omitempty"`
+	Holder       string    `yaml:"holder,omitempty"`
 	ExpiresAt    time.Time `yaml:"expires_at"`
 }
 
@@ -133,6 +137,13 @@ func FromTask(
 		if attempt.CommitSHA != "" {
 			c.Artifacts = append(c.Artifacts, "Commit: "+attempt.CommitSHA)
 		}
+	}
+	if task.PullRequestURL != "" {
+		pr := "Pull request: " + task.PullRequestURL
+		if task.PullRequestState != "" {
+			pr += " (" + task.PullRequestState + ")"
+		}
+		c.Artifacts = append(c.Artifacts, pr)
 	}
 	if lease != nil {
 		c.Lease = &CardLease{

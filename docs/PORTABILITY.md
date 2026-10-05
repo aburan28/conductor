@@ -32,8 +32,13 @@ A checkpoint contains the conversation, which the control plane must never hold
   The HTTP gateway, which lives in the control plane, refuses it and points at the CLI.
 - A checkpoint leaves the machine only as a file the user moves themselves, or **sealed**
   (AES-256-GCM, key from a passphrase via PBKDF2-SHA256) in the user's own S3 bucket.
-  `conductor checkpoint push` refuses to upload plaintext; the manifest is uploaded in the
-  clear beside the ciphertext because it holds ids and hashes, not words.
+  `conductor checkpoint push` refuses to upload plaintext. Beside the ciphertext the bucket
+  holds only an index entry — id, creation time, harness, sealed size — for listing. The
+  manifest itself names the conversation (the harness's title), the note, the working
+  directory, and the machine, so it travels only inside the sealed bundle.
+- A restore treats a bundle as untrusted: manifest identifiers must be plain identifiers,
+  members are size-capped, and the working tree is written through `os.Root` without following
+  any symbolic link and never under `.git`.
 - The hook that captures after each turn reads only `session_id`, `cwd`, and
   `hook_event_name` from the hook payload and locates the transcript itself.
 

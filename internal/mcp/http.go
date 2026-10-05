@@ -1,10 +1,12 @@
 package mcp
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -30,6 +32,11 @@ type HTTPTransport struct {
 	endpoint string
 	idleTTL  time.Duration
 	now      func() time.Time
+	// maxPerPrincipal and maxTotal bound the session table. Each session holds a gateway in
+	// memory for up to idleTTL, so without a bound any member could initialize sessions in a
+	// loop until the server ran out of memory.
+	maxPerPrincipal int
+	maxTotal        int
 
 	mu       sync.Mutex
 	sessions map[string]*httpSession
@@ -43,6 +50,8 @@ type httpSession struct {
 	project     string
 	protocol    string
 	lastSeen    time.Time
+	// stopKeeping ends the session's lease keeper when the session is deleted or swept.
+	stopKeeping context.CancelFunc
 
 	// call serializes tool calls within one session, because the gateway mutates its fence
 	// as work is claimed and finished. Concurrent requests on one session are rare but must
@@ -54,12 +63,34 @@ type httpSession struct {
 // endpoint (this server's own public URL).
 func NewHTTPTransport(endpoint string) *HTTPTransport {
 	return &HTTPTransport{
-		endpoint: endpoint,
-		idleTTL:  time.Hour,
-		now:      time.Now,
-		sessions: map[string]*httpSession{},
+		endpoint:        endpoint,
+		idleTTL:         time.Hour,
+		now:             time.Now,
+		maxPerPrincipal: DefaultMaxSessionsPerPrincipal,
+		maxTotal:        DefaultMaxSessions,
+		sessions:        map[string]*httpSession{},
 	}
 }
+
+// Session table bounds. A principal rarely runs more than a handful of tools at once; the
+// per-principal cap is generous for that and evicts the principal's own idlest session when
+// reached, so a tool that leaks sessions only ever crowds out itself. The global cap is the
+// backstop against many principals doing the same, and refuses rather than evicts, because
+// evicting would let one principal end another's session.
+const (
+	DefaultMaxSessionsPerPrincipal = 32
+	DefaultMaxSessions             = 4096
+)
+
+// errTooManySessions is returned when the global session cap is reached.
+var errTooManySessions = errors.New("too many MCP sessions on this server; retry later")
+
+// leaseIdle is how long an HTTP session may go without a request before its claim is no
+// longer kept alive. Over HTTP there is no process whose life is the session's: the only
+// sign of life is the client calling. A model can think, or wait on a long test run, for a
+// good while without a tool call, so this is generous — but far shorter than the session's
+// own idle expiry, so a client that vanished stops holding territory within minutes.
+const leaseIdle = 15 * time.Minute
 
 // maxBody caps a request body. Tool arguments can carry a user's own text, so besides the
 // size limit the transport never logs a body.
@@ -128,7 +159,13 @@ func (t *HTTPTransport) post(w http.ResponseWriter, r *http.Request, principalID
 			return
 		}
 		project := t.resolveProject(r, token, pathProject)
-		sess = t.create(principalID, token, tokenHash, project)
+		var err error
+		sess, err = t.create(principalID, token, tokenHash, project)
+		if err != nil {
+			w.Header().Set("Retry-After", "60")
+			writeJSONRPCError(w, http.StatusServiceUnavailable, nullID, -32002, err.Error())
+			return
+		}
 	}
 
 	sess.call.Lock()
@@ -163,6 +200,9 @@ func (t *HTTPTransport) deleteSession(w http.ResponseWriter, r *http.Request, pr
 		return
 	}
 	t.mu.Lock()
+	if sess := t.sessions[sessionID]; sess != nil && sess.stopKeeping != nil {
+		sess.stopKeeping()
+	}
 	delete(t.sessions, sessionID)
 	t.mu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
@@ -199,7 +239,8 @@ func (t *HTTPTransport) resolveProject(r *http.Request, token, pathProject strin
 	return ""
 }
 
-func (t *HTTPTransport) create(principalID, token, tokenHash, project string) *httpSession {
+func (t *HTTPTransport) create(principalID, token, tokenHash, project string) (*httpSession, error) {
+	keepCtx, stop := context.WithCancel(context.Background())
 	sess := &httpSession{
 		id:          newSessionID(),
 		server:      newHTTP(t.endpoint, token, project, ""),
@@ -208,12 +249,44 @@ func (t *HTTPTransport) create(principalID, token, tokenHash, project string) *h
 		project:     project,
 		protocol:    ProtocolVersion,
 		lastSeen:    t.now(),
+		stopKeeping: stop,
 	}
 	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.sweepLocked()
+
+	// Per principal: make room by dropping this principal's least recently used session.
+	var oldest *httpSession
+	mine := 0
+	for _, other := range t.sessions {
+		if other.principalID != principalID {
+			continue
+		}
+		mine++
+		if oldest == nil || other.lastSeen.Before(oldest.lastSeen) {
+			oldest = other
+		}
+	}
+	if t.maxPerPrincipal > 0 && mine >= t.maxPerPrincipal && oldest != nil {
+		if oldest.stopKeeping != nil {
+			oldest.stopKeeping()
+		}
+		delete(t.sessions, oldest.id)
+	}
+	if t.maxTotal > 0 && len(t.sessions) >= t.maxTotal {
+		stop()
+		return nil, errTooManySessions
+	}
 	t.sessions[sess.id] = sess
-	t.mu.Unlock()
-	return sess
+	// The session's claim stays alive while its client keeps calling (see leaseIdle). The
+	// keeper starts only once the session is admitted, and takes t.mu itself, after create
+	// has released it.
+	go sess.server.keepLeaseAlive(keepCtx, func() bool {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		return t.now().Sub(sess.lastSeen) < leaseIdle
+	})
+	return sess, nil
 }
 
 func (t *HTTPTransport) lookup(id, principalID, tokenHash string) *httpSession {
@@ -243,6 +316,9 @@ func (t *HTTPTransport) sweepLocked() {
 	cutoff := t.now().Add(-t.idleTTL)
 	for id, sess := range t.sessions {
 		if sess.lastSeen.Before(cutoff) {
+			if sess.stopKeeping != nil {
+				sess.stopKeeping()
+			}
 			delete(t.sessions, id)
 		}
 	}

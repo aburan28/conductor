@@ -7,9 +7,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/adamburan/conductor/internal/backup"
+	"github.com/adamburan/conductor/internal/checkpoint"
 	"github.com/adamburan/conductor/internal/localstate"
 )
 
@@ -24,6 +26,22 @@ import (
 // working directory, and resume invocation. The harness argv is redacted before upload
 // (redactForBackup) because it can carry a first-turn prompt, and a transcript never leaves
 // the harness's own local store in the first place.
+
+// Sealing. The bucket is shared infrastructure that more principals can write than this
+// machine, and a restored record names a command to run and a directory to run it in. So
+// the manifest is sealed with the checkpoint passphrase (CONDUCTOR_CHECKPOINT_KEY, the same
+// AES-256-GCM format as a checkpoint) whenever one is configured: authenticated encryption
+// means a record that was not written by someone holding the passphrase does not open. And
+// whatever comes back is sanitized and marked as restored (sanitizeRestored), so `conductor
+// resume` relaunches only a known harness's own resume invocation, and asks first.
+
+// backupKey is the passphrase that seals backups: the checkpoint passphrase, reused.
+func backupKey() string { return os.Getenv("CONDUCTOR_CHECKPOINT_KEY") }
+
+// errUnsealedBackup is a plaintext manifest pulled while a passphrase is configured: either
+// an old backup, or one someone replaced to strip the seal.
+var errUnsealedBackup = errors.New("the backup in S3 is not sealed, but CONDUCTOR_CHECKPOINT_KEY is set; " +
+	"push again from the origin machine to seal it, or pull with --allow-unsealed if you trust the bucket")
 
 // backupManifest is what is written to S3: the machine's session records plus enough context
 // to know whose they are and when they were captured.
@@ -110,6 +128,11 @@ func pushRecords(ctx context.Context, store *backup.Store, at time.Time) (int, e
 	if err != nil {
 		return 0, err
 	}
+	if key := backupKey(); key != "" {
+		if data, err = checkpoint.Seal(data, key); err != nil {
+			return 0, err
+		}
+	}
 	if err := store.PutSessions(ctx, data, at); err != nil {
 		return 0, err
 	}
@@ -136,6 +159,7 @@ func redactForBackup(records []localstate.Record) []localstate.Record {
 func backupPull(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("backup pull", flag.ExitOnError)
 	force := fs.Bool("force", false, "overwrite local records that already exist")
+	allowUnsealed := fs.Bool("allow-unsealed", false, "accept a plaintext backup even though CONDUCTOR_CHECKPOINT_KEY is set")
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, `conductor backup pull — restore this machine's resume records from S3
@@ -144,6 +168,10 @@ Downloads the records this machine last pushed and writes them under ~/.conducto
 `+"`conductor resume`"+` can reopen the conversations here — the point being a fresh instance that
 replaced a terminated one. Existing local records are left alone unless --force. To restore
 another machine's sessions, set CONDUCTOR_MACHINE_ID to that machine's id before pulling.
+
+A backup pushed with CONDUCTOR_CHECKPOINT_KEY set is sealed and needs the same passphrase.
+Restored records relaunch only their harness's own resume invocation, and `+"`conductor resume`"+`
+asks before reopening one that came from another machine.
 
 Flags:
 `)
@@ -156,7 +184,7 @@ Flags:
 	if err != nil {
 		return err
 	}
-	restored, err := pullRecords(ctx, store, *force)
+	restored, err := pullRecordsWith(ctx, store, *force, *allowUnsealed)
 	if errors.Is(err, backup.ErrNotFound) {
 		fmt.Println("Nothing to restore: this machine has no records in S3 yet.")
 		return nil
@@ -174,16 +202,41 @@ Flags:
 // pullRecords downloads the manifest and writes each record locally. A record whose id already
 // exists locally is skipped unless force, so a pull cannot clobber a live session's record.
 func pullRecords(ctx context.Context, store *backup.Store, force bool) (int, error) {
+	return pullRecordsWith(ctx, store, force, false)
+}
+
+func pullRecordsWith(ctx context.Context, store *backup.Store, force, allowUnsealed bool) (int, error) {
 	data, err := store.GetSessions(ctx)
 	if err != nil {
 		return 0, err
+	}
+	key := backupKey()
+	switch {
+	case checkpoint.IsSealed(data):
+		if key == "" {
+			return 0, errors.New("the backup in S3 is sealed; set CONDUCTOR_CHECKPOINT_KEY to the passphrase it was pushed with")
+		}
+		if data, err = checkpoint.Unseal(data, key); err != nil {
+			return 0, fmt.Errorf("backup: %w", err)
+		}
+	case key != "" && !allowUnsealed:
+		return 0, errUnsealedBackup
 	}
 	var manifest backupManifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		return 0, fmt.Errorf("backup: manifest is corrupt: %w", err)
 	}
+	origin := manifest.Machine
+	if origin == "" {
+		origin = store.Machine()
+	}
 	restored := 0
 	for _, r := range manifest.Records {
+		r, ok := sanitizeRestored(r, origin)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "conductor: skipped backup record %q: not a session this build knows how to resume\n", r.ID)
+			continue
+		}
 		if !force {
 			if _, exists := localstate.Get(r.ID); exists {
 				continue
@@ -197,6 +250,48 @@ func pullRecords(ctx context.Context, store *backup.Store, force bool) (int, err
 		restored++
 	}
 	return restored, nil
+}
+
+// sanitizeRestored reduces a record pulled from S3 to what resume may act on. A backup never
+// legitimately carries an argv (redactForBackup strips it), and its process ids name
+// processes on another machine, so those are cleared. The resume invocation is recomputed
+// here from the harness name rather than taken from the bucket, the harness must be one this
+// build knows, and wrap flags must parse as wrap flags with plain values. What remains can
+// only reopen a known harness's own conversation — and resume still asks first, because the
+// working directory came from the bucket too.
+func sanitizeRestored(r localstate.Record, origin string) (localstate.Record, bool) {
+	resume := localstate.ResumeInvocation(r.Harness)
+	if len(resume) == 0 {
+		return r, false
+	}
+	if len(r.WrapFlags) > 0 {
+		if _, rest := parseWrapFlags(r.WrapFlags); len(rest) > 0 {
+			return r, false
+		}
+		for _, f := range r.WrapFlags {
+			if !plainArg(f) {
+				return r, false
+			}
+		}
+	}
+	r.Command, r.Args = "", nil
+	r.ResumeArgs = resume
+	r.PID, r.PGID, r.WrapPID, r.TTY = 0, 0, 0, ""
+	r.RestoredFrom = origin
+	return r, true
+}
+
+// plainArg reports an argument made only of characters that need no quoting anywhere.
+func plainArg(s string) bool {
+	for _, c := range s {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.ContainsRune("-_.=:/@+", c):
+		default:
+			return false
+		}
+	}
+	return s != ""
 }
 
 func backupStatus(ctx context.Context, args []string) error {

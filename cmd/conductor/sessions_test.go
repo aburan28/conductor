@@ -411,3 +411,22 @@ func TestDefaultSessionsFile(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
+
+// A session export names machines and worktree paths; it is written owner-only, and an
+// existing looser file is tightened rather than kept.
+func TestSessionExportIsOwnerOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePrivateFile(path, []byte("{}\n")); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("export mode = %v, want 0600", info.Mode().Perm())
+	}
+}

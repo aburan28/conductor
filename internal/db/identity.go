@@ -2,9 +2,13 @@ package db
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"fmt"
+	"log/slog"
+	"os"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -52,8 +56,19 @@ func (s *Store) GetOrganizationBySlug(ctx context.Context, slug string) (domain.
 	return org, noRows(err)
 }
 
+// DedupeSecretEnv names an optional server-held secret mixed into every tenant dedupe key.
+const DedupeSecretEnv = "CONDUCTOR_DEDUPE_SECRET"
+
 // DedupeKeyForProject fetches the tenant key that fingerprints in a project are computed
 // under.
+//
+// The per-organization key lives in the database, so anyone holding a dump or a backup holds
+// it too, and can confirm a guess about a private intent by recomputing its fingerprint. When
+// CONDUCTOR_DEDUPE_SECRET is set, the key actually used is HMAC-SHA256(secret, stored key):
+// the database alone no longer suffices. The secret must be identical on every process that
+// opens this database (conductord, and a `conductor worker --dsn`), and setting or changing
+// it changes every fingerprint computed afterwards, so open work filed before the change no
+// longer deduplicates against work filed after it (DESIGN.md §25.6).
 func (s *Store) DedupeKeyForProject(ctx context.Context, projectID domain.ID) ([]byte, error) {
 	var key []byte
 	err := s.pool.QueryRow(ctx, `
@@ -62,7 +77,21 @@ func (s *Store) DedupeKeyForProject(ctx context.Context, projectID domain.ID) ([
 		  JOIN projects p ON p.organization_id = o.id
 		 WHERE p.id = $1::uuid`, projectID,
 	).Scan(&key)
-	return key, noRows(err)
+	if err != nil {
+		return nil, noRows(err)
+	}
+	return dedupeKeyWithSecret(key, os.Getenv(DedupeSecretEnv)), nil
+}
+
+// dedupeKeyWithSecret derives the effective dedupe key. With no secret it is the stored key
+// unchanged, so existing deployments keep their fingerprints.
+func dedupeKeyWithSecret(stored []byte, secret string) []byte {
+	if secret == "" {
+		return stored
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(stored)
+	return mac.Sum(nil)
 }
 
 // ---------------------------------------------------------------------------
@@ -134,13 +163,52 @@ func (s *Store) PrincipalsByID(ctx context.Context, ids []domain.ID) (map[domain
 // Memberships
 // ---------------------------------------------------------------------------
 
+// AddMember creates a membership, and fails with ErrDuplicate when the principal is already a
+// member. It never changes an existing member's role: an invite that silently rewrote one was
+// a way to demote an administrator, or to promote an account the inviter controls, through an
+// endpoint that looked like it only added people. Role changes go through SetMemberRole.
 func (s *Store) AddMember(ctx context.Context, projectID, principalID domain.ID, role domain.Role) error {
+	tag, err := s.pool.Exec(ctx, `
+		INSERT INTO project_memberships (project_id, principal_id, role)
+		VALUES ($1::uuid, $2::uuid, $3)
+		ON CONFLICT (project_id, principal_id) DO NOTHING`,
+		projectID, principalID, role)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: already a member of this project", domain.ErrDuplicate)
+	}
+	return nil
+}
+
+// UpsertMember creates a membership or overwrites its role. Only `conductord bootstrap` uses
+// it: that command runs with database credentials, so it is already the most privileged
+// actor in the system, and re-running it must converge rather than fail.
+func (s *Store) UpsertMember(ctx context.Context, projectID, principalID domain.ID, role domain.Role) error {
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO project_memberships (project_id, principal_id, role)
 		VALUES ($1::uuid, $2::uuid, $3)
 		ON CONFLICT (project_id, principal_id) DO UPDATE SET role = EXCLUDED.role`,
 		projectID, principalID, role)
 	return err
+}
+
+// SetMemberRole changes an existing member's role, or returns ErrNotFound. The privilege
+// rules (no grant above the caller, never strand a project without an administrator) are the
+// API's to enforce; this only refuses to create a membership as a side effect.
+func (s *Store) SetMemberRole(ctx context.Context, projectID, principalID domain.ID, role domain.Role) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE project_memberships SET role = $3
+		 WHERE project_id = $1::uuid AND principal_id = $2::uuid`,
+		projectID, principalID, role)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.ErrNotFound
+	}
+	return nil
 }
 
 // RoleIn returns the caller's role in a project, or ErrNotFound when they are not a member.
@@ -192,26 +260,76 @@ func hashToken(token string) []byte {
 	return sum[:]
 }
 
-// CreateToken mints a bearer token for a principal and returns the plaintext exactly once.
-func (s *Store) CreateToken(ctx context.Context, principalID domain.ID, name string, ttl time.Duration) (string, error) {
+// newToken draws a fresh bearer token: 256 bits of entropy behind a recognizable prefix.
+func newToken() (string, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return "", err
 	}
-	token := TokenPrefix + base64.RawURLEncoding.EncodeToString(raw)
+	return TokenPrefix + base64.RawURLEncoding.EncodeToString(raw), nil
+}
 
+// CreateToken mints a bearer token for a principal and returns the plaintext exactly once.
+func (s *Store) CreateToken(ctx context.Context, principalID domain.ID, name string, ttl time.Duration) (string, error) {
+	return s.CreateScopedToken(ctx, principalID, "", name, ttl)
+}
+
+// CreateScopedToken mints a token confined to one project; an empty projectID mints an
+// ordinary principal-wide token. A scoped token is what a runner hands the agent it launches:
+// it is refused by every other project the principal belongs to (coord.Authorize) and cannot
+// mint further tokens, so leaking it from a worktree exposes one project for one attempt.
+func (s *Store) CreateScopedToken(ctx context.Context, principalID, projectID domain.ID, name string, ttl time.Duration) (string, error) {
+	token, err := newToken()
+	if err != nil {
+		return "", err
+	}
 	var expires any
 	if ttl > 0 {
 		expires = s.Now().Add(ttl)
 	}
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO api_tokens (principal_id, name, token_hash, expires_at)
-		VALUES ($1::uuid, $2, $3, $4)`,
-		principalID, name, hashToken(token), expires)
+	_, err = s.pool.Exec(ctx, `
+		INSERT INTO api_tokens (principal_id, name, token_hash, expires_at, project_id)
+		VALUES ($1::uuid, $2, $3, $4, $5::uuid)`,
+		principalID, name, hashToken(token), expires, nullable(projectID))
 	if err != nil {
 		return "", err
 	}
 	return token, nil
+}
+
+// ReplaceToken revokes every live token of the principal that carries this name and mints a
+// new one under it, in one transaction. `conductord bootstrap` uses it so that re-running
+// bootstrap — the documented way to recover a lost login — leaves exactly one bootstrap
+// credential alive instead of accumulating every one it ever printed.
+func (s *Store) ReplaceToken(ctx context.Context, principalID domain.ID, name string, ttl time.Duration) (string, int64, error) {
+	token, err := newToken()
+	if err != nil {
+		return "", 0, err
+	}
+	var expires any
+	if ttl > 0 {
+		expires = s.Now().Add(ttl)
+	}
+	var revoked int64
+	err = s.Tx(ctx, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			UPDATE api_tokens SET revoked_at = now()
+			 WHERE principal_id = $1::uuid AND name = $2 AND revoked_at IS NULL`,
+			principalID, name)
+		if err != nil {
+			return err
+		}
+		revoked = tag.RowsAffected()
+		_, err = tx.Exec(ctx, `
+			INSERT INTO api_tokens (principal_id, name, token_hash, expires_at)
+			VALUES ($1::uuid, $2, $3, $4)`,
+			principalID, name, hashToken(token), expires)
+		return err
+	})
+	if err != nil {
+		return "", 0, err
+	}
+	return token, revoked, nil
 }
 
 // AuthenticateToken resolves a bearer token to its principal.
@@ -227,24 +345,39 @@ func (s *Store) AuthenticateToken(ctx context.Context, token string) (domain.Pri
 // AuthenticateTokenNamed is AuthenticateToken that also returns the token's name, which is
 // how the API tells a token minted by local sign-in ("local:…") from one minted on purpose.
 func (s *Store) AuthenticateTokenNamed(ctx context.Context, token string) (domain.Principal, string, error) {
+	p, info, err := s.AuthenticateTokenInfo(ctx, token)
+	return p, info.Name, err
+}
+
+// TokenAuth is what authentication learned about the credential itself, beyond whose it is.
+type TokenAuth struct {
+	Name string
+	// ProjectID is set when the token is confined to one project.
+	ProjectID domain.ID
+	ExpiresAt *time.Time
+}
+
+// AuthenticateTokenInfo resolves a bearer token to its principal and describes the token.
+func (s *Store) AuthenticateTokenInfo(ctx context.Context, token string) (domain.Principal, TokenAuth, error) {
 	var p domain.Principal
-	var name string
+	var info TokenAuth
 	err := s.pool.QueryRow(ctx, `
 		UPDATE api_tokens
 		   SET last_used_at = now()
 		 WHERE token_hash = $1
 		   AND revoked_at IS NULL
 		   AND (expires_at IS NULL OR expires_at > now())
-		RETURNING principal_id::text, name`, hashToken(token),
-	).Scan(&p.ID, &name)
+		RETURNING principal_id::text, name, COALESCE(project_id::text, ''), expires_at`,
+		hashToken(token),
+	).Scan(&p.ID, &info.Name, &info.ProjectID, &info.ExpiresAt)
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			return domain.Principal{}, "", domain.ErrUnauthenticated
+			return domain.Principal{}, TokenAuth{}, domain.ErrUnauthenticated
 		}
-		return domain.Principal{}, "", err
+		return domain.Principal{}, TokenAuth{}, err
 	}
 	p, err = s.GetPrincipal(ctx, p.ID)
-	return p, name, err
+	return p, info, err
 }
 
 func (s *Store) RevokeToken(ctx context.Context, principalID domain.ID, name string) error {
@@ -285,6 +418,8 @@ func (s *Store) ResetTokens(ctx context.Context, principalID domain.ID, name str
 	}
 	token := TokenPrefix + base64.RawURLEncoding.EncodeToString(raw)
 	hash := hashToken(token)
+	// The new token is principal-wide; the scoped tokens a runner minted for its attempts are
+	// revoked along with everything else.
 
 	var expires any
 	if ttl > 0 {
@@ -317,7 +452,9 @@ func (s *Store) ResetTokens(ctx context.Context, principalID domain.ID, name str
 // TokenInfo describes a token without disclosing it. There is no field here that could carry
 // the secret, because the secret is not stored — only its hash.
 type TokenInfo struct {
-	Name       string     `json:"name"`
+	Name string `json:"name"`
+	// ProjectID is set for a token confined to one project.
+	ProjectID  domain.ID  `json:"project_id,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
@@ -327,7 +464,7 @@ type TokenInfo struct {
 // ListTokens returns a principal's tokens, newest first.
 func (s *Store) ListTokens(ctx context.Context, principalID domain.ID) ([]TokenInfo, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT name, created_at, last_used_at, expires_at, revoked_at
+		SELECT name, COALESCE(project_id::text, ''), created_at, last_used_at, expires_at, revoked_at
 		  FROM api_tokens WHERE principal_id = $1::uuid
 		 ORDER BY created_at DESC`, principalID)
 	if err != nil {
@@ -337,7 +474,7 @@ func (s *Store) ListTokens(ctx context.Context, principalID domain.ID) ([]TokenI
 	var out []TokenInfo
 	for rows.Next() {
 		var t TokenInfo
-		if err := rows.Scan(&t.Name, &t.CreatedAt, &t.LastUsedAt,
+		if err := rows.Scan(&t.Name, &t.ProjectID, &t.CreatedAt, &t.LastUsedAt,
 			&t.ExpiresAt, &t.RevokedAt); err != nil {
 			return nil, err
 		}
@@ -403,13 +540,19 @@ func (s *Store) Audit(ctx context.Context, orgID, projectID, actor domain.ID, ac
 	}
 	body, err := marshalJSON(payload)
 	if err != nil {
+		slog.Error("audit record not written", "action", action, "target_type", targetType,
+			"target_id", targetID, "error", err)
 		return
 	}
-	// Auditing must never fail the operation it is recording; a lost audit line is logged
-	// upstream by the caller's error handling, not by breaking the request.
-	_, _ = s.pool.Exec(ctx, `
+	// Auditing must never fail the operation it is recording, but a lost audit line must not
+	// be silent either: an audit trail with unexplained gaps is worse than useless, because it
+	// is trusted. The failure is logged with identifiers only, like the record itself.
+	if _, err := s.pool.Exec(context.WithoutCancel(ctx), `
 		INSERT INTO audit_log (organization_id, project_id, actor_principal,
 		                       action, target_type, target_id, detail)
 		VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7)`,
-		orgID, nullable(projectID), nullable(actor), action, targetType, targetID, body)
+		orgID, nullable(projectID), nullable(actor), action, targetType, targetID, body); err != nil {
+		slog.Error("audit record not written", "action", action, "target_type", targetType,
+			"target_id", targetID, "error", err)
+	}
 }
