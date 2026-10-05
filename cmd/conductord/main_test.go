@@ -1,0 +1,269 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/adamburan/conductor/internal/db"
+	"github.com/adamburan/conductor/internal/scheduler"
+)
+
+// clearEnv blanks every variable serve reads, so the developer's own environment cannot
+// change what a test parses.
+func clearEnv(t *testing.T) {
+	for _, k := range []string{"CONDUCTOR_ADDR", "DATABASE_URL", "CONDUCTOR_TLS_CERT", "CONDUCTOR_TLS_KEY",
+		"CONDUCTOR_PUBLIC_URL", "CONDUCTOR_PEERS", "CONDUCTOR_PEER_CA", "CONDUCTOR_PEER_CERT", "CONDUCTOR_PEER_KEY",
+		"CONDUCTOR_PEER_DISCOVER_DNS", "CONDUCTOR_PEER_DNS_SERVER", "CONDUCTOR_SECURITY_MODE",
+		"CONDUCTOR_GITHUB_API", "CONDUCTOR_GITHUB_WEB", "CONDUCTOR_RETENTION_DAYS",
+		"CONDUCTOR_AUDIT_RETENTION_DAYS", "CONDUCTOR_METRICS_TOKEN"} {
+		t.Setenv(k, "")
+	}
+}
+
+func TestServeConfigDefaults(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("DATABASE_URL", "postgres://localhost/x")
+	c, err := parseServeConfig(nil, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.addr != "127.0.0.1:8080" || c.dsn != "postgres://localhost/x" || c.tick != 2*time.Second ||
+		c.tickTimeout != 30*time.Second || c.shutdownTimeout != 25*time.Second {
+		t.Errorf("defaults = %+v", c)
+	}
+	if c.database.StatementTimeout != db.DefaultStatementTimeout || c.database.LockTimeout != db.DefaultLockTimeout {
+		t.Errorf("database bounds = %+v", c.database)
+	}
+	if c.retention != scheduler.DefaultRetention() {
+		t.Errorf("retention = %+v, want the scheduler's defaults %+v", c.retention, scheduler.DefaultRetention())
+	}
+	if c.ops.BodyTimeout != 30*time.Second || c.ops.MaxStreams != 1000 || c.ops.MaxStreamsPerPrincipal != 16 || c.ops.MetricsToken != "" {
+		t.Errorf("ops = %+v", c.ops)
+	}
+}
+
+func TestServeConfigOperationsFlags(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("CONDUCTOR_RETENTION_DAYS", "14")
+	t.Setenv("CONDUCTOR_METRICS_TOKEN", "scrape")
+	c, err := parseServeConfigQuiet([]string{"--dsn", "postgres://x", "--audit-retention-days", "0",
+		"--db-statement-timeout", "5s", "--db-lock-timeout", "-1s", "--shutdown-timeout", "40s",
+		"--tick-timeout", "7s", "--outage-after", "2m", "--max-streams-per-principal", "3", "--idempotency-ttl", "2h"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const day = 24 * time.Hour
+	if c.retention.Events != 14*day || c.retention.OutboxDelivered != 7*day || c.retention.Audit != 0 || c.retention.Idempotency != 2*time.Hour {
+		t.Errorf("retention = %+v", c.retention)
+	}
+	if c.database.StatementTimeout != 5*time.Second || c.database.LockTimeout != -time.Second {
+		t.Errorf("database = %+v", c.database)
+	}
+	if c.shutdownTimeout != 40*time.Second || c.tickTimeout != 7*time.Second || c.outageAfter != 2*time.Minute {
+		t.Errorf("timeouts = %+v", c)
+	}
+	if c.ops.MetricsToken != "scrape" || c.ops.MaxStreamsPerPrincipal != 3 {
+		t.Errorf("ops = %+v", c.ops)
+	}
+
+	// Keeping events forever keeps their delivered outbox rows too.
+	c, err = parseServeConfigQuiet([]string{"--dsn", "x", "--retention-days", "0"})
+	if err != nil || c.retention.Events != 0 || c.retention.OutboxDelivered != 0 {
+		t.Errorf("--retention-days 0 = %+v %v", c, err)
+	}
+	// A window shorter than its delivered-outbox default shortens that too.
+	c, err = parseServeConfigQuiet([]string{"--dsn", "x", "--retention-days", "3"})
+	if err != nil || c.retention.OutboxDelivered != 3*day {
+		t.Errorf("--retention-days 3 = %+v %v", c, err)
+	}
+}
+
+func TestServeConfigRejects(t *testing.T) {
+	clearEnv(t)
+	for name, args := range map[string][]string{
+		"no database":          {},
+		"half a TLS pair":      {"--dsn", "x", "--tls-cert", "c.pem"},
+		"plaintext on a LAN":   {"--dsn", "x", "--addr", "0.0.0.0:8080"},
+		"bad security mode":    {"--dsn", "x", "--security-mode", "lax"},
+		"negative retention":   {"--dsn", "x", "--retention-days", "-1"},
+		"short usage window":   {"--dsn", "x", "--usage-retention-days", "10"},
+		"zero shutdown":        {"--dsn", "x", "--shutdown-timeout", "0s"},
+		"peering without a CA": {"--dsn", "x", "--peer", "a=https://a:1"},
+		"unknown flag":         {"--dsn", "x", "--no-such-flag"},
+	} {
+		if _, err := parseServeConfigQuiet(args); err == nil {
+			t.Errorf("%s: accepted %v", name, args)
+		}
+	}
+	if _, err := parseServeConfigQuiet([]string{"-h"}); !errors.Is(err, flag.ErrHelp) {
+		t.Errorf("-h = %v, want flag.ErrHelp (main exits 0 on it)", err)
+	}
+	// Each refusal above has an explicit way through.
+	for name, args := range map[string][]string{
+		"insecure LAN":   {"--dsn", "x", "--addr", "0.0.0.0:8080", "--insecure"},
+		"behind a proxy": {"--dsn", "x", "--addr", "0.0.0.0:8080", "--behind-proxy"},
+		"keep usage":     {"--dsn", "x", "--usage-retention-days", "0"},
+	} {
+		if _, err := parseServeConfigQuiet(args); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+// parseServeConfigQuiet keeps flag's usage text out of the test output.
+func parseServeConfigQuiet(args []string) (*serveConfig, error) {
+	return parseServeConfig(args, io.Discard)
+}
+
+// Shutdown waits for in-flight requests and for background work before runServer returns
+// and the caller closes the store.
+func TestRunServerShutdownOrder(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var (
+		mu    sync.Mutex
+		order []string
+	)
+	note := func(s string) {
+		mu.Lock()
+		order = append(order, s)
+		mu.Unlock()
+	}
+	inHandler := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(inHandler)
+		<-releaseHandler
+		note("request finished")
+		_, _ = io.WriteString(w, "done")
+	})}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var background sync.WaitGroup
+	background.Add(1)
+	go func() { // the scheduler: stops when ctx ends, then takes a moment to unwind
+		defer background.Done()
+		<-ctx.Done()
+		time.Sleep(50 * time.Millisecond)
+		note("background stopped")
+	}()
+
+	returned := make(chan error, 1)
+	go func() {
+		returned <- runServer(ctx, cancel, srv, func() error { return srv.Serve(ln) }, &background, 10*time.Second, logger)
+		note("runServer returned")
+	}()
+
+	var body atomic.Value
+	clientDone := make(chan struct{})
+	go func() {
+		defer close(clientDone)
+		resp, err := http.Get("http://" + ln.Addr().String())
+		if err != nil {
+			body.Store("error: " + err.Error())
+			return
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		body.Store(string(b))
+	}()
+	<-inHandler
+	cancel() // SIGTERM
+
+	select {
+	case <-returned:
+		t.Fatal("runServer returned while a request was still in flight")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(releaseHandler)
+	select {
+	case err := <-returned:
+		if err != nil {
+			t.Errorf("runServer = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runServer did not return after the request finished")
+	}
+	<-clientDone
+	if got, _ := body.Load().(string); got != "done" {
+		t.Errorf("the in-flight request got %q; it was cut off", got)
+	}
+	time.Sleep(10 * time.Millisecond) // let the last note land
+	mu.Lock()
+	defer mu.Unlock()
+	// The scheduler stops as soon as shutdown begins, concurrently with the request draining;
+	// what matters is that both happen before runServer returns and the store is closed.
+	if len(order) != 3 || order[2] != "runServer returned" {
+		t.Errorf("shutdown order = %v; runServer must return last", order)
+	}
+}
+
+// A request that never finishes holds shutdown only until the timeout.
+func TestRunServerShutdownIsBounded(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inHandler := make(chan struct{})
+	stuck := make(chan struct{})
+	defer close(stuck)
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(inHandler)
+		<-stuck
+	})}
+	ctx, cancel := context.WithCancel(context.Background())
+	var background sync.WaitGroup
+	returned := make(chan struct{})
+	go func() {
+		_ = runServer(ctx, cancel, srv, func() error { return srv.Serve(ln) }, &background, 300*time.Millisecond, logger)
+		close(returned)
+	}()
+	go func() { _, _ = http.Get("http://" + ln.Addr().String()) }()
+	<-inHandler
+	start := time.Now()
+	cancel()
+	select {
+	case <-returned:
+		if elapsed := time.Since(start); elapsed < 250*time.Millisecond {
+			t.Errorf("returned after %s, before the timeout, with a request in flight", elapsed)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown was not bounded by its timeout")
+	}
+}
+
+// A listener that cannot start ends the process's background work rather than leaving it
+// running with no server.
+func TestRunServerListenFailure(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var background sync.WaitGroup
+	background.Add(1)
+	go func() {
+		defer background.Done()
+		<-ctx.Done()
+	}()
+	srv := &http.Server{}
+	err := runServer(ctx, cancel, srv, func() error { return errors.New("address already in use") }, &background, time.Second, logger)
+	if err == nil || !strings.Contains(err.Error(), "address already in use") {
+		t.Errorf("runServer = %v", err)
+	}
+	if ctx.Err() == nil {
+		t.Error("background work was not cancelled after the listener failed")
+	}
+}
