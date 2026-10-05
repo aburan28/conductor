@@ -29,7 +29,8 @@ func clearEnv(t *testing.T) {
 		"CONDUCTOR_PEER_DISCOVER_DNS", "CONDUCTOR_PEER_DNS_SERVER", "CONDUCTOR_SECURITY_MODE",
 		"CONDUCTOR_GITHUB_API", "CONDUCTOR_GITHUB_WEB", "CONDUCTOR_RETENTION_DAYS",
 		"CONDUCTOR_AUDIT_RETENTION_DAYS", "CONDUCTOR_METRICS_TOKEN", "CONDUCTOR_SECRET_KEY",
-		"CONDUCTOR_SECRET_KEY_FILE", "CONDUCTOR_STATE_DIR"} {
+		"CONDUCTOR_SECRET_KEY_FILE", "CONDUCTOR_STATE_DIR", "CONDUCTOR_SSO_PROVIDERS",
+		"CONDUCTOR_SSO_AUTO_PROVISION", "CONDUCTOR_SSO_DEFAULT_PROJECT"} {
 		t.Setenv(k, "")
 	}
 }
@@ -138,6 +139,49 @@ func TestServeConfigRejects(t *testing.T) {
 	} {
 		if _, err := parseServeConfigQuiet(args); err != nil {
 			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+func TestServeConfigSSO(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("CONDUCTOR_SSO_GOOGLE_CLIENT_SECRET", "g-secret")
+	t.Setenv("CONDUCTOR_SSO_GITHUB_CLIENT_SECRET", "gh-secret")
+	google := "name=google,issuer=https://accounts.google.com,client-id=g,domain=example.com"
+	github := "name=github,client-id=gh,org=acme"
+
+	c, err := parseServeConfigQuiet([]string{"--dsn", "x", "--public-url", "https://conductor.example.com",
+		"--sso-provider", google, "--sso-provider", github,
+		"--sso-auto-provision", "contributor", "--sso-default-project", "acme/web", "--sso-token-ttl", "8h"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.sso.Providers) != 2 || c.sso.AutoProvisionRole != "contributor" || c.sso.TokenTTL != 8*time.Hour ||
+		c.sso.PublicURL != "https://conductor.example.com" {
+		t.Fatalf("sso = %+v", c.sso)
+	}
+
+	// The environment carries several providers separated by semicolons.
+	t.Setenv("CONDUCTOR_SSO_PROVIDERS", google+";"+github)
+	if c, err = parseServeConfigQuiet([]string{"--dsn", "x"}); err != nil || len(c.sso.Providers) != 2 ||
+		c.sso.PublicURL != "http://127.0.0.1:8080" {
+		t.Fatalf("from the environment: %v %+v", err, c)
+	}
+	t.Setenv("CONDUCTOR_SSO_PROVIDERS", "")
+
+	for name, args := range map[string][]string{
+		"secret on the command line": {"--sso-provider", google + ",client-secret=leaked"},
+		"auto-provision above contributor": {"--public-url", "https://c.example.com", "--sso-provider", google,
+			"--sso-auto-provision", "maintainer", "--sso-default-project", "a/b"},
+		"auto-provision without a project": {"--public-url", "https://c.example.com", "--sso-provider", google,
+			"--sso-auto-provision", "observer"},
+		"auto-provision with an open provider": {"--public-url", "https://c.example.com",
+			"--sso-provider", "name=google,issuer=https://accounts.google.com,client-id=g",
+			"--sso-auto-provision", "observer", "--sso-default-project", "a/b"},
+		"plaintext public URL": {"--public-url", "http://conductor.example.com", "--sso-provider", google},
+	} {
+		if _, err := parseServeConfigQuiet(append([]string{"--dsn", "x"}, args...)); err == nil {
+			t.Errorf("%s: accepted", name)
 		}
 	}
 }

@@ -136,8 +136,20 @@ func cmdLogin(ctx context.Context, args []string) error {
 	endpoint := fs.String("endpoint", "", "control plane URL")
 	token := fs.String("token", "", "bearer token (not needed on the machine running conductord)")
 	project := fs.String("project", "", "default project id or slug")
-	if err := fs.Parse(args); err != nil {
+	var single ssoFlag
+	fs.Var(&single, "sso", "sign in through the control plane's single sign-on provider in your browser (--sso, --sso google, or --sso=google)")
+	positional, err := parseFlags(fs, args)
+	if err != nil {
 		return err
+	}
+	switch {
+	case len(positional) == 1 && single.set && single.provider == "":
+		single.provider = positional[0]
+	case len(positional) > 0:
+		return fmt.Errorf("unexpected argument %q (usage: conductor login [--endpoint URL] [--token TOKEN | --sso [PROVIDER]] [--project SLUG])", positional[0])
+	}
+	if single.set && *token != "" {
+		return errors.New("--sso and --token are two ways to sign in; pass one")
 	}
 
 	creds := client.LoadCredentials()
@@ -149,6 +161,16 @@ func cmdLogin(ctx context.Context, args []string) error {
 	}
 	if *project != "" {
 		creds.Project = *project
+	}
+	if single.set {
+		// The browser signs in at the provider; conductord issues an ordinary token for the
+		// account it maps to, saved exactly like a pasted one.
+		res, err := ssoSignIn(ctx, creds.Endpoint, "", single.provider, false)
+		if err != nil {
+			return err
+		}
+		creds.Token = res.Token
+		return finishLogin(ctx, creds)
 	}
 	if *token == "" && isLoopbackEndpoint(creds.Endpoint) {
 		// Logging in on the machine that runs the control plane needs no token at all.
@@ -171,6 +193,11 @@ func cmdLogin(ctx context.Context, args []string) error {
 		return errors.New("no token: pass --token (get one from `conductord bootstrap` or a teammate's `conductor invite`)")
 	}
 
+	return finishLogin(ctx, creds)
+}
+
+// finishLogin verifies and saves a login, and says where it went.
+func finishLogin(ctx context.Context, creds client.Credentials) error {
 	saved, projects, err := connectAndSave(ctx, creds)
 	if err != nil {
 		return fmt.Errorf("verifying token: %w", err)

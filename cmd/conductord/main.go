@@ -41,6 +41,7 @@ import (
 	"github.com/adamburan/conductor/internal/peer"
 	"github.com/adamburan/conductor/internal/scheduler"
 	"github.com/adamburan/conductor/internal/secretbox"
+	"github.com/adamburan/conductor/internal/sso"
 	"github.com/adamburan/conductor/internal/version"
 	"github.com/adamburan/conductor/internal/web"
 )
@@ -96,6 +97,8 @@ type serveConfig struct {
 	secretKeyFile     string
 	secretKeyEnv      string
 	verbose           bool
+	// sso is single sign-on, with its providers built from --sso-provider.
+	sso api.SSOOptions
 }
 
 // usageError is a command line flag could not parse. flag has already reported it, with
@@ -194,6 +197,19 @@ func parseServeConfig(args []string, output io.Writer) (*serveConfig, error) {
 			"Every replica must use the same key. Default: secret.key in CONDUCTOR_STATE_DIR or ~/.conductor. "+
 			secretbox.EnvKey+" (the base64 key itself) takes precedence")
 	fs.BoolVar(&c.verbose, "v", false, "verbose logging")
+
+	// Single sign-on.
+	ssoSpecs := &stringFlags{}
+	fs.Var(ssoSpecs, "sso-provider",
+		"single sign-on provider as comma-separated key=value pairs (repeatable; CONDUCTOR_SSO_PROVIDERS takes several separated by ';'), e.g. "+
+			"name=google,issuer=https://accounts.google.com,client-id=ID,domain=example.com or name=github,client-id=ID,org=acme. "+
+			"The client secret is read from CONDUCTOR_SSO_<NAME>_CLIENT_SECRET, or client-secret-file=PATH; never from the command line")
+	fs.DurationVar(&c.sso.TokenTTL, "sso-token-ttl", 12*time.Hour, "lifetime of the token a single sign-on issues (at most 90 days)")
+	ssoAutoProvision := fs.String("sso-auto-provision", envOr("CONDUCTOR_SSO_AUTO_PROVISION", ""),
+		"create an account, with this role (contributor, reviewer or observer), for a first sign-in that matches no registered email. "+
+			"Off by default: an administrator registers each person first (conductor member add HANDLE --email ADDRESS)")
+	fs.StringVar(&c.sso.DefaultProject, "sso-default-project", envOr("CONDUCTOR_SSO_DEFAULT_PROJECT", ""),
+		"ORG/PROJECT (slugs) that --sso-auto-provision adds new accounts to")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), `conductord — Conductor control plane
 
@@ -292,7 +308,50 @@ Binding 127.0.0.1 needs none of these.`, c.addr)
 	if c.shutdownTimeout <= 0 {
 		return nil, errors.New("--shutdown-timeout must be positive")
 	}
+	if err := c.parseSSO(*ssoSpecs, os.Getenv("CONDUCTOR_SSO_PROVIDERS"), *ssoAutoProvision); err != nil {
+		return nil, err
+	}
 	return c, nil
+}
+
+// parseSSO builds the single sign-on providers and checks the whole configuration, including
+// the public URL every redirect URI is built from, before anything starts.
+func (c *serveConfig) parseSSO(flags []string, env, autoProvision string) error {
+	specs := flags
+	if len(specs) == 0 {
+		specs = strings.FieldsFunc(env, func(r rune) bool { return r == ';' || r == '\n' })
+	}
+	configs, err := sso.ParseSpecs(specs, os.Getenv)
+	if err != nil {
+		return err
+	}
+	for _, cfg := range configs {
+		p, err := sso.New(cfg, sso.Options{})
+		if err != nil {
+			return err
+		}
+		c.sso.Providers = append(c.sso.Providers, p)
+	}
+	c.sso.AutoProvisionRole = domain.Role(autoProvision)
+	c.sso.PublicURL = c.publicURL
+	if c.sso.PublicURL == "" {
+		scheme := "http"
+		if c.tlsEnabled {
+			scheme = "https"
+		}
+		c.sso.PublicURL = scheme + "://" + displayHost(c.addr)
+	}
+	return api.ValidateSSOOptions(c.sso)
+}
+
+// stringFlags is a repeatable string flag.
+type stringFlags []string
+
+func (f *stringFlags) String() string { return strings.Join(*f, " ") }
+
+func (f *stringFlags) Set(v string) error {
+	*f = append(*f, v)
+	return nil
 }
 
 func serve(args []string) error {
@@ -442,6 +501,7 @@ func serve(args []string) error {
 		LocalLogin:   api.LocalLoginOptions{DefaultMode: defaultMode, ForcedMode: cfg.securityMode},
 		GitHub:       gh,
 		Ops:          ops,
+		SSO:          cfg.sso,
 	})
 	if ghErr == nil {
 		ghErr = gh.Refresh(life)
@@ -452,6 +512,11 @@ func serve(args []string) error {
 		logger.Info("github app ready", "mode", map[bool]string{true: "webhook", false: "polling"}[webhookURL != ""])
 	}
 	goBackground("github poller", gh.Run)
+	for _, p := range cfg.sso.Providers {
+		// The one URL that must be registered with the provider, exactly.
+		logger.Info("single sign-on provider", "name", p.Config().Name, "type", p.Config().Kind,
+			"redirect_uri", strings.TrimRight(cfg.sso.PublicURL, "/")+"/v1/sso/"+p.Config().Name+"/callback")
+	}
 	if settings, err := store.GetServerSettings(life); err == nil {
 		mode := firstNonEmpty(cfg.securityMode, settings.SecurityMode, defaultMode)
 		logger.Info("security mode", "mode", mode, "local_owner_set", settings.LocalOwnerID != "")
