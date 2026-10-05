@@ -453,10 +453,12 @@ neither take the app over nor read a repository through it. In a check run, a pr
 appears as "a private task", and a public repository gets no task references or owners at
 all. A pull request's own task is excluded only for a branch in the repository itself, never
 a fork's. The app asks for read access to contents and pull requests and write access to checks only. It
-cannot push, merge, or change settings. Its credentials stay on the machine running
-`conductord` (`~/.conductor/github-app.json`, mode 0600), or come from
-`CONDUCTOR_GITHUB_APP_ID` / `CONDUCTOR_GITHUB_APP_PRIVATE_KEY(_FILE)` /
-`CONDUCTOR_GITHUB_WEBHOOK_SECRET`. A conductord that GitHub cannot reach, such as a laptop,
+cannot push, merge, or change settings. Its credentials are kept in Conductor's database, so
+every `conductord` sharing it serves the same app (an app saved by an older version in
+`~/.conductor/github-app.json` is imported once). `CONDUCTOR_GITHUB_APP_ID` /
+`CONDUCTOR_GITHUB_APP_PRIVATE_KEY(_FILE)` / `CONDUCTOR_GITHUB_WEBHOOK_SECRET` override the
+stored values. A changed result updates the commit's check run rather than adding another,
+and an unchanged one is not posted again after a restart. A conductord that GitHub cannot reach, such as a laptop,
 polls open pull requests every two minutes (`--github-poll`). One started with a public
 `--public-url` receives signed webhooks at `/github/webhook`. The check is `neutral` when
 there is an overlap, so it informs a reviewer without blocking a merge unless branch
@@ -763,7 +765,13 @@ Implemented and exercised by tests:
 - Conflict graph: scope overlap, duplicate intent, merge risk, with join/wait/split advice.
 - Presence, event log with gapless per-aggregate sequencing, SSE stream, live dashboard.
 - REST API, MCP gateway, CLI, session wrapper with heartbeat sidecar.
-- Scheduler: reconcile, session reaping, stall detection, dependency gating, budget events.
+- Scheduler: reconcile (with outage recovery, so a control-plane outage does not reclaim
+  live work), session reaping, stall detection, dependency gating, budget events announced
+  once per threshold crossing, and retention.
+- Operations: ordered graceful shutdown, request ids and access logs, Prometheus `/metrics`,
+  `/v1/ready`, bounded database calls, request-body deadlines, capped event streams over a
+  shared per-project feed, a schema-version guard, multi-replica-safe GitHub state, and a
+  tested Postgres backup/restore script (docs/OPERATIONS.md).
 - Adaptive router: hard floors, tiers, escalation, de-escalation, budget guard.
 - Session capability advertisement and capability-aware assignment: sessions declare the model
   and reasoning effort they are running, the catalog decides what that is worth, and work with
@@ -978,6 +986,10 @@ that produced it.
 | `.conductor/policies.yaml` | conflict matrix, duplicate thresholds, hard routing rules, budgets |
 | `.conductor/models.yaml` | model aliases (roles), capability floors, concrete profiles |
 | `.conductor/WORKFLOW.md` | the prose contract every agent reads; required checks; protected scopes |
+
+Running the control plane itself — probes and `/metrics`, shutdown and outage behaviour,
+database timeouts, retention windows, running several replicas, and backing up and restoring
+Postgres (`scripts/pg-backup.sh`) — is covered in [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 ---
 
