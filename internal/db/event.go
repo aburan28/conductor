@@ -8,8 +8,14 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/adamburan/conductor/internal/domain"
+	"github.com/adamburan/conductor/internal/metrics"
 	"github.com/adamburan/conductor/internal/privacy"
 )
+
+// eventsWritten counts events inserted. It counts at insert time, so an event whose
+// transaction later rolls back is still counted; the rate, not the exact total, is the signal.
+var eventsWritten = metrics.Default.NewCounter("conductor_events_written_total",
+	"Domain events written, by event type.", "type")
 
 // eventSpec is one event to append. Payloads pass through the privacy allowlist before they
 // are stored, so an event type that carries an unexpected key is narrowed at the boundary
@@ -27,6 +33,12 @@ type eventSpec struct {
 // Being in the same transaction as the state change is the point (DESIGN.md §23.3): an event
 // that describes a claim that did not commit would drive dashboards and integrations into a
 // state the ledger never had.
+//
+// Nothing consumes outbox_events yet. The planned consumer is a notifications relay
+// (outbound webhooks, Slack) that reads undelivered rows and sets delivered_at; the rows are
+// written now so it starts with history rather than from its install date. Until it ships,
+// retention (Store.Prune) bounds the table: delivered rows go after the event retention
+// window, undelivered rows after a longer cap.
 func appendEvents(ctx context.Context, tx pgx.Tx, orgID, projectID, actor domain.ID, specs ...eventSpec) error {
 	for _, spec := range specs {
 		payload, dropped := privacy.SanitizeEventPayload(spec.payload)
