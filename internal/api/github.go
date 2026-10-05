@@ -39,9 +39,16 @@ import (
 // needs, and GitHub hands back the credentials. A laptop GitHub cannot reach polls for pull
 // requests instead of receiving webhooks, so the same flow works with no public URL at all.
 //
-// What reaches GitHub is coordination metadata only — task refs, owner handles, resource
-// keys — never a task's title or summary, because a check run is visible to everyone who
-// can read the repository, member of the project or not.
+// Trust boundaries:
+//
+//   - The app is the machine owner's. Only the owner can create or replace it, and only
+//     projects in the owner's organization can be linked to repositories, so a second tenant
+//     on a shared control plane can neither swap the app nor read another organization's
+//     reservations through it.
+//   - A check run is visible to everyone who can read the repository, member or not. It
+//     never carries a task title or summary. Private tasks appear as "a private task", a
+//     public repository gets no names at all, and a file another attempt has already changed
+//     is attributed only for tasks shared at team_artifacts or above.
 
 // GitHubOptions configures the integration.
 type GitHubOptions struct {
@@ -120,13 +127,17 @@ func (g *GitHub) appClient() *githubapp.Client {
 	return g.client
 }
 
-// Kick asks the poller to run now (after an installation changes, say).
+// Kick asks the poller to run soon (after an installation changes, say). Kicks are rate
+// limited by the poller, because one of the routes that kicks is unauthenticated.
 func (g *GitHub) Kick() {
 	select {
 	case g.kick <- struct{}{}:
 	default:
 	}
 }
+
+// minKickInterval is how soon after a poll a kick may start another.
+const minKickInterval = 30 * time.Second
 
 // Run polls open pull requests until ctx ends. It is cheap when nothing is configured and
 // picks the app up the moment the setup callback stores credentials.
@@ -141,8 +152,10 @@ func (g *GitHub) Run(ctx context.Context) error {
 	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
+	var last time.Time
 	for {
 		if g.Configured() && g.store != nil {
+			last = time.Now()
 			pollCtx, cancel := context.WithTimeout(ctx, interval)
 			err := g.pollOnce(pollCtx)
 			cancel()
@@ -157,11 +170,15 @@ func (g *GitHub) Run(ctx context.Context) error {
 				g.logger.Warn("github poll failed", "error", err)
 			}
 		}
+	wait:
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-t.C:
 		case <-g.kick:
+			if time.Since(last) < minKickInterval {
+				goto wait
+			}
 		}
 	}
 }
@@ -202,7 +219,7 @@ func (g *GitHub) pollOnce(ctx context.Context) error {
 				if pr.Draft {
 					continue
 				}
-				if _, err := g.checkPull(ctx, inst.ID, repo.Owner, repo.Name, pr, projects); err != nil {
+				if _, err := g.checkPull(ctx, inst.ID, repo.Owner, repo.Name, repo.Private, pr, projects); err != nil {
 					errs = append(errs, fmt.Errorf("%s#%d: %w", repo.FullName, pr.Number, err))
 				}
 			}
@@ -211,14 +228,38 @@ func (g *GitHub) pollOnce(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// projectsFor finds the projects whose canonical remote is owner/repo.
+// ownerOrg is the organization of the machine's owner, which the GitHub App serves.
+func (g *GitHub) ownerOrg(ctx context.Context) (domain.ID, error) {
+	settings, err := g.store.GetServerSettings(ctx)
+	if err != nil {
+		return "", err
+	}
+	if settings.LocalOwnerID == "" {
+		return "", nil
+	}
+	owner, err := g.store.GetPrincipal(ctx, settings.LocalOwnerID)
+	if err != nil {
+		return "", err
+	}
+	return owner.OrganizationID, nil
+}
+
+// projectsFor finds the projects in the owner's organization whose canonical remote is
+// owner/repo. Projects of other organizations on the same control plane are never matched.
 func (g *GitHub) projectsFor(ctx context.Context, owner, repo string) ([]domain.Project, error) {
+	org, err := g.ownerOrg(ctx)
+	if err != nil || org == "" {
+		return nil, err
+	}
 	all, err := g.store.ProjectsWithRemote(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var out []domain.Project
 	for _, p := range all {
+		if p.OrganizationID != org {
+			continue
+		}
 		o, r, ok := githubapp.ParseRemote(p.CanonicalRemote)
 		if ok && strings.EqualFold(o, owner) && strings.EqualFold(r, repo) {
 			out = append(out, p)
@@ -228,17 +269,19 @@ func (g *GitHub) projectsFor(ctx context.Context, owner, repo string) ([]domain.
 }
 
 // pullOverlap is one line of the report: a file in the pull request that other open work
-// has reserved or already changed.
+// has reserved or already changed. TaskRef and Owner are empty when the task may not be
+// named where the check is published.
 type pullOverlap struct {
 	Project  string    `json:"project"`
 	File     string    `json:"file"`
 	Resource string    `json:"resource"`
 	Mode     string    `json:"mode,omitempty"`
-	TaskRef  string    `json:"task_ref"`
-	Owner    string    `json:"owner"`
+	TaskRef  string    `json:"task_ref,omitempty"`
+	Owner    string    `json:"owner,omitempty"`
 	Since    time.Time `json:"since,omitzero"`
 	Blocking bool      `json:"blocking"`
 	Observed bool      `json:"observed"` // from another attempt's actual diff, not a reservation
+	Private  bool      `json:"private,omitempty"`
 }
 
 // PullReport is the outcome of checking one pull request.
@@ -248,19 +291,23 @@ type PullReport struct {
 	HeadSHA    string        `json:"head_sha"`
 	Branch     string        `json:"branch"`
 	Files      int           `json:"files"`
+	Public     bool          `json:"public_repository"`
 	OwnTask    string        `json:"own_task,omitempty"`
 	Projects   []string      `json:"projects"`
 	Overlaps   []pullOverlap `json:"overlaps"`
 	Conclusion string        `json:"conclusion"`
 	Posted     bool          `json:"posted"`
+
+	ownProject string
 }
 
 var agentBranch = regexp.MustCompile(`^agent/([^/]+)/attempt-\d+$`)
 
 // checkPull computes the report for one pull request and posts it as a check run when it
-// differs from the last one posted for the same commit.
-func (g *GitHub) checkPull(ctx context.Context, installationID int64, owner, repo string, pr githubapp.PullRequest, projects []domain.Project) (PullReport, error) {
-	rep := PullReport{Repository: owner + "/" + repo, Number: pr.Number, HeadSHA: pr.Head.SHA, Branch: pr.Head.Ref}
+// differs from the last one posted for the same commit. private is the repository's
+// visibility; when unknown, pass false — a public repository is the stricter assumption.
+func (g *GitHub) checkPull(ctx context.Context, installationID int64, owner, repo string, private bool, pr githubapp.PullRequest, projects []domain.Project) (PullReport, error) {
+	rep := PullReport{Repository: owner + "/" + repo, Number: pr.Number, HeadSHA: pr.Head.SHA, Branch: pr.Head.Ref, Public: !private}
 	c := g.appClient()
 	if c == nil {
 		return rep, errors.New("the GitHub App is not configured")
@@ -283,20 +330,30 @@ func (g *GitHub) checkPull(ctx context.Context, installationID int64, owner, rep
 		if err != nil {
 			return rep, err
 		}
-		// The pull request's own task, if it has one, is not a conflict with itself: match
-		// the branch an attempt recorded, or Conductor's agent/<ref>/attempt-<n> convention.
-		var own domain.ID
+		vis := map[domain.ID]domain.Visibility{}
 		for _, fp := range footprints {
-			if fp.Branch != "" && fp.Branch == pr.Head.Ref {
-				own, rep.OwnTask = fp.TaskID, fp.TaskRef
-			}
+			vis[fp.TaskID] = fp.Visibility
 		}
-		if own == "" {
-			if m := agentBranch.FindStringSubmatch(pr.Head.Ref); m != nil {
-				if t, err := g.store.GetTaskByRef(ctx, p.ID, m[1]); err == nil {
-					own, rep.OwnTask = t.ID, t.Ref
+		// The pull request's own task is not a conflict with itself. Only a branch in the
+		// repository itself counts — a fork's branch name is whatever its author typed — and
+		// only an open task's: either the branch an attempt recorded, or Conductor's
+		// agent/<ref>/attempt-<n> convention.
+		var own domain.ID
+		if !pr.FromFork() {
+			m := agentBranch.FindStringSubmatch(pr.Head.Ref)
+			for _, fp := range footprints {
+				if (fp.Branch != "" && fp.Branch == pr.Head.Ref) || (m != nil && fp.TaskRef == m[1]) {
+					own, rep.OwnTask, rep.ownProject = fp.TaskID, fp.TaskRef, p.Slug
+					break
 				}
 			}
+		}
+		named := func(id domain.ID, observed bool) bool {
+			v := vis[id]
+			if rep.Public || v == domain.VisibilityPrivate || v == "" {
+				return false
+			}
+			return !observed || v == domain.VisibilityTeamArtifacts || v == domain.VisibilitySharedDebug
 		}
 		if len(requests) > 0 {
 			conflicts, err := g.store.CheckScopes(ctx, db.CheckScopesParams{
@@ -307,11 +364,15 @@ func (g *GitHub) checkPull(ctx context.Context, installationID int64, owner, rep
 				return rep, err
 			}
 			for _, cf := range conflicts {
-				rep.Overlaps = append(rep.Overlaps, pullOverlap{
+				o := pullOverlap{
 					Project: p.Slug, File: strings.TrimPrefix(cf.Requested, "path:"), Resource: cf.ResourceKey,
-					Mode: string(cf.HolderMode), TaskRef: cf.HolderTaskRef, Owner: cf.HolderOwner,
-					Since: cf.HeldSince, Blocking: cf.Outcome.Blocks(),
-				})
+					Mode: string(cf.HolderMode), Since: cf.HeldSince, Blocking: cf.Outcome.Blocks(),
+					Private: vis[cf.HolderTaskID] == domain.VisibilityPrivate,
+				}
+				if named(cf.HolderTaskID, false) {
+					o.TaskRef, o.Owner = cf.HolderTaskRef, cf.HolderOwner
+				}
+				rep.Overlaps = append(rep.Overlaps, o)
 			}
 		}
 		// Merge risk: files another open attempt has actually changed, reserved or not.
@@ -320,12 +381,15 @@ func (g *GitHub) checkPull(ctx context.Context, installationID int64, owner, rep
 				continue
 			}
 			for _, changed := range fp.ChangedPaths {
-				if inPR[changed] {
-					rep.Overlaps = append(rep.Overlaps, pullOverlap{
-						Project: p.Slug, File: changed, Resource: "path:" + changed,
-						TaskRef: fp.TaskRef, Owner: fp.Owner, Observed: true,
-					})
+				if !inPR[changed] {
+					continue
 				}
+				o := pullOverlap{Project: p.Slug, File: changed, Resource: "path:" + changed, Observed: true,
+					Private: fp.Visibility == domain.VisibilityPrivate}
+				if named(fp.TaskID, true) {
+					o.TaskRef, o.Owner = fp.TaskRef, fp.Owner
+				}
+				rep.Overlaps = append(rep.Overlaps, o)
 			}
 		}
 	}
@@ -377,11 +441,35 @@ func (g *GitHub) checkPull(ctx context.Context, installationID int64, owner, rep
 	return rep, nil
 }
 
+// forCaller trims a report to the projects a caller belongs to, for an on-demand check
+// answered over the API.
+func (rep PullReport) forCaller(allowed map[string]bool) PullReport {
+	out := rep
+	out.Projects, out.Overlaps = nil, nil
+	for _, p := range rep.Projects {
+		if allowed[p] {
+			out.Projects = append(out.Projects, p)
+		}
+	}
+	for _, o := range rep.Overlaps {
+		if allowed[o.Project] {
+			out.Overlaps = append(out.Overlaps, o)
+		}
+	}
+	if !allowed[rep.ownProject] {
+		out.OwnTask = ""
+	}
+	if out.Overlaps == nil {
+		out.Overlaps = []pullOverlap{}
+	}
+	return out
+}
+
 func dedupeOverlaps(in []pullOverlap) []pullOverlap {
 	seen := map[string]bool{}
 	var out []pullOverlap
 	for _, o := range in {
-		k := o.Project + "|" + o.File + "|" + o.TaskRef + "|" + strconv.FormatBool(o.Observed)
+		k := o.Project + "|" + o.File + "|" + o.Resource + "|" + o.TaskRef + "|" + strconv.FormatBool(o.Observed)
 		if seen[k] {
 			continue
 		}
@@ -405,6 +493,18 @@ const maxReportRows = 60
 // maxPostedChecks bounds the memory of which commits were already checked.
 const maxPostedChecks = 20000
 
+// who renders the task cell of a report row.
+func (o pullOverlap) who() (task, owner string) {
+	switch {
+	case o.TaskRef != "":
+		return o.TaskRef, o.Owner
+	case o.Private:
+		return "a private task", "—"
+	default:
+		return "in-flight work", "—"
+	}
+}
+
 // renderPullReport writes the check run's title, summary, and Markdown body.
 func renderPullReport(rep PullReport) (title, summary, text string) {
 	var reserved, changed []pullOverlap
@@ -415,20 +515,15 @@ func renderPullReport(rep PullReport) (title, summary, text string) {
 			reserved = append(reserved, o)
 		}
 	}
-	tasks := map[string]bool{}
-	for _, o := range rep.Overlaps {
-		tasks[o.TaskRef] = true
-	}
 	if len(rep.Overlaps) == 0 {
 		title = "No overlap with in-flight work"
-		summary = fmt.Sprintf("None of the %d file(s) this pull request changes are reserved or being changed by other open work in %s.",
-			rep.Files, strings.Join(rep.Projects, ", "))
+		summary = fmt.Sprintf("None of the %d file(s) this pull request changes are reserved or being changed by other open work.", rep.Files)
 	} else {
-		title = fmt.Sprintf("Overlaps %d in-flight task(s)", len(tasks))
+		title = fmt.Sprintf("%d file(s) overlap in-flight work", countFiles(rep.Overlaps))
 		summary = fmt.Sprintf("%d of this pull request's files are reserved by other open work, and %d are already being changed by it. "+
 			"Coordinate before merging: `conductor conflicts` shows each overlap and what to do about it.", countFiles(reserved), countFiles(changed))
 	}
-	if rep.OwnTask != "" {
+	if rep.OwnTask != "" && !rep.Public {
 		summary += fmt.Sprintf(" This pull request's own task (%s) is excluded.", rep.OwnTask)
 	}
 	var sb strings.Builder
@@ -443,7 +538,8 @@ func renderPullReport(rep PullReport) (title, summary, text string) {
 			if !o.Since.IsZero() {
 				since = o.Since.UTC().Format("2006-01-02")
 			}
-			fmt.Fprintf(&sb, "| `%s` | `%s` (%s) | %s | %s | %s |\n", md(o.File), md(o.Resource), md(o.Mode), md(o.TaskRef), md(o.Owner), since)
+			task, owner := o.who()
+			fmt.Fprintf(&sb, "| `%s` | `%s` (%s) | %s | %s | %s |\n", md(o.File), md(o.Resource), md(o.Mode), md(task), md(owner), since)
 		}
 		sb.WriteString("\n")
 	}
@@ -454,11 +550,16 @@ func renderPullReport(rep PullReport) (title, summary, text string) {
 				fmt.Fprintf(&sb, "\n_…and %d more._\n", len(changed)-maxReportRows)
 				break
 			}
-			fmt.Fprintf(&sb, "| `%s` | %s | %s |\n", md(o.File), md(o.TaskRef), md(o.Owner))
+			task, owner := o.who()
+			fmt.Fprintf(&sb, "| `%s` | %s | %s |\n", md(o.File), md(task), md(owner))
 		}
 		sb.WriteString("\n")
 	}
-	sb.WriteString("Conductor reports where work overlaps, never what the work is: task titles and summaries are not shown here.\n")
+	sb.WriteString("Conductor reports where work overlaps, never what the work is: task titles and summaries are not shown here")
+	if rep.Public {
+		sb.WriteString(", and on a public repository neither are task references or owners")
+	}
+	sb.WriteString(".\n")
 	return title, summary, sb.String()
 }
 
@@ -498,21 +599,31 @@ func (s *Server) githubRoutes(m *http.ServeMux) {
 	m.HandleFunc("POST /github/webhook", s.githubWebhook)
 }
 
-// canAdministerMachine: the machine's owner, or an administrator of any project here.
-func (s *Server) canAdministerMachine(r *http.Request, p domain.Principal) (bool, error) {
+// isMachineOwner reports whether p owns this machine.
+func (s *Server) isMachineOwner(r *http.Request, p domain.Principal) (bool, error) {
 	settings, err := s.store.GetServerSettings(r.Context())
 	if err != nil {
 		return false, err
 	}
-	if settings.LocalOwnerID != "" && settings.LocalOwnerID == p.ID {
-		return true, nil
-	}
-	return s.isAdminSomewhere(r, p)
+	return settings.LocalOwnerID != "" && settings.LocalOwnerID == p.ID, nil
 }
 
 func (s *Server) githubStatus(w http.ResponseWriter, r *http.Request, p domain.Principal) {
 	g := s.github
 	out := map[string]any{"configured": g.Configured()}
+	sameOrg, err := s.inOwnersOrg(r, p)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if !sameOrg {
+		// Another tenant on this control plane: the app is not theirs to inspect.
+		out["available"] = false
+		out["linked"] = []map[string]string{}
+		s.ok(w, r, http.StatusOK, out)
+		return
+	}
+	out["available"] = true
 	g.mu.Lock()
 	out["mode"] = "polling"
 	if g.opts.WebhookURL != "" {
@@ -546,36 +657,42 @@ func (s *Server) githubStatus(w http.ResponseWriter, r *http.Request, p domain.P
 		s.fail(w, r, err)
 		return
 	}
-	var linked []map[string]string
+	linked := []map[string]string{}
 	for _, proj := range mine {
 		if o, rn, ok := githubapp.ParseRemote(proj.CanonicalRemote); ok {
 			linked = append(linked, map[string]string{"project": proj.Slug, "repository": o + "/" + rn})
 		}
 	}
-	if linked == nil {
-		linked = []map[string]string{}
-	}
 	out["linked"] = linked
 	s.ok(w, r, http.StatusOK, out)
 }
 
-// githubStartSetup begins the manifest flow and returns the one-time page to open.
+// githubStartSetup begins the manifest flow and returns the one-time page to open. Only the
+// machine's owner may create the app, and replacing an existing one must be said out loud:
+// whoever creates it owns it on GitHub, and with it read access to every repository it is
+// installed on.
 func (s *Server) githubStartSetup(w http.ResponseWriter, r *http.Request, p domain.Principal) {
-	ok, err := s.canAdministerMachine(r, p)
+	owner, err := s.isMachineOwner(r, p)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	if !ok {
-		s.fail(w, r, errors.Join(domain.ErrNotPermitted, errors.New("only the machine's owner or a project administrator can create the GitHub App")))
+	if !owner {
+		s.fail(w, r, errors.Join(domain.ErrNotPermitted, errors.New("only this machine's owner can connect a GitHub App (the owner is whoever first ran `conductord bootstrap` here)")))
 		return
 	}
 	var body struct {
-		Org  string `json:"org"`
-		Name string `json:"name"`
+		Org     string `json:"org"`
+		Name    string `json:"name"`
+		Replace bool   `json:"replace"`
 	}
 	if err := decode(r, &body); err != nil {
 		s.fail(w, r, err)
+		return
+	}
+	if s.github.Configured() && !body.Replace {
+		s.ok(w, r, http.StatusConflict, ErrorBody{Code: "already_configured",
+			Error: "a GitHub App is already connected; pass replace (conductor github setup --replace) to create a new one in its place"})
 		return
 	}
 	if body.Org != "" && !githubLogin.MatchString(body.Org) {
@@ -720,10 +837,20 @@ func (s *Server) githubSetupPage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 	state, code := r.URL.Query().Get("state"), r.URL.Query().Get("code")
-	if _, ok := s.github.takeSetup(state, true); !ok || code == "" {
+	st, ok := s.github.takeSetup(state, true)
+	if !ok || code == "" {
 		s.renderGitHubPage(w, http.StatusBadRequest, githubPageData{
 			Heading:    "This setup link is not valid",
 			Paragraphs: []string{"It was used already, has expired, or did not come from this Conductor. Start again with:"},
+			Code:       "conductor github setup",
+		})
+		return
+	}
+	// The person who started the setup must still own the machine when it completes.
+	if settings, err := s.store.GetServerSettings(r.Context()); err != nil || settings.LocalOwnerID != st.by {
+		s.renderGitHubPage(w, http.StatusForbidden, githubPageData{
+			Heading:    "Setup was started by someone who no longer owns this machine",
+			Paragraphs: []string{"Ask the machine's owner to start again with:"},
 			Code:       "conductor github setup",
 		})
 		return
@@ -747,6 +874,7 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	s.github.mu.Lock()
 	s.github.client = client
+	s.github.posted = map[string]string{}
 	s.github.mu.Unlock()
 	s.github.Kick()
 	s.logger.Info("github app created", "app", creds.Slug, "owner", creds.Owner)
@@ -761,7 +889,7 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) githubInstalled(w http.ResponseWriter, r *http.Request) {
-	s.github.Kick()
+	s.github.Kick() // rate limited by the poller
 	s.renderGitHubPage(w, http.StatusOK, githubPageData{
 		Heading: "Installed",
 		Paragraphs: []string{
@@ -772,8 +900,13 @@ func (s *Server) githubInstalled(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// maxWebhookBody is GitHub's own cap on a delivery.
-const maxWebhookBody = 25 << 20
+// maxWebhookBody bounds a delivery Conductor will read. GitHub allows 25 MB, but the events
+// Conductor acts on are a few kilobytes; a larger body is refused rather than buffered.
+const maxWebhookBody = 5 << 20
+
+// webhookEvents are the deliveries the handler acts on; anything else is acknowledged
+// without reading the body.
+var webhookEvents = map[string]bool{"ping": true, "installation": true, "installation_repositories": true, "pull_request": true}
 
 func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 	c := s.github.appClient()
@@ -781,16 +914,28 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxWebhookBody+1))
-	if err != nil || len(body) > maxWebhookBody {
-		s.ok(w, r, http.StatusRequestEntityTooLarge, ErrorBody{Error: "delivery too large", Code: "invalid_argument"})
+	event := r.Header.Get("X-GitHub-Event")
+	sig := r.Header.Get("X-Hub-Signature-256")
+	if sig == "" {
+		s.ok(w, r, http.StatusUnauthorized, ErrorBody{Error: "unsigned delivery", Code: "unauthenticated"})
 		return
 	}
-	if !githubapp.VerifySignature(c.Credentials().WebhookSecret, body, r.Header.Get("X-Hub-Signature-256")) {
+	if !webhookEvents[event] {
+		s.ok(w, r, http.StatusAccepted, map[string]any{"ignored": true})
+		return
+	}
+	// A slow sender cannot hold the connection open indefinitely.
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(30 * time.Second))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWebhookBody))
+	if err != nil {
+		s.ok(w, r, http.StatusRequestEntityTooLarge, ErrorBody{Error: "delivery too large or too slow", Code: "invalid_argument"})
+		return
+	}
+	if !githubapp.VerifySignature(c.Credentials().WebhookSecret, body, sig) {
 		s.ok(w, r, http.StatusUnauthorized, ErrorBody{Error: "bad signature", Code: "unauthenticated"})
 		return
 	}
-	switch r.Header.Get("X-GitHub-Event") {
+	switch event {
 	case "ping":
 		s.ok(w, r, http.StatusOK, map[string]any{"ok": true})
 		return
@@ -798,17 +943,14 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		s.github.Kick()
 		s.ok(w, r, http.StatusAccepted, map[string]any{"ok": true})
 		return
-	case "pull_request":
-	default:
-		s.ok(w, r, http.StatusAccepted, map[string]any{"ignored": true})
-		return
 	}
 	var ev struct {
 		Action      string                `json:"action"`
 		PullRequest githubapp.PullRequest `json:"pull_request"`
 		Repository  struct {
-			Name  string `json:"name"`
-			Owner struct {
+			Name    string `json:"name"`
+			Private bool   `json:"private"`
+			Owner   struct {
 				Login string `json:"login"`
 			} `json:"owner"`
 		} `json:"repository"`
@@ -826,11 +968,11 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		s.ok(w, r, http.StatusAccepted, map[string]any{"ignored": ev.Action})
 		return
 	}
-	if ev.PullRequest.Draft || ev.Installation.ID == 0 {
-		s.ok(w, r, http.StatusAccepted, map[string]any{"ignored": "draft or not installed"})
+	owner, repo := ev.Repository.Owner.Login, ev.Repository.Name
+	if ev.PullRequest.Draft || ev.Installation.ID == 0 || !githubapp.ValidRepo(owner, repo) {
+		s.ok(w, r, http.StatusAccepted, map[string]any{"ignored": "draft, not installed, or not a repository"})
 		return
 	}
-	owner, repo := ev.Repository.Owner.Login, ev.Repository.Name
 	// Answer GitHub at once (it times a delivery out after ten seconds) and check in the
 	// background.
 	go func() {
@@ -840,7 +982,7 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		if err != nil || len(projects) == 0 {
 			return
 		}
-		if _, err := s.github.checkPull(ctx, ev.Installation.ID, owner, repo, ev.PullRequest, projects); err != nil {
+		if _, err := s.github.checkPull(ctx, ev.Installation.ID, owner, repo, ev.Repository.Private, ev.PullRequest, projects); err != nil {
 			s.logger.Warn("github check failed", "repo", owner+"/"+repo, "pr", ev.PullRequest.Number, "error", err)
 		}
 	}()
@@ -863,7 +1005,7 @@ func (s *Server) githubCheckNow(w http.ResponseWriter, r *http.Request, p domain
 		return
 	}
 	owner, repo, found := strings.Cut(body.Repository, "/")
-	if !found || owner == "" || repo == "" || body.Number <= 0 {
+	if !found || !githubapp.ValidRepo(owner, repo) || body.Number <= 0 {
 		s.fail(w, r, errors.Join(domain.ErrInvalidArgument, errors.New("give repository as owner/name and a pull request number")))
 		return
 	}
@@ -872,18 +1014,17 @@ func (s *Server) githubCheckNow(w http.ResponseWriter, r *http.Request, p domain
 		s.fail(w, r, err)
 		return
 	}
-	// The caller must belong to at least one project the repository maps to. The check itself
-	// covers every linked project, exactly as the poller and the webhook do: a check run
-	// belongs to the repository, not to whoever asked, and two views of it would re-post over
-	// each other.
-	allowed := false
+	// The caller must belong to at least one project the repository maps to. The check run
+	// itself covers every linked project, exactly as the poller and the webhook do — two
+	// views of one repository would re-post over each other — but the answer returned here
+	// is trimmed to the caller's own projects.
+	allowed := map[string]bool{}
 	for _, proj := range projects {
 		if _, err := s.svc.Authorize(r.Context(), p, proj.ID, domain.RoleContributor); err == nil {
-			allowed = true
-			break
+			allowed[proj.Slug] = true
 		}
 	}
-	if !allowed {
+	if len(allowed) == 0 {
 		s.fail(w, r, errors.Join(domain.ErrNotFound, fmt.Errorf("no project you belong to is linked to %s; run `conductor github link` in its checkout", body.Repository)))
 		return
 	}
@@ -894,6 +1035,11 @@ func (s *Server) githubCheckNow(w http.ResponseWriter, r *http.Request, p domain
 		s.ok(w, r, http.StatusConflict, ErrorBody{Code: "not_installed", Error: "the GitHub App is not installed on " + body.Repository + ": " + err.Error()})
 		return
 	}
+	info, err := c.RepositoryInfo(ctx, inst, owner, repo)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
 	pulls, err := c.OpenPullRequests(ctx, inst, owner, repo)
 	if err != nil {
 		s.fail(w, r, err)
@@ -901,23 +1047,34 @@ func (s *Server) githubCheckNow(w http.ResponseWriter, r *http.Request, p domain
 	}
 	for _, pr := range pulls {
 		if pr.Number == body.Number {
-			rep, err := s.github.checkPull(ctx, inst, owner, repo, pr, projects)
+			rep, err := s.github.checkPull(ctx, inst, owner, repo, info.Private, pr, projects)
 			if err != nil {
 				s.fail(w, r, err)
 				return
 			}
-			s.ok(w, r, http.StatusOK, rep)
+			s.ok(w, r, http.StatusOK, rep.forCaller(allowed))
 			return
 		}
 	}
 	s.fail(w, r, errors.Join(domain.ErrNotFound, fmt.Errorf("%s#%d is not an open pull request", body.Repository, body.Number)))
 }
 
-// githubLink records which repository a project governs.
+// githubLink records which repository a project governs. Only projects in the machine
+// owner's organization can be linked: the app is theirs, and a project of another tenant
+// linked to their repository would read its pull requests and write into its checks.
 func (s *Server) githubLink(w http.ResponseWriter, r *http.Request, p domain.Principal) {
 	project, _, err := s.project(r, p, domain.RoleProjectAdmin)
 	if err != nil {
 		s.fail(w, r, err)
+		return
+	}
+	org, err := s.github.ownerOrg(r.Context())
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if org == "" || org != project.OrganizationID {
+		s.fail(w, r, errors.Join(domain.ErrNotPermitted, errors.New("this control plane's GitHub App belongs to its owner's organization; projects of other organizations cannot be linked to it")))
 		return
 	}
 	var body struct {
@@ -932,7 +1089,7 @@ func (s *Server) githubLink(w http.ResponseWriter, r *http.Request, p domain.Pri
 	if !ok {
 		// Also accept the short owner/name form.
 		o, n, found := strings.Cut(remote, "/")
-		if !found || !githubLogin.MatchString(o) || n == "" || strings.Contains(n, "/") {
+		if !found || !githubLogin.MatchString(o) || !githubapp.ValidRepo(o, n) {
 			s.fail(w, r, errors.Join(domain.ErrInvalidArgument, errors.New("repository must be owner/name or a GitHub remote URL")))
 			return
 		}

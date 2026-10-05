@@ -37,6 +37,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -513,7 +514,11 @@ func (c *Client) RepoInstallation(ctx context.Context, owner, repo string) (int6
 	var out struct {
 		ID int64 `json:"id"`
 	}
-	err = c.do(ctx, http.MethodGet, "/repos/"+url.PathEscape(owner)+"/"+url.PathEscape(repo)+"/installation", jwt, nil, &out)
+	base, err := repoPath(owner, repo)
+	if err != nil {
+		return 0, err
+	}
+	err = c.do(ctx, http.MethodGet, base+"/installation", jwt, nil, &out)
 	return out.ID, err
 }
 
@@ -543,6 +548,12 @@ func (c *Client) InstallationToken(ctx context.Context, installationID int64) (s
 	return fresh.Token, nil
 }
 
+// FromFork reports whether the pull request's head lives in another repository. A fork's
+// branch name is chosen by whoever opened it, so it proves nothing about which task it is.
+func (pr PullRequest) FromFork() bool {
+	return pr.Head.Repo.FullName == "" || !strings.EqualFold(pr.Head.Repo.FullName, pr.Base.Repo.FullName)
+}
+
 // PullRequest is the subset of a pull request Conductor reads.
 type PullRequest struct {
 	Number  int    `json:"number"`
@@ -550,11 +561,17 @@ type PullRequest struct {
 	HTMLURL string `json:"html_url"`
 	Draft   bool   `json:"draft"`
 	Head    struct {
-		Ref string `json:"ref"`
-		SHA string `json:"sha"`
+		Ref  string `json:"ref"`
+		SHA  string `json:"sha"`
+		Repo struct {
+			FullName string `json:"full_name"`
+		} `json:"repo"`
 	} `json:"head"`
 	Base struct {
-		Ref string `json:"ref"`
+		Ref  string `json:"ref"`
+		Repo struct {
+			FullName string `json:"full_name"`
+		} `json:"repo"`
 	} `json:"base"`
 	User struct {
 		Login string `json:"login"`
@@ -567,8 +584,12 @@ func (c *Client) OpenPullRequests(ctx context.Context, installationID int64, own
 	if err != nil {
 		return nil, err
 	}
+	base, err := repoPath(owner, repo)
+	if err != nil {
+		return nil, err
+	}
 	var out []PullRequest
-	err = c.do(ctx, http.MethodGet, "/repos/"+url.PathEscape(owner)+"/"+url.PathEscape(repo)+"/pulls?state=open&per_page=100&sort=updated&direction=desc", tok, nil, &out)
+	err = c.do(ctx, http.MethodGet, base+"/pulls?state=open&per_page=100&sort=updated&direction=desc", tok, nil, &out)
 	return out, err
 }
 
@@ -582,13 +603,17 @@ func (c *Client) PullRequestFiles(ctx context.Context, installationID int64, own
 	if err != nil {
 		return nil, err
 	}
+	base, err := repoPath(owner, repo)
+	if err != nil {
+		return nil, err
+	}
 	var paths []string
 	for page := 1; len(paths) < maxPRFiles; page++ {
 		var batch []struct {
 			Filename         string `json:"filename"`
 			PreviousFilename string `json:"previous_filename"`
 		}
-		p := fmt.Sprintf("/repos/%s/%s/pulls/%d/files?per_page=100&page=%d", url.PathEscape(owner), url.PathEscape(repo), number, page)
+		p := fmt.Sprintf("%s/pulls/%d/files?per_page=100&page=%d", base, number, page)
 		if err := c.do(ctx, http.MethodGet, p, tok, nil, &batch); err != nil {
 			return nil, err
 		}
@@ -643,7 +668,11 @@ func (c *Client) PostCheckRun(ctx context.Context, installationID int64, owner, 
 	if run.ExternalID != "" {
 		body["external_id"] = run.ExternalID
 	}
-	return c.do(ctx, http.MethodPost, "/repos/"+url.PathEscape(owner)+"/"+url.PathEscape(repo)+"/check-runs", tok, body, nil)
+	base, err := repoPath(owner, repo)
+	if err != nil {
+		return err
+	}
+	return c.do(ctx, http.MethodPost, base+"/check-runs", tok, body, nil)
 }
 
 func truncate(s string, n int) string {
@@ -651,6 +680,26 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n-1] + "…"
+}
+
+var namePart = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}$`)
+
+// ValidRepo reports whether owner and repo are plausible GitHub names: the characters GitHub
+// allows, and never "." or "..", which would walk a request path.
+func ValidRepo(owner, repo string) bool {
+	for _, p := range []string{owner, repo} {
+		if !namePart.MatchString(p) || p == "." || p == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+func repoPath(owner, repo string) (string, error) {
+	if !ValidRepo(owner, repo) {
+		return "", fmt.Errorf("github: %q/%q is not a repository name", owner, repo)
+	}
+	return "/repos/" + owner + "/" + repo, nil
 }
 
 // ParseRemote extracts owner and repository from a git remote URL in any of the forms git
@@ -675,7 +724,7 @@ func ParseRemote(remote string) (owner, repo string, ok bool) {
 		return "", "", false
 	}
 	parts := strings.Split(r, "/")
-	if len(parts) < 2 || parts[len(parts)-2] == "" || parts[len(parts)-1] == "" {
+	if len(parts) < 2 || !ValidRepo(parts[len(parts)-2], parts[len(parts)-1]) {
 		return "", "", false
 	}
 	return parts[len(parts)-2], parts[len(parts)-1], true
@@ -718,4 +767,28 @@ func (c *Client) InstallationRepositories(ctx context.Context, installationID in
 		}
 	}
 	return out, nil
+}
+
+// RepositoryInfo reads one repository through an installation: mostly, whether it is private.
+func (c *Client) RepositoryInfo(ctx context.Context, installationID int64, owner, repo string) (Repository, error) {
+	base, err := repoPath(owner, repo)
+	if err != nil {
+		return Repository{}, err
+	}
+	tok, err := c.InstallationToken(ctx, installationID)
+	if err != nil {
+		return Repository{}, err
+	}
+	var raw struct {
+		Name     string `json:"name"`
+		FullName string `json:"full_name"`
+		Private  bool   `json:"private"`
+		Owner    struct {
+			Login string `json:"login"`
+		} `json:"owner"`
+	}
+	if err := c.do(ctx, http.MethodGet, base, tok, nil, &raw); err != nil {
+		return Repository{}, err
+	}
+	return Repository{Owner: raw.Owner.Login, Name: raw.Name, FullName: raw.FullName, Private: raw.Private}, nil
 }

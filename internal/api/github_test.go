@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/adamburan/conductor/internal/coord"
+	"github.com/adamburan/conductor/internal/db"
+	"github.com/adamburan/conductor/internal/domain"
 	"github.com/adamburan/conductor/internal/githubapp"
 )
 
@@ -52,13 +54,17 @@ func (f *fakeGitHubAPI) handler() http.Handler {
 		write(w, map[string]any{"token": "ghs_test", "expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)})
 	})
 	m.HandleFunc("GET /installation/repositories", func(w http.ResponseWriter, r *http.Request) {
-		write(w, map[string]any{"repositories": []map[string]any{{"name": f.repo, "full_name": "acme/" + f.repo, "owner": map[string]any{"login": "acme"}}}})
+		write(w, map[string]any{"repositories": []map[string]any{{"name": f.repo, "full_name": "acme/" + f.repo, "private": true, "owner": map[string]any{"login": "acme"}}}})
+	})
+	m.HandleFunc("GET /repos/acme/{repo}", func(w http.ResponseWriter, r *http.Request) {
+		write(w, map[string]any{"name": f.repo, "full_name": "acme/" + f.repo, "private": true, "owner": map[string]any{"login": "acme"}})
 	})
 	m.HandleFunc("GET /repos/acme/{repo}/installation", func(w http.ResponseWriter, r *http.Request) {
 		write(w, map[string]any{"id": 77})
 	})
 	m.HandleFunc("GET /repos/acme/{repo}/pulls", func(w http.ResponseWriter, r *http.Request) {
-		write(w, []map[string]any{{"number": 5, "state": "open", "head": map[string]any{"ref": "feature/retry", "sha": "abc123"}, "base": map[string]any{"ref": "main"}}})
+		same := map[string]any{"full_name": "acme/" + f.repo}
+		write(w, []map[string]any{{"number": 5, "state": "open", "head": map[string]any{"ref": "feature/retry", "sha": "abc123", "repo": same}, "base": map[string]any{"ref": "main", "repo": same}}})
 	})
 	m.HandleFunc("GET /repos/acme/{repo}/pulls/5/files", func(w http.ResponseWriter, r *http.Request) {
 		var out []map[string]any
@@ -97,10 +103,20 @@ func TestGitHubAppEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake := &fakeGitHubAPI{t: t, pem: string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})),
-		files: []string{"internal/router/retry.go", "README.md"}, repo: "widgets-" + h.project.Slug}
+		files: []string{"internal/router/retry.go", "internal/api/handlers.go", "README.md"}, repo: "widgets-" + h.project.Slug}
 	repoName := "acme/" + fake.repo
 	gh := httptest.NewServer(fake.handler())
 	defer gh.Close()
+
+	// alice owns the machine; the settings row is shared, so put it back afterwards.
+	before, _ := h.store.GetServerSettings(ctx)
+	t.Cleanup(func() {
+		_, _ = h.store.Pool().Exec(context.Background(),
+			`UPDATE server_settings SET local_owner_id = NULLIF($1,'')::uuid WHERE singleton`, before.LocalOwnerID)
+	})
+	if _, err := h.store.SetLocalOwner(ctx, h.alice.ID, false); err != nil {
+		t.Fatal(err)
+	}
 
 	credsPath := filepath.Join(t.TempDir(), "github-app.json")
 	integration, err := NewGitHub(GitHubOptions{CredentialsPath: credsPath, API: gh.URL, Web: "https://github.example", Poll: -1,
@@ -112,9 +128,9 @@ func TestGitHubAppEndToEnd(t *testing.T) {
 	defer srv.Close()
 	integration.opts.BaseURL = srv.URL
 
-	// --- Setup: only an administrator can start it.
+	// --- Setup: only the machine's owner can start it.
 	if code, _ := h.doJSONOn(srv, h.bobTok, http.MethodPost, "/v1/github/setup", map[string]string{}); code != http.StatusForbidden {
-		t.Errorf("contributor starting setup = %d, want 403", code)
+		t.Errorf("non-owner starting setup = %d, want 403", code)
 	}
 	code, started := h.doJSONOn(srv, h.aliceTok, http.MethodPost, "/v1/github/setup", map[string]string{"org": "acme"})
 	if code != http.StatusCreated {
@@ -148,6 +164,38 @@ func TestGitHubAppEndToEnd(t *testing.T) {
 	if code := httpStatus(t, srv, "/github/callback?state="+state+"&code=good-code"); code != http.StatusBadRequest {
 		t.Errorf("replayed callback = %d", code)
 	}
+	// Replacing a connected app must be asked for explicitly.
+	if code, _ := h.doJSONOn(srv, h.aliceTok, http.MethodPost, "/v1/github/setup", map[string]any{}); code != http.StatusConflict {
+		t.Errorf("setup over a connected app without replace = %d, want 409", code)
+	}
+	if code, _ := h.doJSONOn(srv, h.aliceTok, http.MethodPost, "/v1/github/setup", map[string]any{"replace": true}); code != http.StatusCreated {
+		t.Errorf("setup with replace = %d, want 201", code)
+	}
+
+	// --- Another organization on the same control plane cannot link to the owner's app.
+	otherOrg, err := h.store.CreateOrganization(ctx, uniq("gh-other", time.Now().UnixNano()), "Other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherProj, err := h.store.CreateProject(ctx, db.CreateProjectParams{OrganizationID: otherOrg.ID, Slug: uniq("gh-other-p", time.Now().UnixNano()), Config: domain.DefaultProjectConfig()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	carol, err := h.store.CreatePrincipal(ctx, otherOrg.ID, domain.PrincipalHuman, "carol", "carol", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = h.store.AddMember(ctx, otherProj.ID, carol.ID, domain.RoleProjectAdmin)
+	carolTok, _ := h.store.CreateToken(ctx, carol.ID, "test", 0)
+	if code, _ := h.doJSONOn(srv, carolTok, http.MethodPost, "/v1/projects/"+otherProj.ID+"/github", map[string]string{"repository": repoName}); code != http.StatusForbidden {
+		t.Errorf("another organization linking = %d, want 403", code)
+	}
+	if code, st := h.doJSONOn(srv, carolTok, http.MethodGet, "/v1/github/status", nil); code != http.StatusOK || st["app"] != nil || st["available"] != false {
+		t.Errorf("another organization's status = %d %v; the app is not theirs to inspect", code, st)
+	}
+	if code, _ := h.doJSONOn(srv, carolTok, http.MethodPost, "/v1/security", map[string]string{"security_mode": "enhanced"}); code != http.StatusForbidden {
+		t.Errorf("another organization's admin tightening the owner's machine = %d, want 403", code)
+	}
 
 	// --- Link the project to the repository.
 	if code, _ := h.doJSONOn(srv, h.bobTok, http.MethodPost, h.projectPath("/github"), map[string]string{"repository": repoName}); code != http.StatusForbidden {
@@ -165,6 +213,14 @@ func TestGitHubAppEndToEnd(t *testing.T) {
 	})
 	if code != http.StatusOK {
 		t.Fatalf("bob start = %d %s", code, raw)
+	}
+	// alice holds a team-visible file: in a private repository, her task is named.
+	code, raw = h.do(h.aliceTok, http.MethodPost, h.projectPath("/work/start"), map[string]any{
+		"summary": "tidy the API handlers", "visibility": "team_summary",
+		"scopes": []map[string]any{{"resource": "path:internal/api/handlers.go", "mode": "write_exclusive"}},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("alice start = %d %s", code, raw)
 	}
 
 	// --- Check the pull request on demand.
@@ -184,11 +240,18 @@ func TestGitHubAppEndToEnd(t *testing.T) {
 	}
 	out := runs[0]["output"].(map[string]any)
 	text := out["text"].(string) + out["summary"].(string) + out["title"].(string)
-	if runs[0]["head_sha"] != "abc123" || runs[0]["name"] != githubapp.CheckName || !strings.Contains(text, "internal/router/retry.go") || !strings.Contains(text, "bob") {
+	if runs[0]["head_sha"] != "abc123" || runs[0]["name"] != githubapp.CheckName || !strings.Contains(text, "internal/router/retry.go") {
 		t.Errorf("check run = %v", runs[0])
 	}
-	if strings.Contains(text, "acquisition") || strings.Contains(text, "rewrite the router") {
+	if strings.Contains(text, "acquisition") || strings.Contains(text, "rewrite the router") || strings.Contains(text, "tidy the API") {
 		t.Errorf("a task title reached GitHub:\n%s", text)
+	}
+	// bob's task is private: the file is reported, his name and task ref are not.
+	if strings.Contains(text, "bob") || !strings.Contains(text, "a private task") {
+		t.Errorf("a private task was identified on GitHub:\n%s", text)
+	}
+	if !strings.Contains(text, "alice") || !strings.Contains(text, "internal/api/handlers.go") {
+		t.Errorf("a team-visible task in a private repository was not named:\n%s", text)
 	}
 	if strings.Contains(text, "README.md") {
 		t.Error("an unreserved file was reported as an overlap")
@@ -216,8 +279,10 @@ func TestGitHubAppEndToEnd(t *testing.T) {
 		t.Errorf("signed ping = %d", code)
 	}
 	prEvent, _ := json.Marshal(map[string]any{"action": "synchronize", "installation": map[string]any{"id": 77},
-		"repository":   map[string]any{"name": fake.repo, "owner": map[string]any{"login": "acme"}},
-		"pull_request": map[string]any{"number": 5, "head": map[string]any{"ref": "feature/retry", "sha": "def456"}}})
+		"repository": map[string]any{"name": fake.repo, "private": true, "owner": map[string]any{"login": "acme"}},
+		"pull_request": map[string]any{"number": 5,
+			"head": map[string]any{"ref": "feature/retry", "sha": "def456", "repo": map[string]any{"full_name": "acme/" + fake.repo}},
+			"base": map[string]any{"ref": "main", "repo": map[string]any{"full_name": "acme/" + fake.repo}}}})
 	if code := webhook(t, srv, "pull_request", prEvent, githubapp.Sign("whsec", prEvent)); code != http.StatusAccepted {
 		t.Errorf("signed pull_request = %d", code)
 	}
@@ -273,4 +338,22 @@ func webhook(t *testing.T, srv *httptest.Server, event string, body []byte, sig 
 func toJSON(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+// A public repository gets no names; a fork's branch name never claims a task.
+func TestPullReportRedaction(t *testing.T) {
+	rep := PullReport{Files: 2, Public: true, Overlaps: []pullOverlap{{File: "a.go", Resource: "path:a.go", Mode: "write_exclusive"}}}
+	_, _, text := renderPullReport(rep)
+	if !strings.Contains(text, "in-flight work") || !strings.Contains(text, "public repository") {
+		t.Errorf("public report:\n%s", text)
+	}
+	var pr githubapp.PullRequest
+	pr.Head.Repo.FullName, pr.Base.Repo.FullName = "mallory/widgets", "acme/widgets"
+	if !pr.FromFork() {
+		t.Error("a fork was not recognised")
+	}
+	pr.Head.Repo.FullName = "acme/widgets"
+	if pr.FromFork() {
+		t.Error("a same-repository branch was taken for a fork")
+	}
 }

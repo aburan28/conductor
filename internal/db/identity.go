@@ -220,22 +220,31 @@ func (s *Store) CreateToken(ctx context.Context, principalID domain.ID, name str
 // revoked tokens are filtered in SQL rather than checked afterwards, which keeps the
 // "is this still valid" logic in one place.
 func (s *Store) AuthenticateToken(ctx context.Context, token string) (domain.Principal, error) {
+	p, _, err := s.AuthenticateTokenNamed(ctx, token)
+	return p, err
+}
+
+// AuthenticateTokenNamed is AuthenticateToken that also returns the token's name, which is
+// how the API tells a token minted by local sign-in ("local:…") from one minted on purpose.
+func (s *Store) AuthenticateTokenNamed(ctx context.Context, token string) (domain.Principal, string, error) {
 	var p domain.Principal
+	var name string
 	err := s.pool.QueryRow(ctx, `
 		UPDATE api_tokens
 		   SET last_used_at = now()
 		 WHERE token_hash = $1
 		   AND revoked_at IS NULL
 		   AND (expires_at IS NULL OR expires_at > now())
-		RETURNING principal_id::text`, hashToken(token),
-	).Scan(&p.ID)
+		RETURNING principal_id::text, name`, hashToken(token),
+	).Scan(&p.ID, &name)
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			return domain.Principal{}, domain.ErrUnauthenticated
+			return domain.Principal{}, "", domain.ErrUnauthenticated
 		}
-		return domain.Principal{}, err
+		return domain.Principal{}, "", err
 	}
-	return s.GetPrincipal(ctx, p.ID)
+	p, err = s.GetPrincipal(ctx, p.ID)
+	return p, name, err
 }
 
 func (s *Store) RevokeToken(ctx context.Context, principalID domain.ID, name string) error {

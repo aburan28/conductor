@@ -280,3 +280,36 @@ func rawHTTP10(t *testing.T, srv *httptest.Server) int {
 	resp.Body.Close()
 	return resp.StatusCode
 }
+
+// A token from local sign-in — and anything it mints — stops working the moment the server
+// is in enhanced mode, even when nothing revoked it (a daemon restarted with
+// --security-mode enhanced).
+func TestLocalTokensDieWithLocalMode(t *testing.T) {
+	h := newHarness(t)
+	srv := localServer(t, h, Options{LocalLogin: LocalLoginOptions{DefaultMode: db.SecurityLocal}})
+	_, out := localPost(t, srv, nil, `{"client":"cli"}`)
+	localTok, _ := out["token"].(string)
+	code, minted := h.doJSONOn(srv, localTok, http.MethodPost, "/v1/tokens", map[string]any{"name": "ci"})
+	if code != http.StatusCreated || minted["name"] != "local:ci" {
+		t.Fatalf("a local token minted %v (%d); its child must stay in the local lineage", minted, code)
+	}
+	child, _ := minted["token"].(string)
+
+	strict := httptest.NewServer(New(h.store, coord.New(h.store), Options{LocalLogin: LocalLoginOptions{ForcedMode: db.SecurityEnhanced}}).Handler())
+	defer strict.Close()
+	for name, tok := range map[string]string{"local token": localTok, "its child": child} {
+		if code, _ := h.doOn(strict, tok, http.MethodGet, "/v1/whoami"); code != http.StatusUnauthorized {
+			t.Errorf("%s under enhanced mode = %d, want 401", name, code)
+		}
+	}
+	if code, _ := h.doOn(strict, h.aliceTok, http.MethodGet, "/v1/whoami"); code != http.StatusOK {
+		t.Errorf("an ordinary token under enhanced mode = %d", code)
+	}
+	// Invented client names do not create extra credentials.
+	_, a := localPost(t, srv, nil, `{"client":"x1"}`)
+	_, b := localPost(t, srv, nil, `{"client":"x2"}`)
+	if code, _ := h.doOn(srv, a["token"].(string), http.MethodGet, "/v1/whoami"); code != http.StatusUnauthorized {
+		t.Errorf("two invented client names both kept a live token (%d)", code)
+	}
+	_ = b
+}

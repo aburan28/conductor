@@ -262,8 +262,13 @@ request that:
   HTTP/1.0, which is how a stock nginx talks to its upstream, refuse it.
 
 If you put a reverse proxy in front of a loopback-bound `conductord`, pass `--behind-proxy`
-(which turns local sign-in off) or run `conductor security enhanced`. Loopback also cannot tell
-apart two OS users on one machine. That is what **enhanced
+(which turns local sign-in off) or run `conductor security enhanced`. Do the same before
+forwarding the port at the TCP level (`ssh -R`, `socat`, `kubectl port-forward`): such
+forwarders add no headers, so nothing distinguishes their traffic from local traffic.
+Loopback also cannot tell apart two OS users on one machine.
+
+A token issued by local sign-in works only while local sign-in is allowed. In enhanced
+mode it is rejected, revoked or not, and so is any token it was used to mint. That is what **enhanced
 security mode** is for:
 
 ```bash
@@ -442,7 +447,12 @@ conductor github status         # the app, where it is installed, what is linked
 conductor github check acme/widgets#12   # check one pull request now
 ```
 
-The app asks for read access to contents and pull requests and write access to checks only. It
+The app is the machine owner's: only they can create it (`--replace` to swap it out), and only
+projects in their organization can be linked, so another tenant on a shared control plane can
+neither take the app over nor read a repository through it. In a check run, a private task
+appears as "a private task", and a public repository gets no task references or owners at
+all. A pull request's own task is excluded only for a branch in the repository itself, never
+a fork's. The app asks for read access to contents and pull requests and write access to checks only. It
 cannot push, merge, or change settings. Its credentials stay on the machine running
 `conductord` (`~/.conductor/github-app.json`, mode 0600), or come from
 `CONDUCTOR_GITHUB_APP_ID` / `CONDUCTOR_GITHUB_APP_PRIVATE_KEY(_FILE)` /

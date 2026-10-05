@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 
@@ -162,7 +161,7 @@ func (s *Server) localStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-var localClientName = regexp.MustCompile(`[^a-z0-9-]+`)
+var localClients = map[string]bool{"dashboard": true, "cli": true, "mac-app": true}
 
 // localSession mints a token for the machine's owner.
 func (s *Server) localSession(w http.ResponseWriter, r *http.Request) {
@@ -198,13 +197,12 @@ func (s *Server) localSession(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	client := localClientName.ReplaceAllString(strings.ToLower(body.Client), "-")
-	client = strings.Trim(client, "-")
-	if client == "" {
-		client = "dashboard"
-	}
-	if len(client) > 32 {
-		client = client[:32]
+	// A fixed set of client kinds, one live token each: signing in again replaces the last
+	// token of that kind, so a local caller cannot accumulate owner credentials by inventing
+	// names.
+	client := strings.ToLower(strings.TrimSpace(body.Client))
+	if !localClients[client] {
+		client = "other"
 	}
 	owner, err := s.store.GetPrincipal(r.Context(), settings.LocalOwnerID)
 	if err != nil {
@@ -254,6 +252,30 @@ func (s *Server) isAdminSomewhere(r *http.Request, p domain.Principal) (bool, er
 	return false, nil
 }
 
+// machineOwner returns the machine's owner, ok=false when none is recorded.
+func (s *Server) machineOwner(r *http.Request) (domain.Principal, bool, error) {
+	settings, err := s.store.GetServerSettings(r.Context())
+	if err != nil || settings.LocalOwnerID == "" {
+		return domain.Principal{}, false, err
+	}
+	owner, err := s.store.GetPrincipal(r.Context(), settings.LocalOwnerID)
+	if errors.Is(err, domain.ErrNotFound) {
+		return domain.Principal{}, false, nil
+	}
+	return owner, err == nil, err
+}
+
+// inOwnersOrg reports whether p belongs to the same organization as the machine's owner. A
+// control plane can host several organizations; machine-level settings and the machine's
+// GitHub App are the owner's organization's business, not every tenant's.
+func (s *Server) inOwnersOrg(r *http.Request, p domain.Principal) (bool, error) {
+	owner, ok, err := s.machineOwner(r)
+	if err != nil || !ok {
+		return false, err
+	}
+	return owner.OrganizationID == p.OrganizationID, nil
+}
+
 func (s *Server) getSecurity(w http.ResponseWriter, r *http.Request, p domain.Principal) {
 	mode, source, settings, err := s.securityMode(r)
 	if err != nil {
@@ -261,17 +283,18 @@ func (s *Server) getSecurity(w http.ResponseWriter, r *http.Request, p domain.Pr
 		return
 	}
 	out := map[string]any{"security_mode": mode, "mode_source": source, "behind_proxy": s.behindProxy}
-	if settings.LocalOwnerID != "" {
-		if owner, err := s.store.GetPrincipal(r.Context(), settings.LocalOwnerID); err == nil {
+	if owner, ok, err := s.machineOwner(r); err == nil && ok {
+		out["you_are_owner"] = settings.LocalOwnerID == p.ID
+		if owner.OrganizationID == p.OrganizationID {
 			out["owner"] = owner.Handle
 		}
-		out["you_are_owner"] = settings.LocalOwnerID == p.ID
 	}
 	s.ok(w, r, http.StatusOK, out)
 }
 
-// setSecurity changes the mode. Tightening (to enhanced) is open to the owner and to any
-// project administrator, because making a server stricter can never hurt anyone. Loosening
+// setSecurity changes the mode. Tightening (to enhanced) is open to the owner and to project
+// administrators in the owner's organization — tightening revokes the owner's local sessions,
+// so another tenant on a shared daemon must not be able to lock the owner out. Loosening
 // (back to local) is the owner's call alone — it is their machine that becomes reachable
 // without a token. Neither is possible when conductord was started with --security-mode.
 func (s *Server) setSecurity(w http.ResponseWriter, r *http.Request, p domain.Principal) {
@@ -310,8 +333,15 @@ func (s *Server) setSecurity(w http.ResponseWriter, r *http.Request, p domain.Pr
 				s.fail(w, r, err)
 				return
 			}
-			if !admin {
-				s.fail(w, r, errors.Join(domain.ErrNotPermitted, errors.New("only the machine's owner or a project administrator can change the security mode")))
+			sameOrg := true
+			if settings.LocalOwnerID != "" {
+				if sameOrg, err = s.inOwnersOrg(r, p); err != nil {
+					s.fail(w, r, err)
+					return
+				}
+			}
+			if !admin || !sameOrg {
+				s.fail(w, r, errors.Join(domain.ErrNotPermitted, errors.New("only the machine's owner or a project administrator in their organization can change the security mode")))
 				return
 			}
 		}

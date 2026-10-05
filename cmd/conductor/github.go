@@ -58,6 +58,7 @@ func githubSetup(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("github setup", flag.ExitOnError)
 	org := fs.String("org", "", "GitHub organisation that will own the app (default: your personal account)")
 	name := fs.String("name", "", "app name shown on GitHub; must be unique on GitHub (default: Conductor <host> <random>)")
+	replace := fs.Bool("replace", false, "create a new app in place of the one already connected")
 	noOpen := fs.Bool("no-open", false, "print the setup link instead of opening a browser")
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	if err := fs.Parse(args); err != nil {
@@ -73,7 +74,7 @@ func githubSetup(ctx context.Context, args []string) error {
 		Name      string    `json:"name"`
 		Webhooks  bool      `json:"webhooks"`
 	}
-	if err := api.Post(ctx, "/v1/github/setup", map[string]string{"org": *org, "name": *name}, &out); err != nil {
+	if err := api.Post(ctx, "/v1/github/setup", map[string]any{"org": *org, "name": *name, "replace": *replace}, &out); err != nil {
 		return err
 	}
 	if *asJSON {

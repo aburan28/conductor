@@ -139,7 +139,17 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 
 type ctxKey int
 
-const principalKey ctxKey = iota
+const (
+	principalKey ctxKey = iota
+	// tokenNameKey carries the name of the token that authenticated the request.
+	tokenNameKey
+)
+
+// tokenName returns the name of the token the request authenticated with.
+func tokenName(r *http.Request) string {
+	name, _ := r.Context().Value(tokenNameKey).(string)
+	return name
+}
 
 // authenticate resolves the bearer token to a principal.
 //
@@ -178,13 +188,30 @@ func (s *Server) authenticate(next func(http.ResponseWriter, *http.Request, doma
 			reject()
 			return
 		}
-		principal, err := s.store.AuthenticateToken(r.Context(), token)
+		principal, name, err := s.store.AuthenticateTokenNamed(r.Context(), token)
 		if err != nil {
 			reject()
 			return
 		}
+		// A token local sign-in issued is good only while local sign-in is: the moment the
+		// server is in enhanced mode — switched at runtime, pinned by flag, or the default
+		// for a reachable daemon — it stops working, whether or not it was revoked.
+		if strings.HasPrefix(name, db.LocalTokenPrefix) {
+			mode, _, _, err := s.securityMode(r)
+			if err != nil {
+				s.fail(w, r, err)
+				return
+			}
+			if mode != db.SecurityLocal {
+				s.ok(w, r, http.StatusUnauthorized, ErrorBody{Code: "unauthenticated",
+					Error: "this token came from local sign-in, which this server no longer allows (enhanced security); sign in with a token"})
+				return
+			}
+		}
 		s.limiter.succeed(client)
-		next(w, r.WithContext(context.WithValue(r.Context(), principalKey, principal)), principal)
+		ctx := context.WithValue(r.Context(), principalKey, principal)
+		ctx = context.WithValue(ctx, tokenNameKey, name)
+		next(w, r.WithContext(ctx), principal)
 	}
 }
 
