@@ -333,6 +333,9 @@ func (s *Service) CheckIntent(ctx context.Context, c Caller, req IntentRequest) 
 	if err != nil {
 		return decision, err
 	}
+	if project, err := s.Store.GetProject(ctx, req.ProjectID); err == nil {
+		s.announceIntent(ctx, c, project, decision)
+	}
 	if decision.Outcome == domain.OutcomeBlockConflict {
 		if err := s.noteWaiter(ctx, c, req, domain.ID(req.ExcludeTask)); err != nil {
 			return decision, err
@@ -594,6 +597,7 @@ func (s *Service) StartWork(ctx context.Context, c Caller, req StartWorkRequest)
 	blocked := decision.Outcome.Blocks() ||
 		(decision.Outcome == domain.OutcomeSuggestJoin && !req.Force && req.AttachTo == "")
 	if blocked {
+		s.announceIntent(ctx, c, project, decision)
 		return StartWorkResult{
 			Outcome:    decision.Outcome,
 			Duplicates: decision.Duplicates,

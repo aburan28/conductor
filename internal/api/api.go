@@ -23,6 +23,7 @@ import (
 	"github.com/adamburan/conductor/internal/coord"
 	"github.com/adamburan/conductor/internal/db"
 	"github.com/adamburan/conductor/internal/domain"
+	"github.com/adamburan/conductor/internal/notify"
 	"github.com/adamburan/conductor/internal/peer"
 )
 
@@ -52,6 +53,8 @@ type Server struct {
 	local LocalLoginOptions
 	// github is the GitHub App integration; nil when no app is configured (github.go).
 	github *GitHub
+	// notify manages notification channels; nil serves their routes as not configured.
+	notify *notify.Notifier
 	// ops is the operational surface: lifetime context, background work, streams (observe.go).
 	ops *opsState
 }
@@ -76,6 +79,8 @@ type Options struct {
 	LocalLogin LocalLoginOptions
 	// GitHub is the GitHub App integration. Nil serves only the setup page.
 	GitHub *GitHub
+	// Notify manages notification channels (notify.go). Nil disables them.
+	Notify *notify.Notifier
 	// Ops configures metrics, request deadlines, stream caps and the server lifetime
 	// (observe.go).
 	Ops OpsOptions
@@ -99,6 +104,7 @@ func New(store *db.Store, svc *coord.Service, opts Options) *Server {
 		peerStatus:  opts.PeerStatus,
 		local:       opts.LocalLogin,
 		github:      opts.GitHub,
+		notify:      opts.Notify,
 	}
 	s.ops = newOpsState(store, s, opts.Ops)
 	s.routes()

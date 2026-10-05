@@ -447,6 +447,7 @@ func TestNoGETRouteLeaksAPrivateTask(t *testing.T) {
 		"/v1/tokens", "/v1/peers", "/v1/security", "/v1/github/status",
 		"/v1/ready", "/metrics", "/v1/quota", "/v1/projects/{project}/quota",
 		"/v1/projects/{project}/github/issues", "/v1/tasks/{task}/issue",
+		"/v1/projects/{project}/notifications",
 		// The stream is read separately below; it never ends on its own.
 	}
 	assertRoutesCovered(t, append(routes, "/v1/projects/{project}/events/stream"))
