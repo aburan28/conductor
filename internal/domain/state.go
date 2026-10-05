@@ -26,11 +26,15 @@ var taskTransitions = map[TaskStatus][]TaskStatus{
 	TaskBlockedConflict:   {TaskReady, TaskRunning, TaskCancelled, TaskFailed, TaskSuperseded},
 	TaskBlockedInput:      {TaskReady, TaskRunning, TaskCancelled, TaskFailed, TaskSuperseded},
 
-	TaskVerifying: {TaskRunning, TaskReviewRequired, TaskDone, TaskMerging, TaskFailed, TaskCancelled},
+	// -> ready sends finished-but-unmerged work back to the queue: a reviewer asked for
+	// changes, or its pull request was closed without merging. The attempt that produced the
+	// work has already ended and released its lease, so the task cannot go back to running
+	// (which needs a live lease); it goes back to being claimable, like a released task.
+	TaskVerifying: {TaskRunning, TaskReady, TaskReviewRequired, TaskDone, TaskMerging, TaskFailed, TaskCancelled},
 
-	TaskReviewRequired: {TaskRunning, TaskMerging, TaskDone, TaskFailed, TaskCancelled},
+	TaskReviewRequired: {TaskRunning, TaskReady, TaskMerging, TaskDone, TaskFailed, TaskCancelled},
 
-	TaskMerging: {TaskDone, TaskRunning, TaskFailed},
+	TaskMerging: {TaskDone, TaskRunning, TaskReady, TaskFailed, TaskCancelled},
 
 	// Operator retry is the only edge out of failed.
 	TaskFailed: {TaskReady, TaskCancelled},

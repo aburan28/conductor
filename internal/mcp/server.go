@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/adamburan/conductor/internal/client"
 	"github.com/adamburan/conductor/internal/domain"
@@ -73,8 +74,13 @@ type Server struct {
 	project string
 	// fence comes from the environment when the gateway is mounted inside a running
 	// attempt, so an agent's tool calls are automatically fenced without it having to
-	// track the epoch itself.
-	fence domain.Fence
+	// track the epoch itself. Tool calls read it directly (they are serialized per session);
+	// writes go through setFence, because the lease keeper reads it from its own goroutine.
+	fence   domain.Fence
+	fenceMu sync.Mutex
+	// keepPoll is how often the lease keeper looks for a fence when it has none; zero means
+	// defaultKeepPoll. Tests shorten it.
+	keepPoll time.Duration
 	// session is the wrapping `conductor wrap` session, when there is one. It is what makes
 	// "work offered to me" answerable: without it the gateway knows the principal but not
 	// which of that principal's live sessions it is running inside.
@@ -333,7 +339,15 @@ func mustMarshal(v any) []byte {
 // ---------------------------------------------------------------------------
 
 // Serve runs the newline-delimited JSON-RPC loop over stdio until the input stream closes.
+//
+// For as long as it runs, it keeps the lease of whatever task the session has claimed alive
+// (keepLeaseAlive): the gateway process lives exactly as long as the harness session that
+// mounted it, so that is the session's liveness.
 func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
+	keepCtx, stopKeeping := context.WithCancel(ctx)
+	defer stopKeeping()
+	go s.keepLeaseAlive(keepCtx, nil)
+
 	s.out = bufio.NewWriter(out)
 	scanner := bufio.NewScanner(in)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)

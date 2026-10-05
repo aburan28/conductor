@@ -597,6 +597,70 @@ type PullRequest struct {
 	User struct {
 		Login string `json:"login"`
 	} `json:"user"`
+	// Merged and MergeCommitSHA say how a closed pull request ended: merged, or closed
+	// without merging. Both are present on the webhook payload and the single-PR endpoint.
+	Merged         bool   `json:"merged"`
+	MergeCommitSHA string `json:"merge_commit_sha"`
+	// MergedAt is set on every merged pull request, including in list responses, which do
+	// not carry Merged. UpdatedAt orders the closed list the poller pages through.
+	MergedAt  *time.Time `json:"merged_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+}
+
+// WasMerged reports whether a closed pull request ended in a merge, whichever of the two
+// signals the response carried.
+func (pr PullRequest) WasMerged() bool { return pr.Merged || pr.MergedAt != nil }
+
+// ClosedPullRequests lists a repository's pull requests closed (merged or not) since a given
+// time, most recently updated first. It pages until a pull request was last updated before
+// since, or maxPages pages of 100 have been read, so a busy repository costs a bounded
+// number of requests per poll.
+func (c *Client) ClosedPullRequests(ctx context.Context, installationID int64, owner, repo string, since time.Time, maxPages int) ([]PullRequest, error) {
+	tok, err := c.InstallationToken(ctx, installationID)
+	if err != nil {
+		return nil, err
+	}
+	base, err := repoPath(owner, repo)
+	if err != nil {
+		return nil, err
+	}
+	if maxPages <= 0 {
+		maxPages = 1
+	}
+	var out []PullRequest
+	for page := 1; page <= maxPages; page++ {
+		var batch []PullRequest
+		p := fmt.Sprintf("%s/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=%d", base, page)
+		if err := c.do(ctx, http.MethodGet, p, tok, nil, &batch); err != nil {
+			return nil, err
+		}
+		for _, pr := range batch {
+			if pr.UpdatedAt.Before(since) {
+				return out, nil
+			}
+			out = append(out, pr)
+		}
+		if len(batch) < 100 {
+			break
+		}
+	}
+	return out, nil
+}
+
+// GetPullRequest fetches one pull request, open or not. The poller uses it to learn how a
+// pull request it saw open has ended once it drops off the open list.
+func (c *Client) GetPullRequest(ctx context.Context, installationID int64, owner, repo string, number int) (PullRequest, error) {
+	tok, err := c.InstallationToken(ctx, installationID)
+	if err != nil {
+		return PullRequest{}, err
+	}
+	base, err := repoPath(owner, repo)
+	if err != nil {
+		return PullRequest{}, err
+	}
+	var out PullRequest
+	err = c.do(ctx, http.MethodGet, fmt.Sprintf("%s/pulls/%d", base, number), tok, nil, &out)
+	return out, err
 }
 
 // OpenPullRequests lists a repository's open pull requests, newest first (up to 100).

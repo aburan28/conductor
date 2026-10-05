@@ -18,6 +18,12 @@ const leaseColumns = `
 	holder_principal::text, COALESCE(session_id::text, ''),
 	acquired_at, heartbeat_at, expires_at, released_at, COALESCE(release_reason, '')`
 
+// leaseColumnsQualified is leaseColumns for a query that aliases leases as l.
+const leaseColumnsQualified = `
+	l.id::text, l.task_id::text, l.attempt_id::text, l.project_id::text, l.fencing_epoch,
+	l.holder_principal::text, COALESCE(l.session_id::text, ''),
+	l.acquired_at, l.heartbeat_at, l.expires_at, l.released_at, COALESCE(l.release_reason, '')`
+
 func scanLease(scan func(...any) error) (domain.Lease, error) {
 	var l domain.Lease
 	err := scan(&l.ID, &l.TaskID, &l.AttemptID, &l.ProjectID, &l.FencingEpoch,
@@ -92,6 +98,27 @@ func (s *Store) Claim(ctx context.Context, p ClaimParams) (ClaimResult, error) {
 		// competing claim's insert.
 		if err := lockProject(ctx, tx, p.ProjectID); err != nil {
 			return err
+		}
+
+		// A lease bound to a session is renewed by that session's heartbeat, so the session
+		// must be the claimant's own and still open. Otherwise a claim could ride a
+		// teammate's sidecar, or bind itself to a session that will never heartbeat again.
+		if p.SessionID != "" {
+			var owner, sessProject domain.ID
+			var closed bool
+			if err := tx.QueryRow(ctx, `
+				SELECT principal_id::text, project_id::text, closed_at IS NOT NULL
+				  FROM sessions WHERE id = $1::uuid`, p.SessionID,
+			).Scan(&owner, &sessProject, &closed); err != nil {
+				if errors.Is(noRows(err), domain.ErrNotFound) {
+					return fmt.Errorf("%w: unknown session %s", domain.ErrInvalidArgument, p.SessionID)
+				}
+				return err
+			}
+			if owner != p.HolderPrincipal || sessProject != p.ProjectID || closed {
+				return fmt.Errorf("%w: session %s is not an open session of the claimant in this project",
+					domain.ErrNotPermitted, p.SessionID)
+			}
 		}
 
 		// (1) Lock the task row.
@@ -528,18 +555,13 @@ func (s *Store) Release(ctx context.Context, p ReleaseParams) (domain.Task, erro
 			return err
 		}
 
-		if !p.KeepReservations {
-			if err := releaseTaskReservationsTx(ctx, tx, p.Fence.TaskID); err != nil {
-				return err
-			}
-		}
-
 		var status domain.TaskStatus
 		var attemptsCount, maxAttempts int
+		var prState string
 		if err := tx.QueryRow(ctx, `
-			SELECT status, attempts_count, max_attempts
+			SELECT status, attempts_count, max_attempts, pull_request_state
 			  FROM tasks WHERE id = $1::uuid FOR UPDATE`, p.Fence.TaskID,
-		).Scan(&status, &attemptsCount, &maxAttempts); err != nil {
+		).Scan(&status, &attemptsCount, &maxAttempts, &prState); err != nil {
 			return noRows(err)
 		}
 
@@ -549,6 +571,22 @@ func (s *Store) Release(ctx context.Context, p ReleaseParams) (domain.Task, erro
 		}
 		if err := domain.AssertTaskTransition(status, next); err != nil {
 			return err
+		}
+		// The work's pull request already merged (someone merged it while the attempt was
+		// still open): there is nothing left to wait for, so finishing completes the task.
+		if PendingMerge(next) && prState == "merged" && domain.CanTransitionTask(next, domain.TaskDone) {
+			next = domain.TaskDone
+		}
+
+		// Finished work keeps its territory until it lands. A task that moves to verifying
+		// (or review, or merging) has its changes in a branch or pull request that has not
+		// merged yet; releasing its reservations here would let the next person claim files
+		// whose new contents are still in flight. The hold is dropped when the task is done
+		// or cancelled (UpdateTaskStatus, or a merge on GitHub).
+		if !p.KeepReservations && !PendingMerge(next) {
+			if err := releaseTaskReservationsTx(ctx, tx, p.Fence.TaskID); err != nil {
+				return err
+			}
 		}
 
 		var err error

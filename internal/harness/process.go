@@ -39,7 +39,11 @@ type ProcessDriver struct {
 	// VersionArgs probes availability. Empty means "assume available if the binary exists".
 	VersionArgs []string
 	Adapt       Adapter
-	Caps        Capabilities
+	// NewAdapt, when set, builds a fresh adapter for each run, for a stream whose meaning
+	// depends on what came before it in the same run (Codex reports running totals). It
+	// takes precedence over Adapt.
+	NewAdapt func() Adapter
+	Caps     Capabilities
 	// StdinInstruction sends the instruction on stdin instead of as an argument, which
 	// avoids a multi-kilobyte task card hitting the OS argument-length limit.
 	StdinInstruction bool
@@ -129,8 +133,12 @@ func (d *ProcessDriver) Start(ctx context.Context, spec RunSpec) (Handle, error)
 		started: time.Now(),
 	}
 
+	adapt := d.Adapt
+	if d.NewAdapt != nil {
+		adapt = d.NewAdapt()
+	}
 	go drain(stderr)
-	go h.pump(stdout, d.Adapt)
+	go h.pump(stdout, adapt)
 	return h, nil
 }
 
@@ -461,10 +469,10 @@ func opencodeAdapter(line []byte) (Event, bool) {
 }
 
 // genericAdapter parses a JSONL event stream defensively, extracting whichever of the
-// well-known metadata keys are present.
+// well-known metadata keys are present. It serves the templated exec driver, whose harness is
+// whatever an operator configured; Claude, Codex, and OpenCode have adapters of their own.
 //
-// Codex and OpenCode both emit JSONL, but their exact schemas vary by version and this build
-// has not verified them. Reading a small set of key aliases rather than a fixed schema means
+// Reading a small set of key aliases rather than a fixed schema means
 // a version bump degrades to "fewer metrics" instead of "no events at all" — and the privacy
 // property holds either way, because unknown keys are simply never read.
 func genericAdapter(line []byte) (Event, bool) {

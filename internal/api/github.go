@@ -94,6 +94,10 @@ type GitHub struct {
 	file      githubapp.Credentials
 	fileFound bool
 	holder    string
+
+	// sweep remembers, per repository, when closed pull requests were last swept, so the
+	// poller pages only through what closed since (github_merge.go).
+	sweep pullSweep
 }
 
 // credsRefresh bounds how long a replica keeps serving an app another replica has replaced.
@@ -373,6 +377,10 @@ func (g *GitHub) pollOnce(ctx context.Context) error {
 				if _, err := g.checkPull(ctx, inst.ID, repo.Owner, repo.Name, repo.Private, pr, projects); err != nil {
 					errs = append(errs, fmt.Errorf("%s#%d: %w", repo.FullName, pr.Number, err))
 				}
+			}
+			// Without a webhook, this is how a merge completes its task.
+			if err := g.syncPullLifecycle(ctx, inst.ID, repo.Owner, repo.Name, pulls, projects); err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", repo.FullName, err))
 			}
 		}
 	}
@@ -1130,13 +1138,16 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		s.ok(w, r, http.StatusBadRequest, ErrorBody{Error: "not a pull_request payload", Code: "invalid_argument"})
 		return
 	}
+	owner, repo := ev.Repository.Owner.Login, ev.Repository.Name
 	switch ev.Action {
 	case "opened", "reopened", "synchronize", "ready_for_review", "edited":
+	case "closed":
+		s.githubPullClosed(w, r, owner, repo, ev.PullRequest)
+		return
 	default:
 		s.ok(w, r, http.StatusAccepted, map[string]any{"ignored": ev.Action})
 		return
 	}
-	owner, repo := ev.Repository.Owner.Login, ev.Repository.Name
 	if ev.PullRequest.Draft || ev.Installation.ID == 0 || !githubapp.ValidRepo(owner, repo) {
 		s.ok(w, r, http.StatusAccepted, map[string]any{"ignored": "draft, not installed, or not a repository"})
 		return
@@ -1151,6 +1162,9 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		projects, err := s.github.projectsFor(ctx, owner, repo)
 		if err != nil || len(projects) == 0 {
 			return
+		}
+		if err := s.github.linkPulls(ctx, []githubapp.PullRequest{ev.PullRequest}, projects); err != nil {
+			s.logger.Warn("github link failed", "repo", owner+"/"+repo, "pr", ev.PullRequest.Number, "error", err)
 		}
 		if _, err := s.github.checkPull(ctx, ev.Installation.ID, owner, repo, ev.Repository.Private, ev.PullRequest, projects); err != nil {
 			s.logger.Warn("github check failed", "repo", owner+"/"+repo, "pr", ev.PullRequest.Number, "error", err)

@@ -29,7 +29,17 @@ type ScopeConflict struct {
 	HolderOwner   string                 `json:"holder_owner"`
 	HolderMode    domain.ReservationMode `json:"holder_mode"`
 	HeldSince     time.Time              `json:"held_since"`
+	// HolderStatus is the holding task's status. A holder in verifying, review_required, or
+	// merging has finished its work and is waiting for it to merge: the territory is held
+	// because its new contents sit in an unmerged branch, not because someone is editing.
+	HolderStatus domain.TaskStatus `json:"holder_status,omitempty"`
+	// HolderPullRequest is the holder's pull request, when one is known, so a blocked caller
+	// can go and look at (or review) the change they are waiting for.
+	HolderPullRequest string `json:"holder_pull_request,omitempty"`
 }
+
+// PendingMerge reports whether the conflict is with finished work waiting to merge.
+func (c ScopeConflict) PendingMerge() bool { return PendingMerge(c.HolderStatus) }
 
 // Blocking reports whether any conflict in the set forbids proceeding.
 func Blocking(conflicts []ScopeConflict) bool {
@@ -48,6 +58,8 @@ type activeHolder struct {
 	parsed     resource.Resource
 	taskRef    string
 	taskTitle  string
+	taskStatus domain.TaskStatus
+	pullURL    string
 	visibility domain.Visibility
 	owner      string
 	ownerID    domain.ID
@@ -66,7 +78,8 @@ func loadActiveHolders(ctx context.Context, tx pgx.Tx, projectID, excludeTask do
 		       COALESCE(r.attempt_id::text, ''), COALESCE(r.lease_id::text, ''),
 		       r.principal_id::text, r.resource_type, r.resource_key, r.mode, r.source,
 		       COALESCE(r.alternative_group, ''), r.created_at,
-		       t.ref, t.title, t.visibility, t.created_by::text, p.handle
+		       t.ref, t.title, t.visibility, t.created_by::text, p.handle,
+		       t.status, t.pull_request_url
 		  FROM scope_reservations r
 		  JOIN tasks t ON t.id = r.task_id
 		  JOIN principals p ON p.id = r.principal_id
@@ -87,7 +100,8 @@ func loadActiveHolders(ctx context.Context, tx pgx.Tx, projectID, excludeTask do
 			&h.res.AttemptID, &h.res.LeaseID,
 			&h.res.PrincipalID, &h.res.ResourceType, &h.res.ResourceKey, &h.res.Mode,
 			&h.res.Source, &h.res.AlternativeGroup, &h.res.CreatedAt,
-			&h.taskRef, &h.taskTitle, &h.visibility, &h.ownerID, &h.owner); err != nil {
+			&h.taskRef, &h.taskTitle, &h.visibility, &h.ownerID, &h.owner,
+			&h.taskStatus, &h.pullURL); err != nil {
 			return nil, err
 		}
 		h.res.Active = true
@@ -142,17 +156,19 @@ func evaluateScopes(
 				continue
 			}
 			conflicts = append(conflicts, ScopeConflict{
-				Requested:     want.String(),
-				ResourceKey:   h.parsed.String(),
-				Outcome:       outcome,
-				Severity:      resource.SeverityFor(outcome, h.res.Mode, mode),
-				Kind:          resource.ConflictKindFor(h.res.Mode, mode),
-				HolderTaskID:  h.res.TaskID,
-				HolderTaskRef: h.taskRef,
-				HolderTitle:   h.taskTitle,
-				HolderOwner:   h.owner,
-				HolderMode:    h.res.Mode,
-				HeldSince:     h.res.CreatedAt,
+				Requested:         want.String(),
+				ResourceKey:       h.parsed.String(),
+				Outcome:           outcome,
+				Severity:          resource.SeverityFor(outcome, h.res.Mode, mode),
+				Kind:              resource.ConflictKindFor(h.res.Mode, mode),
+				HolderTaskID:      h.res.TaskID,
+				HolderTaskRef:     h.taskRef,
+				HolderTitle:       h.taskTitle,
+				HolderOwner:       h.owner,
+				HolderMode:        h.res.Mode,
+				HeldSince:         h.res.CreatedAt,
+				HolderStatus:      h.taskStatus,
+				HolderPullRequest: h.pullURL,
 			})
 		}
 	}
@@ -170,7 +186,9 @@ func redactHolderTitles(conflicts []ScopeConflict, holders []activeHolder, viewe
 	}
 	for i := range conflicts {
 		if private[conflicts[i].HolderTaskID] {
+			// The pull request would name the work as surely as the title does.
 			conflicts[i].HolderTitle = ""
+			conflicts[i].HolderPullRequest = ""
 		}
 	}
 }
@@ -336,36 +354,225 @@ func scanReservations(rows pgx.Rows) ([]domain.ScopeReservation, error) {
 
 // ReleaseReservation drops a single reservation.
 func (s *Store) ReleaseReservation(ctx context.Context, id domain.ID) error {
-	tag, err := s.pool.Exec(ctx, `
-		UPDATE scope_reservations SET active = false, released_at = now()
-		 WHERE id = $1::uuid AND active = true`, id)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return domain.ErrNotFound
-	}
-	return nil
+	return s.Tx(ctx, func(tx pgx.Tx) error {
+		released, err := releaseReservationsTx(ctx, tx,
+			`UPDATE scope_reservations SET active = false, released_at = now()
+			  WHERE id = $1::uuid AND active = true
+			 RETURNING task_id::text, resource_type, resource_key`, id)
+		if err != nil {
+			return err
+		}
+		if len(released) == 0 {
+			return domain.ErrNotFound
+		}
+		return notifyWaitersTx(ctx, tx, released)
+	})
 }
 
 // ReleaseTaskReservations drops every reservation a task holds. Called on release, handoff,
 // completion, and lease reclamation.
 func (s *Store) ReleaseTaskReservations(ctx context.Context, taskID domain.ID) (int64, error) {
-	tag, err := s.pool.Exec(ctx, `
-		UPDATE scope_reservations SET active = false, released_at = now()
-		 WHERE task_id = $1::uuid AND active = true`, taskID)
-	if err != nil {
-		return 0, err
-	}
-	return tag.RowsAffected(), nil
+	var n int64
+	err := s.Tx(ctx, func(tx pgx.Tx) error {
+		released, err := releaseReservationsTx(ctx, tx, releaseTaskReservationsSQL, taskID)
+		if err != nil {
+			return err
+		}
+		n = int64(len(released))
+		return notifyWaitersTx(ctx, tx, released)
+	})
+	return n, err
 }
 
-// releaseTaskReservationsTx is the in-transaction form used by claim/release paths.
+const releaseTaskReservationsSQL = `
+	UPDATE scope_reservations SET active = false, released_at = now()
+	 WHERE task_id = $1::uuid AND active = true
+	RETURNING task_id::text, resource_type, resource_key`
+
+// releaseTaskReservationsTx is the in-transaction form used by claim/release paths. Whoever
+// was blocked on the freed territory is told in the same transaction (notifyWaitersTx).
 func releaseTaskReservationsTx(ctx context.Context, tx pgx.Tx, taskID domain.ID) error {
-	_, err := tx.Exec(ctx, `
-		UPDATE scope_reservations SET active = false, released_at = now()
-		 WHERE task_id = $1::uuid AND active = true`, taskID)
-	return err
+	released, err := releaseReservationsTx(ctx, tx, releaseTaskReservationsSQL, taskID)
+	if err != nil {
+		return err
+	}
+	return notifyWaitersTx(ctx, tx, released)
+}
+
+// releasedScope is one reservation that was just dropped.
+type releasedScope struct {
+	taskID   domain.ID
+	resource resource.Resource
+}
+
+func releaseReservationsTx(ctx context.Context, tx pgx.Tx, query string, arg any) ([]releasedScope, error) {
+	rows, err := tx.Query(ctx, query, arg)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []releasedScope
+	for rows.Next() {
+		var r releasedScope
+		var typ domain.ResourceType
+		var key string
+		if err := rows.Scan(&r.taskID, &typ, &key); err != nil {
+			return nil, err
+		}
+		parsed, err := resource.New(typ, key)
+		if err != nil {
+			// Same rule as loadActiveHolders: an unparseable reservation was treated as
+			// repo-wide while held, so its release frees the whole repository.
+			parsed = resource.Resource{Type: domain.ResourceRepo, Key: ""}
+		}
+		r.resource = parsed
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// waiterWindow bounds how far back a blocked request still counts as someone waiting. It
+// matches how long a recorded intent lives (StartWork records them for 15 minutes).
+const waiterWindow = "15 minutes"
+
+// notifyWaitersTx tells whoever was blocked on freshly released territory that it is free.
+//
+// "Wait for it" was the advice every blocked caller got, with nothing to wait on: no signal
+// ever said the holder had let go. A blocked check, start-work, or scope expansion leaves a
+// short-lived intent with outcome block_conflict and the scopes it wanted; when a release
+// overlaps those scopes, this appends one `scope.released` event per waiting party, naming
+// them, so the dashboard (and any notifier reading the event stream) can tell them to try
+// again. The event carries the freed resources and the holder's ref — territory and owner,
+// which a conflict already disclosed — and nothing about either side's intent.
+//
+// It is a nudge, not a reservation: someone else may still claim the territory first, and the
+// waiter's own re-check is what decides.
+func notifyWaitersTx(ctx context.Context, tx pgx.Tx, released []releasedScope) error {
+	if len(released) == 0 {
+		return nil
+	}
+	byTask := map[domain.ID][]resource.Resource{}
+	var order []domain.ID
+	for _, r := range released {
+		if _, ok := byTask[r.taskID]; !ok {
+			order = append(order, r.taskID)
+		}
+		byTask[r.taskID] = append(byTask[r.taskID], r.resource)
+	}
+	for _, taskID := range order {
+		if err := notifyWaitersForTaskTx(ctx, tx, taskID, byTask[taskID]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func notifyWaitersForTaskTx(ctx context.Context, tx pgx.Tx, taskID domain.ID, freed []resource.Resource) error {
+	var orgID, projectID domain.ID
+	var holderRef string
+	if err := tx.QueryRow(ctx, `
+		SELECT organization_id::text, project_id::text, ref FROM tasks WHERE id = $1::uuid`,
+		taskID).Scan(&orgID, &projectID, &holderRef); err != nil {
+		return noRows(err)
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT i.principal_id::text, p.handle, COALESCE(i.session_id::text, ''),
+		       COALESCE(i.task_id::text, ''), COALESCE(t.ref, ''), i.scopes
+		  FROM intents i
+		  JOIN principals p ON p.id = i.principal_id
+		  LEFT JOIN tasks t ON t.id = i.task_id
+		 WHERE i.project_id = $1::uuid
+		   AND i.outcome = $2
+		   AND i.expires_at > now()
+		   AND i.created_at > now() - $4::interval
+		   AND (i.task_id IS NULL OR i.task_id <> $3::uuid)
+		 ORDER BY i.created_at`, projectID, string(domain.OutcomeBlockConflict), taskID, waiterWindow)
+	if err != nil {
+		return err
+	}
+	type waiter struct {
+		principalID, handle, sessionID, taskRef string
+		resources                               []string
+	}
+	var waiters []*waiter
+	index := map[string]*waiter{}
+	for rows.Next() {
+		var principalID, handle, sessionID, waitingTask, waitingRef string
+		var raw []byte
+		if err := rows.Scan(&principalID, &handle, &sessionID, &waitingTask, &waitingRef, &raw); err != nil {
+			rows.Close()
+			return err
+		}
+		var wanted []domain.ScopeRequest
+		if err := decodeJSON(raw, &wanted); err != nil {
+			continue
+		}
+		var hits []string
+		for _, w := range wanted {
+			want, err := resource.Parse(w.Resource)
+			if err != nil {
+				continue
+			}
+			for _, f := range freed {
+				if resource.Overlaps(want, f) {
+					hits = append(hits, f.String())
+				}
+			}
+		}
+		if len(hits) == 0 {
+			continue
+		}
+		// One notice per waiting party per release, however many times they were refused.
+		key := principalID + "\x00" + waitingRef
+		w := index[key]
+		if w == nil {
+			w = &waiter{principalID: principalID, handle: handle, sessionID: sessionID, taskRef: waitingRef}
+			index[key] = w
+			waiters = append(waiters, w)
+		}
+		if w.sessionID == "" {
+			w.sessionID = sessionID
+		}
+		w.resources = appendUnique(w.resources, hits...)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, w := range waiters {
+		payload := map[string]any{
+			"task_ref": holderRef, "resources": w.resources,
+			"principal": w.handle, "principal_id": w.principalID,
+			"reason": "territory you were blocked on was released; check again",
+		}
+		if w.sessionID != "" {
+			payload["session_id"] = w.sessionID
+		}
+		if w.taskRef != "" {
+			payload["waiting_task_ref"] = w.taskRef
+		}
+		if err := appendEvents(ctx, tx, orgID, projectID, "",
+			eventSpec{"task", taskID, "scope.released", domain.VisibilityTeamSummary, payload}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func appendUnique(dst []string, values ...string) []string {
+	for _, v := range values {
+		found := false
+		for _, d := range dst {
+			if d == v {
+				found = true
+				break
+			}
+		}
+		if !found {
+			dst = append(dst, v)
+		}
+	}
+	return dst
 }
 
 // ProtectedScopesInFlight counts active protected_exclusive reservations, which policy caps
