@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 )
@@ -405,16 +404,6 @@ func Fingerprint(parts ...[]byte) string {
 		h.Write(p)
 	}
 	return hex.EncodeToString(h.Sum(nil))[:32]
-}
-
-// sortedKeys is a small helper for deterministic output.
-func sortedKeys(m map[string]any) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 // decodeMap decodes a JSON object into a map, tolerating failure.

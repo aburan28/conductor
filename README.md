@@ -18,6 +18,71 @@ what is actually built.
 
 ---
 
+## Install
+
+You need:
+
+- **git**, and **curl** for the release installer;
+- **PostgreSQL 16 or newer** that you already run, *or* **Docker**, in which case
+  `conductor up` starts Postgres 17 in a container for you;
+- **Go 1.25.14 or newer** only to build from source (an older `go` downloads the right
+  toolchain itself unless `GOTOOLCHAIN=local` is set).
+
+Pick one way to get the three binaries (`conductor`, `conductord`, `conductor-mcp`) onto your
+PATH:
+
+```bash
+# A release build for macOS or Linux (amd64/arm64), no Go needed. Checks SHA256SUMS before
+# installing into ~/.local/bin; add that directory to PATH if it is not already there.
+curl -fsSL https://raw.githubusercontent.com/aburan28/conductor/main/scripts/install-release.sh \
+  | bash -s -- aburan28/conductor ~/.local/bin
+
+# From a clone: `make install` downloads the release as above, `make install-local` builds
+# this checkout. Both add ~/.local/bin to PATH in your shell's startup file (zsh, bash, fish).
+git clone https://github.com/aburan28/conductor && cd conductor && make install-local
+
+# With Go, straight from the module:
+go install github.com/aburan28/conductor/cmd/...@latest
+```
+
+Every release archive carries a GitHub build-provenance attestation:
+`gh attestation verify conductor_vX.Y.Z_linux_amd64.tar.gz --repo aburan28/conductor`.
+`conductor version` (or `--version` on any of the three binaries) says which build you have.
+
+## Quickstart
+
+From the repository you want to coordinate:
+
+```bash
+conductor up          # Postgres (Docker only if none is reachable), the control plane, your login
+conductor init        # optional: scaffold .conductor/ policy files into this repository
+conductor status      # what is in flight
+conductor dashboard   # prints a ready-to-open link
+conductor wrap claude # run Claude Code as a registered session (or codex, opencode)
+conductor down        # stop the control plane (--db also stops the Postgres container)
+```
+
+`conductor up` is the whole setup. It reuses a Postgres that already answers at the DSN
+(`--dsn`, or `DATABASE_URL`) and starts one in Docker only when none does; it starts the
+control plane (API, SSE, dashboard, scheduler) on `127.0.0.1:8080` in the background, with
+its log and pidfile under `~/.conductor/runtime/`; and it saves your CLI login at
+`~/.conductor/credentials`. No token to copy, no second terminal. Running it again reuses
+whatever is already up. In a clone of this repository, `make up` and `make down` do the same.
+
+`conductor doctor` checks everything at once: the control plane and its version, the
+database, `conductord`, git, Docker, and which coding tools are installed and connected.
+
+### Getting help
+
+```bash
+conductor help                # the commands you need first
+conductor help all            # every command
+conductor help task           # one command, with an example (same as: conductor task -h)
+source <(conductor completion bash)   # tab completion; also zsh and fish
+```
+
+---
+
 ## What it does
 
 ```
@@ -224,24 +289,10 @@ the parse boundary before it can reach the store. Three tests assert this mechan
 
 ---
 
-## Quickstart
+## Setting up, in detail
 
-Requires Go 1.25+, Docker (for Postgres), and git.
-
-```bash
-make up
-```
-
-That is the whole thing: Postgres on `:55432`, the binaries in `bin/`, the control plane
-(API, SSE, dashboard, scheduler) serving `127.0.0.1:8080` in the background — log and
-pidfile under `.conductor/runtime/` — and your CLI login saved at `~/.conductor/credentials`.
-No token to copy, no second terminal.
-
-```bash
-conductor status                             # what is in flight
-conductor dashboard                          # prints a ready-to-open link
-make down                                    # stop the control plane (make db-down also stops Postgres)
-```
+[Quickstart](#quickstart) covers the one-command path. The rest of this section is what
+happens underneath, and how to do it by hand or for a team.
 
 ### Signing in on your own machine needs no token
 
@@ -929,8 +980,10 @@ make db-up && make test
 make e2e      # scripted two-person scenario end to end
 ```
 
-CI runs all of it against a real Postgres on every push, and fails if the integration tests
-skip — a misconfigured database service would otherwise produce a silently green run.
+CI runs all of it against a real Postgres (16 and 17) on every push, with and without the
+race detector, and fails if the integration tests skip — a misconfigured database service
+would otherwise produce a silently green run. It also runs `staticcheck` and `govulncheck`,
+and builds and unit-tests on macOS, which the release ships binaries for.
 
 `scripts/e2e.sh` asserts the MVP acceptance criteria of DESIGN.md §31 rather than printing
 output for a human to eyeball: that a completed task carries a commit and runner-observed
@@ -1068,7 +1121,40 @@ Postgres (`scripts/pg-backup.sh`) — is covered in [docs/OPERATIONS.md](docs/OP
 
 ---
 
+## Removing Conductor
+
+`make uninstall` (or deleting the three binaries) removes the program, not what it created.
+All of it, from least to most destructive:
+
+```bash
+conductor down --db                          # stop the control plane and the conductor-db container
+conductor integrate <tool> --remove          # for each tool you connected (claude, codex, cursor, …)
+conductor sessions install-hook --uninstall  # if you installed the shutdown hook
+make uninstall                               # the binaries in ~/.local/bin and the PATH entry
+                                             # (~/.zshrc, ~/.bashrc or ~/.bash_profile, or fish conf.d)
+rm -rf ~/.conductor                          # credentials, pidfile and log, saved sessions,
+                                             # checkpoints, extra harness accounts, GitHub App key
+```
+
+`~/.conductor/checkpoints` may hold the only copy of a session you captured; export anything
+you want to keep (`conductor checkpoint export`) first.
+
+In each repository you ran `conductor init` in, `.conductor/` holds the policy files (versioned
+with your code; keep them if you might come back) and `.conductor/runtime/` the task worktrees.
+`init` also added a block between `<!-- conductor:begin -->` and `<!-- conductor:end -->` to
+`CLAUDE.md` and `AGENTS.md`; delete it by hand.
+
+The database is last because it is every task, reservation, and member of every project on
+this control plane. If `conductor up` started it in Docker:
+
+```bash
+docker rm -f conductor-db && docker volume rm conductor-pgdata
+```
+
+If you pointed Conductor at your own Postgres, drop its database there instead.
+
+---
+
 ## License
 
-Not yet chosen. DESIGN.md §35 notes that Apache-2.0 components from OpenAI Symphony are
-compatible with reuse here.
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

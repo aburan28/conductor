@@ -1,18 +1,25 @@
 name: release
 
-# Cutting a release is a tag push, not a CI step: pushing vX.Y.Z builds the
-# binaries for every supported platform and publishes them as release assets.
+# Cutting a release is a tag push, not a CI step: pushing vX.Y.Z builds the binaries for every
+# supported platform and publishes them, with a SHA256SUMS file and signed build-provenance
+# attestations, as release assets.
+#
+# Asset names keep the tag's leading "v" (conductor_v1.2.3_linux_amd64.tar.gz), which is what
+# scripts/install-release.sh downloads. Change both together or not at all.
 on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: write
+# Nothing by default; each job asks for what it needs.
+permissions: {}
 
 jobs:
   build:
     name: build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
     strategy:
       matrix:
         include:
@@ -21,60 +28,108 @@ jobs:
           - { goos: linux,  goarch: amd64 }
           - { goos: linux,  goarch: arm64 }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          cache: true
+          # A release is built from a clean module cache, so nothing a PR run cached can end
+          # up inside a published binary.
+          cache: false
 
-      - name: build
+      - name: build and package
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
+          VERSION: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          dir="dist/conductor_${version}_${GOOS}_${GOARCH}"
-          mkdir -p "$dir"
+          set -euo pipefail
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "tag $VERSION is not a semantic version (vX.Y.Z); refusing to release it" >&2
+            exit 1
+          fi
+          module="$(go list -m)"
+          ldflags="-s -w -X ${module}/internal/version.version=${VERSION} -X ${module}/internal/version.commit=${COMMIT}"
+          name="conductor_${VERSION}_${GOOS}_${GOARCH}"
+          mkdir -p "dist/$name"
           for bin in conductord conductor conductor-mcp; do
-            go build -trimpath -ldflags "-s -w" -o "$dir/$bin" "./cmd/$bin"
+            go build -trimpath -ldflags "$ldflags" -o "dist/$name/$bin" "./cmd/$bin"
           done
-          tar -C dist -czf "dist/${dir}.tar.gz" "$dir"
+          cp LICENSE NOTICE README.md "dist/$name/"
+          # -C dist makes the archive hold "$name/…", which is the layout install-release.sh
+          # unpacks. The archive path is relative to the working directory, not to dist.
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/*.tar.gz
+          if-no-files-found: error
 
   publish:
     needs: build
-    # needs: build waits for every matrix leg, so all archives are present
-    # by the time the release is created.
+    # needs: build waits for every matrix leg, so all archives are present by the time the
+    # release is created.
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write     # create the release and upload its assets
+      id-token: write     # sign the provenance attestation (Sigstore, via OIDC)
+      attestations: write # store the attestation
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: collect platform archives
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          path: dist
+          path: out
+          merge-multiple: true
 
-      - name: checksums and release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: checksums
+        working-directory: out
         run: |
-          mkdir -p out
-          for f in dist/*/*.tar.gz; do cp "$f" out/; done
-          cd out
-          sha256sum *.tar.gz > SHA256SUMS
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            # Release already exists (e.g. created locally before the tag
-            # push); replace its assets so re-tagging is safe.
-            gh release upload "${GITHUB_REF_NAME}" --clobber *.tar.gz SHA256SUMS
+          set -euo pipefail
+          ls -l
+          [ "$(ls conductor_*.tar.gz | wc -l)" -eq 4 ] || { echo "expected 4 archives" >&2; exit 1; }
+          sha256sum conductor_*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      # Provenance binds each archive's digest to this workflow, commit, and tag. Verify with:
+      #   gh attestation verify conductor_vX.Y.Z_linux_amd64.tar.gz --repo OWNER/REPO
+      - name: attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: out/SHA256SUMS
+
+      - name: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        working-directory: out
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # A release created by hand before the tag push may be filled in, but a published
+            # asset is never replaced: someone may already have installed and verified it.
+            # gh release upload without --clobber fails on a name that already exists.
+            existing="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+            if [ -n "$existing" ]; then
+              echo "release $TAG already has assets:" >&2
+              echo "$existing" >&2
+              echo "refusing to replace them; cut a new tag instead" >&2
+              exit 1
+            fi
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" conductor_*.tar.gz SHA256SUMS
           else
-            gh release create "${GITHUB_REF_NAME}" \
-              --title "${GITHUB_REF_NAME}" \
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "$TAG" \
               --notes "$(git log -1 --format=%B)" \
-              *.tar.gz SHA256SUMS
+              conductor_*.tar.gz SHA256SUMS
           fi

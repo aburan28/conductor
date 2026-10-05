@@ -128,7 +128,7 @@ func cmdDispatch(ctx context.Context, args []string) error {
 	title := fs.String("title", "", "title for a new task (when the argument is an objective, not a ref)")
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	var scopes scopeFlag
-	fs.Var(&scopes, "scope", "resource the work will touch (repeatable)")
+	fs.Var(&scopes, "scope", scopeFlagHelp)
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, `conductor dispatch — send work to a model by policy
 

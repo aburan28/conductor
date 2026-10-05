@@ -13,6 +13,7 @@ import (
 	"github.com/adamburan/conductor/internal/domain"
 	"github.com/adamburan/conductor/internal/privacy"
 	"github.com/adamburan/conductor/internal/taskcard"
+	"github.com/adamburan/conductor/internal/version"
 )
 
 func (s *Server) routes() {
@@ -122,13 +123,16 @@ func (s *Server) routes() {
 // health is the unauthenticated liveness probe. It names a failure without quoting it: the
 // driver's error text can carry the database host, user and more. /v1/ready has the detail.
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
+	// The version lets `conductor doctor` warn when the CLI and the server it talks to are
+	// different builds, which is how a stale install surfaces as confusing API errors.
 	if err := s.store.Pool().Ping(r.Context()); err != nil {
 		s.logger.Error("health: database unreachable", "request_id", requestID(r), "error", err)
 		s.ok(w, r, http.StatusServiceUnavailable,
-			map[string]any{"status": "degraded", "database": "unreachable", "request_id": requestID(r)})
+			map[string]any{"status": "degraded", "database": "unreachable", "request_id": requestID(r),
+				"version": version.Version()})
 		return
 	}
-	s.ok(w, r, http.StatusOK, map[string]any{"status": "ok", "time": time.Now().UTC()})
+	s.ok(w, r, http.StatusOK, map[string]any{"status": "ok", "time": time.Now().UTC(), "version": version.Version()})
 }
 
 func (s *Server) whoami(w http.ResponseWriter, r *http.Request, p domain.Principal) {

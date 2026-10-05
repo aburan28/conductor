@@ -20,15 +20,23 @@ endif
 
 export DATABASE_URL
 
+# Stamp the version into every binary so `conductor version` and `conductor doctor` can tell
+# a stale install from a current one. Named BUILD_* because VERSION already selects which
+# release `make install` downloads.
+MODULE := $(shell $(GO) list -m 2>/dev/null)
+BUILD_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo devel)
+BUILD_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null)
+LDFLAGS := -X $(MODULE)/internal/version.version=$(BUILD_VERSION) -X $(MODULE)/internal/version.commit=$(BUILD_COMMIT)
+
 .PHONY: all build test unit vet fmt db-up db-down db-wait bootstrap setup run serve login up down mcp wrap claude codex opencode clean e2e install install-local uninstall
 
 all: vet build test
 
 build:
 	@mkdir -p $(BIN)
-	$(GO) build -o $(BIN)/conductord ./cmd/conductord
-	$(GO) build -o $(BIN)/conductor ./cmd/conductor
-	$(GO) build -o $(BIN)/conductor-mcp ./cmd/conductor-mcp
+	$(GO) build -ldflags "$(LDFLAGS)" -o $(BIN)/conductord ./cmd/conductord
+	$(GO) build -ldflags "$(LDFLAGS)" -o $(BIN)/conductor ./cmd/conductor
+	$(GO) build -ldflags "$(LDFLAGS)" -o $(BIN)/conductor-mcp ./cmd/conductor-mcp
 	@echo "built: $(BIN)/conductord $(BIN)/conductor $(BIN)/conductor-mcp"
 
 vet:
@@ -89,16 +97,22 @@ setup: bootstrap
 serve run: build db-up
 	$(BIN)/conductord $(if $(ADDR),--addr $(ADDR))
 
-# One command from a cold checkout to a running, logged-in control plane:
-# Postgres, the binaries, conductord in the background (pidfile + log under
-# .conductor/runtime/), and a saved CLI login — bootstrap writes it directly,
-# so there is no token to copy. `make down` stops the server.
-up:
-	./scripts/up.sh
+# One command from a cold checkout to a running, logged-in control plane. A thin wrapper over
+# `conductor up`, so `make up` and `conductor up` share one pidfile, one log
+# (~/.conductor/runtime) and one login, and `conductor down` stops either. Docker is used only
+# when no Postgres answers at the DSN. DATABASE_URL is passed through only when you set it:
+# the Makefile's default would otherwise override the DSN `conductor up` chooses itself.
+#   make up                         # defaults
+#   make up DATABASE_URL=postgres://me@localhost:5432/conductor ADDR=127.0.0.1:9090
+up: build
+	$(if $(filter file,$(origin DATABASE_URL)),env -u DATABASE_URL) $(BIN)/conductor up \
+	  $(if $(filter command line environment,$(origin ENDPOINT)),--endpoint $(ENDPOINT)) \
+	  $(if $(ADDR),--addr $(ADDR)) $(if $(PROJECT),--project $(PROJECT))
 
-# Stop the background control plane started by `make up`. Postgres keeps running.
-down:
-	./scripts/down.sh
+# Stop the control plane `make up` (or `conductor up`) started. Postgres keeps running;
+# `make down DB=1` stops it too.
+down: build
+	$(BIN)/conductor down $(if $(DB),--db)
 
 # Save the bootstrap token (or one you pass with TOKEN=…) as the conductor CLI's
 # default credentials. Requires `conductord` to already be reachable at ENDPOINT.
@@ -139,7 +153,8 @@ clean:
 
 # Download the released binaries for this platform from the GitHub releases of
 # $(REPO) into INSTALL_BIN (default ~/.local/bin), and idempotently add that
-# directory to PATH in ~/.zshrc. No Go toolchain needed. Pin a release with
+# directory to PATH in your shell's startup file (zsh, bash or fish; for other
+# shells the line to add is printed). No Go toolchain needed. Pin a release with
 # VERSION=vX.Y.Z; by default the latest release is used. Override the prefix
 # with: make install INSTALL_PREFIX=/usr/local (needs sudo for /usr/local).
 # To install a build of the current tree instead, use install-local.
@@ -158,7 +173,9 @@ install-local: build
 	@./scripts/install-path.sh $(INSTALL_BIN)
 	@echo "installed: $(CONDUCTOR_BINS:%=$(INSTALL_BIN)/%)"
 
-# Remove the binaries and the PATH entry added by `make install`.
+# Remove the binaries and the PATH entry added by `make install`. State is left
+# alone; README.md "Removing Conductor" lists the rest (~/.conductor, each
+# repository's .conductor/, the conductor-db container and its volume).
 uninstall:
 	@for bin in $(CONDUCTOR_BINS); do \
 	  rm -f $(INSTALL_BIN)/$$bin; \

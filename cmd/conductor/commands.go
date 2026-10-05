@@ -120,6 +120,7 @@ func cmdStatus(ctx context.Context, args []string) error {
 			printPresence(p)
 		}
 	}
+	printStatusNextStep(os.Stdout, summary)
 	return nil
 }
 
@@ -491,7 +492,7 @@ func taskCreate(ctx context.Context, args []string) error {
 	ready := fs.Bool("ready", true, "mark the task ready for dispatch")
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	var scopes scopeFlag
-	fs.Var(&scopes, "scope", "resource this task will touch (repeatable)")
+	fs.Var(&scopes, "scope", scopeFlagHelp)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -532,7 +533,7 @@ func taskClaim(ctx context.Context, args []string) error {
 	next := fs.Bool("next", false, "claim the highest-priority ready task")
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	var scopes scopeFlag
-	fs.Var(&scopes, "scope", "resource to reserve with the claim (repeatable)")
+	fs.Var(&scopes, "scope", scopeFlagHelp)
 	positional, err := parseFlags(fs, args)
 	if err != nil {
 		return err
@@ -855,7 +856,7 @@ func cmdScope(ctx context.Context, args []string) error {
 		fs := flag.NewFlagSet("scope add", flag.ExitOnError)
 		project := fs.String("project", "", "project id or slug")
 		var scopes scopeFlag
-		fs.Var(&scopes, "scope", "resource to reserve (repeatable)")
+		fs.Var(&scopes, "scope", scopeFlagHelp)
 		positional, err := parseFlags(fs, rest)
 		if err != nil {
 			return err

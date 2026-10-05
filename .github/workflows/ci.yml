@@ -6,42 +6,30 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Every job only reads the repository. Anything that needs more asks for it per job.
+permissions:
+  contents: read
+
 # A push that supersedes an in-flight run cancels it. The Postgres-backed suite is the slow
 # part and there is no value in finishing a run for a commit nobody will look at.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Actions are pinned to full commit SHAs (a tag can be moved; a SHA cannot), with the
+# version in a comment so Dependabot can propose upgrades.
+
 jobs:
-  test:
-    name: build and test
+  lint:
+    name: lint
     runs-on: ubuntu-latest
-
-    # The integration tests need a real Postgres: SKIP LOCKED, advisory locks, and partial
-    # unique indexes are load-bearing, so there is nothing meaningful to test against a
-    # substitute.
-    services:
-      postgres:
-        image: postgres:17-alpine
-        env:
-          POSTGRES_USER: conductor
-          POSTGRES_PASSWORD: conductor
-          POSTGRES_DB: conductor
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U conductor -d conductor"
-          --health-interval 2s
-          --health-timeout 3s
-          --health-retries 30
-
-    env:
-      DATABASE_URL: postgres://conductor:conductor@localhost:5432/conductor?sslmode=disable
-
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -58,6 +46,74 @@ jobs:
 
       - name: go vet
         run: go vet ./...
+
+      # Pinned: staticcheck 2026.1 (v0.7.0) is the newest release that builds with the Go
+      # 1.25 toolchain go.mod selects; 2026.2 needs Go 1.26. Configuration: staticcheck.conf.
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
+
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Scans with the toolchain go.mod selects, so standard-library fixes count only once
+      # go.mod actually requires them. Pinned: v1.7.0 is the newest govulncheck that builds
+      # with Go 1.25 (v1.8.0 needs Go 1.26); the vulnerability database is always current.
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+
+  test:
+    name: test (Postgres ${{ matrix.postgres }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest supported version and the one docker-compose.yml and `conductor up` run.
+        postgres: ["16", "17"]
+
+    # The integration tests need a real Postgres: SKIP LOCKED, advisory locks, and partial
+    # unique indexes are load-bearing, so there is nothing meaningful to test against a
+    # substitute.
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}-alpine
+        env:
+          POSTGRES_USER: conductor
+          POSTGRES_PASSWORD: conductor
+          POSTGRES_DB: conductor
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U conductor -d conductor"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+
+    env:
+      DATABASE_URL: postgres://conductor:conductor@localhost:5432/conductor?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Full history and tags, so make build stamps a real `git describe` version.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
 
       - name: build
         run: make build
@@ -76,7 +132,7 @@ jobs:
         run: go test ./... -count=1
 
       - name: test with the race detector
-        run: go test ./internal/db/ ./internal/harness/ -race -count=1
+        run: go test -race ./... -count=1
 
       - name: end-to-end
         run: ./scripts/e2e.sh
@@ -87,3 +143,26 @@ jobs:
           for f in /tmp/conductor-e2e.*/conductord.log; do
             [ -f "$f" ] && { echo "=== $f ==="; cat "$f"; }
           done || true
+
+  # The release ships darwin binaries, so they are built and unit-tested on macOS. There is no
+  # Postgres service on macOS runners; the integration tests skip themselves without
+  # DATABASE_URL, which is acceptable here and only here: the Linux jobs run them for real.
+  macos:
+    name: build and unit test (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: build
+        run: make build
+
+      - name: test
+        run: env -u DATABASE_URL go test ./... -count=1
