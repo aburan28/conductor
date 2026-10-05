@@ -99,6 +99,8 @@ func (s *Server) routes() {
 	s.queueRoutes(m)
 	s.localRoutes(m)
 	s.ssoRoutes(m)
+	s.adminRoutes(m)
+	s.scimRoutes(m)
 	s.githubRoutes(m)
 	s.quotaRoutes(m)
 	s.lifecycleRoutes(m)

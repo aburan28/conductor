@@ -134,9 +134,21 @@ func (s *Server) inviteMember(w http.ResponseWriter, r *http.Request, p domain.P
 			"use their own credentials, which now reach this project. No token was minted."
 	case !body.NoToken:
 		ttl, err := tokenTTL(principal.Kind, body.TokenTTL.Std(), true)
+		if err == nil {
+			ttl, err = s.capInviteTTL(r, project.OrganizationID, principal.Kind, ttl)
+		}
 		if err != nil {
 			s.fail(w, r, err)
 			return
+		}
+		// A person in an organization that requires single sign-on signs in through it; a
+		// token minted here would be refused on first use.
+		if sso, err := s.requiresSSO(r, project.OrganizationID); err != nil {
+			s.fail(w, r, err)
+			return
+		} else if sso && principal.Kind == domain.PrincipalHuman {
+			result.Note = principal.Handle + " signs in with single sign-on, which this organization requires; no token was minted."
+			break
 		}
 		name := "invite:" + caller.Principal.Handle
 		token, err := s.store.CreateToken(r.Context(), principal.ID, name, ttl)
@@ -335,6 +347,9 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request, p domain.Pr
 	}
 	body.Name = localLineage(r, body.Name)
 	ttl, err := tokenTTL(p.Kind, body.TTL.Std(), false)
+	if err == nil {
+		body.Name, ttl, err = s.mintPolicy(r, p, body.Name, ttl)
+	}
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -437,6 +452,9 @@ func (s *Server) resetToken(w http.ResponseWriter, r *http.Request, p domain.Pri
 	}
 	body.Name = localLineage(r, body.Name)
 	ttl, err := tokenTTL(p.Kind, body.TTL.Std(), false)
+	if err == nil {
+		body.Name, ttl, err = s.mintPolicy(r, p, body.Name, ttl)
+	}
 	if err != nil {
 		s.fail(w, r, err)
 		return

@@ -497,6 +497,15 @@ func (s *Server) ssoRedeem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ttl := s.sso.tokenTTL()
+	pol, err := s.policyFor(r.Context(), principal.OrganizationID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if t := pol.SSOSessionTTL.Std(); t > 0 {
+		ttl = t
+	}
+	ttl = min(ttl, pol.HumanTokenCap())
 	token, err := s.store.CreateToken(r.Context(), principal.ID, db.SSOTokenPrefix+login.Provider, ttl)
 	if err != nil {
 		s.fail(w, r, err)
@@ -570,7 +579,26 @@ func (s *Server) ssoResolve(r *http.Request, p sso.Provider, ident sso.Identity,
 		s.store.Audit(ctx, principal.OrganizationID, "", principal.ID, "sso.linked", "principal", principal.ID,
 			map[string]any{"provider": cfg.Name, "mode": mode, "principal": principal.Handle})
 	}
+	if deactivated, err := s.store.PrincipalDeactivated(ctx, principal.ID); err != nil {
+		return domain.Principal{}, err
+	} else if deactivated {
+		return domain.Principal{}, refusal("deactivated",
+			"Your Conductor account (%s) is deactivated. Ask an administrator of your organization.", principal.Handle)
+	}
+	// The organization's own admission rules, on top of the provider's (admin_sso.go).
+	pol, err := s.policyFor(ctx, principal.OrganizationID)
+	if err != nil {
+		return domain.Principal{}, err
+	}
+	if err := ssoAdmits(pol, cfg, ident); err != nil {
+		return domain.Principal{}, err
+	}
 	if linkPrincipal == "" {
+		// Identity-provider groups decide project roles, within the policy's bounds, before
+		// the membership check: a group can be how someone first gets access.
+		if err := s.applyGroupMapping(r, pol, principal, cfg, ident.Groups); err != nil {
+			return domain.Principal{}, err
+		}
 		// Removing someone from their last project revokes their tokens; a sign-in must not
 		// hand them a fresh one.
 		member, err := s.store.HasMembership(ctx, principal.ID)
@@ -595,6 +623,11 @@ func (s *Server) ssoFirstSignIn(r *http.Request, cfg sso.Config, ident sso.Ident
 	}
 	switch len(candidates) {
 	case 0:
+		// An organization whose policy provisions accounts for this identity comes first;
+		// the server-wide --sso-auto-provision is the fallback.
+		if p, ok, err := s.ssoProvisionByPolicy(r, cfg, ident, acct); err != nil || ok {
+			return p, err
+		}
 		if s.sso.opts.AutoProvisionRole == "" {
 			return domain.Principal{}, refusal("not_registered",
 				"No Conductor account is registered for %s. Ask a project administrator to add you "+
@@ -603,7 +636,15 @@ func (s *Server) ssoFirstSignIn(r *http.Request, cfg sso.Config, ident sso.Ident
 		return s.ssoProvision(r, cfg, ident, acct)
 	case 1:
 		c := candidates[0]
-		err := s.store.LinkIdentity(ctx, c.ID, acct, true)
+		// An organization that does not admit this identity does not get it linked either.
+		pol, err := s.policyFor(ctx, c.OrganizationID)
+		if err != nil {
+			return domain.Principal{}, err
+		}
+		if err := ssoAdmits(pol, cfg, ident); err != nil {
+			return domain.Principal{}, err
+		}
+		err = s.store.LinkIdentity(ctx, c.ID, acct, true)
 		switch {
 		case errors.Is(err, db.ErrAlreadyLinked), errors.Is(err, db.ErrIssuerTaken):
 			// The address matches, but the account already signs in some other way. Attaching
