@@ -139,7 +139,7 @@ func (s *Store) UnlinkIdentity(ctx context.Context, principalID domain.ID, provi
 		}
 		tag, err = tx.Exec(ctx, `
 			UPDATE api_tokens SET revoked_at = now()
-			 WHERE principal_id = $1::uuid AND name = $2 AND revoked_at IS NULL`,
+			 WHERE principal_id = $1::uuid AND (name = $2 OR starts_with(name, $2 || '/')) AND revoked_at IS NULL`,
 			principalID, SSOTokenPrefix+provider)
 		revoked = tag.RowsAffected()
 		return err
@@ -147,7 +147,10 @@ func (s *Store) UnlinkIdentity(ctx context.Context, principalID domain.ID, provi
 	return revoked, err
 }
 
-// SSOTokenPrefix names every token a single sign-on issues: sso:<provider>.
+// SSOTokenPrefix names every token a single sign-on issues: sso:<provider>. A token minted
+// with one of those (a runner's per-attempt token, a second machine's) is named
+// sso:<provider>/<name>: it belongs to the same sign-in, is capped at its expiry, and is
+// revoked with it.
 const SSOTokenPrefix = "sso:"
 
 // HumansByEmail returns the human principals an administrator registered this address on,

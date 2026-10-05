@@ -59,6 +59,8 @@ type Server struct {
 	ops *opsState
 	// sso is single sign-on; it has no providers when none are configured (sso.go).
 	sso *ssoState
+	// admin is organization policy and the config file's locks (admin*.go).
+	admin *adminState
 }
 
 type Options struct {
@@ -88,6 +90,9 @@ type Options struct {
 	Ops OpsOptions
 	// SSO configures sign-in through external identity providers (sso.go).
 	SSO SSOOptions
+	// Admin configures organization policy: the config file's locks and the effective
+	// configuration the admin area shows (admin*.go).
+	Admin AdminOptions
 }
 
 func New(store *db.Store, svc *coord.Service, opts Options) *Server {
@@ -110,6 +115,7 @@ func New(store *db.Store, svc *coord.Service, opts Options) *Server {
 		github:      opts.GitHub,
 		sso:         newSSOState(opts.SSO, opts.SelfEndpoint),
 		notify:      opts.Notify,
+		admin:       newAdminState(opts.Admin),
 	}
 	s.ops = newOpsState(store, s, opts.Ops)
 	s.routes()
@@ -287,10 +293,16 @@ func (s *Server) authenticateWith(allowQueryToken bool, next func(http.ResponseW
 				return
 			}
 		}
+		// The organization's policy: a person's token that single sign-on did not mint is
+		// refused while the organization requires it (admin_auth.go).
+		if !s.enforceOrgPolicy(w, r, principal, name) {
+			return
+		}
 		s.limiter.succeed(client)
 		notePrincipal(r, principal.ID)
 		ctx := context.WithValue(r.Context(), principalKey, principal)
 		ctx = context.WithValue(ctx, tokenNameKey, name)
+		ctx = context.WithValue(ctx, tokenExpiresKey, info.ExpiresAt)
 		if info.ProjectID != "" {
 			if !scopedRouteAllowed(r.Pattern) {
 				s.fail(w, r, fmt.Errorf("%w: a project-scoped token cannot use %s", domain.ErrNotPermitted, r.Pattern))

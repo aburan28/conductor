@@ -174,6 +174,14 @@ type idClaims struct {
 	EmailVerified     json.RawMessage `json:"email_verified"`
 	Name              string          `json:"name"`
 	PreferredUsername string          `json:"preferred_username"`
+	// Microsoft Entra ID: the user principal name, the tenant, the identity provider that
+	// authenticated a guest, and the account type (1 is a guest).
+	UPN  string          `json:"upn"`
+	Tid  string          `json:"tid"`
+	Idp  string          `json:"idp"`
+	Acct json.RawMessage `json:"acct"`
+	// raw holds every claim, for the configurable groups claim.
+	raw map[string]json.RawMessage
 }
 
 // audience is the aud claim, which is a string or an array of strings.
@@ -237,6 +245,9 @@ func (p *oidcProvider) verify(ctx context.Context, m *metadata, keys *keySet, ra
 	if err := dec.Decode(&c); err != nil {
 		return c, invalidToken("claims: %v", err)
 	}
+	if err := json.Unmarshal(payload, &c.raw); err != nil {
+		return c, invalidToken("claims: %v", err)
+	}
 	if c.Iss != m.Issuer {
 		return c, invalidToken("issuer %q, want %q", c.Iss, m.Issuer)
 	}
@@ -281,16 +292,83 @@ func (p *oidcProvider) verify(ctx context.Context, m *metadata, keys *keySet, ra
 func (p *oidcProvider) identity(c idClaims) (Identity, error) {
 	email := strings.ToLower(strings.TrimSpace(c.Email))
 	if email == "" || !emailVerified(c.EmailVerified) {
-		return Identity{}, fail(CodeEmailUnverified,
-			"the identity provider did not confirm a verified email address for this account", nil)
+		trusted, err := p.trustedTenantEmail(c)
+		if err != nil {
+			return Identity{}, err
+		}
+		email = trusted
 	}
 	if err := p.cfg.checkDomain(email); err != nil {
 		return Identity{}, err
 	}
 	return Identity{
 		Provider: p.cfg.Name, Issuer: c.Iss, Subject: c.Sub, Email: email,
-		Name: c.Name, Username: c.PreferredUsername,
+		Name: c.Name, Username: c.PreferredUsername, Groups: groupsClaim(c.raw, firstNonEmpty(p.cfg.GroupsClaim, "groups")),
 	}, nil
+}
+
+// trustedTenantEmail is the address a single Microsoft Entra ID tenant vouches for, when
+// the administrator listed its domain (Config.TrustedEmailDomains). Entra issues no
+// email_verified claim, so without this an Entra tenant cannot sign anyone in.
+//
+// What makes it safe enough to trust: the issuer is one tenant (Validate refuses the
+// multi-tenant endpoints), the token's tid must be that tenant, and the address must be in
+// a domain the administrator listed — for the tenant's own members, the upn's domain is one
+// the tenant proved it owns before Entra let it be used. Guests are refused: their idp is
+// another issuer (or acct is 1), and their addresses were verified by nobody here.
+func (p *oidcProvider) trustedTenantEmail(c idClaims) (string, error) {
+	unverified := fail(CodeEmailUnverified,
+		"the identity provider did not confirm a verified email address for this account", nil)
+	if len(p.cfg.TrustedEmailDomains) == 0 {
+		return "", unverified
+	}
+	tenant := EntraTenant(p.cfg.Issuer)
+	if tenant == "" || !strings.EqualFold(c.Tid, tenant) {
+		return "", fail(CodeEmailUnverified, "the account is not in the configured Microsoft Entra ID tenant",
+			fmt.Errorf("tid %q, tenant %q", c.Tid, tenant))
+	}
+	if (c.Idp != "" && c.Idp != c.Iss) || strings.Trim(string(c.Acct), `"`) == "1" {
+		return "", fail(CodeEmailUnverified, "guest accounts from other directories cannot sign in here",
+			fmt.Errorf("idp %q acct %s", c.Idp, c.Acct))
+	}
+	for _, candidate := range []string{c.UPN, c.PreferredUsername, c.Email} {
+		candidate = strings.ToLower(strings.TrimSpace(candidate))
+		_, d, ok := strings.Cut(candidate, "@")
+		if !ok || strings.Contains(d, "@") || !slices.Contains(p.cfg.TrustedEmailDomains, d) {
+			continue
+		}
+		return candidate, nil
+	}
+	return "", fail(CodeEmailUnverified, fmt.Sprintf(
+		"this account's sign-in name is not in a domain this server trusts the tenant for (%s)",
+		strings.Join(p.cfg.TrustedEmailDomains, ", ")), nil)
+}
+
+// maxGroups bounds the groups read from one token; an account in more is mapped by the
+// first ones, and a provider that sends thousands should send a filtered claim instead.
+const maxGroups = 500
+
+// groupsClaim reads a claim holding a list of strings, or one string.
+func groupsClaim(raw map[string]json.RawMessage, name string) []string {
+	v, ok := raw[name]
+	if !ok {
+		return nil
+	}
+	var many []string
+	if json.Unmarshal(v, &many) != nil {
+		var one string
+		if json.Unmarshal(v, &one) != nil || one == "" {
+			return nil
+		}
+		many = []string{one}
+	}
+	out := make([]string, 0, min(len(many), maxGroups))
+	for _, g := range many {
+		if g = strings.TrimSpace(g); g != "" && len(g) <= 256 && len(out) < maxGroups {
+			out = append(out, g)
+		}
+	}
+	return out
 }
 
 // emailVerified reads email_verified, which is a boolean by the specification and the

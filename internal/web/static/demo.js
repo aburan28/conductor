@@ -239,6 +239,10 @@ export function installDemo(api) {
     let mm;
 
     if (m('v1/whoami')) return D.whoami;
+    // The demo organization has every advanced area on, so the tour covers them all.
+    if (m('v1/org')) return { organization: { id: 'org-demo', slug: 'demo', name: 'Demo' }, branding: { has_logo: false }, require_sso: false, is_org_admin: false,
+      features: { queue: true, swarm: true, budget_sharing: true, mesh: true, local_models: true, checkpoints_by_account: true } };
+    if ((mm = m('v1/projects/:p/intents/check')) && method === 'POST') return demoCheck(body);
     if (m('v1/tokens') && method === 'GET') return { tokens: D.tokens };
     if (m('v1/tokens') && method === 'POST') { const t = { name: (body && body.name) || 'demo', created_at: iso(Date.now()) }; D.tokens.unshift(t); return { name: t.name, token: 'cdt_demo_' + Math.random().toString(36).slice(2) }; }
     if ((mm = m('v1/tokens/:name')) && method === 'DELETE') { const t = D.tokens.find(x => x.name === mm.name); if (t) t.revoked_at = iso(Date.now()); return null; }
@@ -287,6 +291,24 @@ export function installDemo(api) {
 
     throw notFound();
   };
+}
+
+// demoCheck answers "can I start?" against the demo's claimed territory.
+function demoCheck(body) {
+  const wanted = ((body && body.scopes) || []).map(x => x.resource.replace(/^(path|dir):/, ''));
+  const conflicts = [];
+  for (const t of D.tasks.filter(t => ['claimed', 'running'].includes(t.status))) {
+    for (const sc of t.scopes || []) {
+      const held = sc.replace(/^(path|dir):/, '');
+      if (wanted.some(w => w.startsWith(held) || held.startsWith(w))) {
+        conflicts.push({ requested: sc, resource: sc, outcome: 'block_conflict', severity: 'high', kind: 'scope_overlap',
+          holder_task_ref: t.ref, holder_task_title: t.title, holder_owner: t.owner, held_since: t.updated_at });
+      }
+    }
+  }
+  if (!conflicts.length) return { outcome: 'allow' };
+  const c = conflicts[0];
+  return { outcome: 'block_conflict', conflicts, advice: `${c.holder_owner} holds ${c.resource} for ${c.holder_task_ref}. Wait for it, split your scope, or join their task.` };
 }
 
 function matchPath(seg, pattern) {

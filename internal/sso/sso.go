@@ -58,7 +58,39 @@ type Config struct {
 	Orgs []string
 	// APIURL and WebURL are GitHub's endpoints; GitHub Enterprise Server sets both.
 	APIURL, WebURL string
+	// GroupsClaim names the ID token claim that lists the account's groups, for group →
+	// role mapping (default "groups"; Entra ID can also send "roles"). OIDC only.
+	GroupsClaim string
+	// TrustedEmailDomains lets a Microsoft Entra ID tenant sign people in although its ID
+	// tokens carry no email_verified claim: an address from upn, preferred_username or
+	// email (in that order) is accepted when its domain is listed here. Only a single
+	// tenant's issuer may have this set — never the multi-tenant common or organizations
+	// endpoints, where any tenant's administrator chooses what those claims say
+	// (DESIGN.md §25.7, "Microsoft Entra ID").
+	TrustedEmailDomains []string
 }
+
+// EntraTenant returns the tenant id of a single-tenant Microsoft Entra ID issuer
+// (https://login.microsoftonline.com/{tenant-id}/v2.0), or "" for any other issuer. A
+// loopback issuer of the same shape is accepted too, so the rules can be exercised against
+// a local fake.
+func EntraTenant(issuer string) string {
+	u, err := url.Parse(issuer)
+	if err != nil {
+		return ""
+	}
+	entra := u.Scheme == "https" && strings.EqualFold(u.Host, "login.microsoftonline.com")
+	if !entra && !(u.Scheme == "http" && IsLoopbackHost(u.Hostname())) {
+		return ""
+	}
+	m := entraPath.FindStringSubmatch(u.Path)
+	if m == nil {
+		return ""
+	}
+	return strings.ToLower(m[1])
+}
+
+var entraPath = regexp.MustCompile(`^/([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})/v2\.0/?$`)
 
 // Restricted reports whether the provider admits only some of its accounts. An
 // unrestricted provider still signs in only people an administrator registered, unless
@@ -79,6 +111,11 @@ type Identity struct {
 	// Name and Username are display hints only and are never used to link accounts.
 	Name     string
 	Username string
+	// Groups are the account's groups at the provider: the ID token's groups claim, or
+	// GitHub teams as "org/team-slug". They feed group → role mapping and nothing else.
+	Groups []string
+	// Orgs are a GitHub account's active organization memberships (lowercase logins).
+	Orgs []string
 }
 
 // AuthRequest is what an authorization redirect carries.
@@ -250,7 +287,7 @@ func SecretEnv(name string) string {
 //
 // Keys: name, type (oidc|github), label, issuer, client-id, client-secret-file,
 // client-secret-env, domain and org (both repeatable), api-url and web-url (GitHub
-// Enterprise). The client secret is never accepted inline: a command line is visible to
+// Enterprise), groups-claim, and trust-email-domain (repeatable; Entra ID tenants only). The client secret is never accepted inline: a command line is visible to
 // every user on the machine through ps and /proc. It comes from client-secret-file, from the
 // variable client-secret-env names, or by default from SecretEnv(name).
 func ParseSpec(spec string, getenv func(string) string) (Config, error) {
@@ -292,6 +329,10 @@ func ParseSpec(spec string, getenv func(string) string) (Config, error) {
 			c.Domains = append(c.Domains, strings.ToLower(strings.TrimPrefix(value, "@")))
 		case "org":
 			c.Orgs = append(c.Orgs, value)
+		case "groups-claim":
+			c.GroupsClaim = value
+		case "trust-email-domain":
+			c.TrustedEmailDomains = append(c.TrustedEmailDomains, strings.ToLower(strings.TrimPrefix(value, "@")))
 		case "api-url":
 			c.APIURL = value
 		case "web-url":
@@ -356,9 +397,23 @@ func (c *Config) Validate() error {
 	if c.ClientSecret == "" {
 		return fmt.Errorf("sso provider %s: no client secret; set %s, or pass client-secret-file=PATH", c.Name, SecretEnv(c.Name))
 	}
-	for _, d := range c.Domains {
-		if d == "" || strings.ContainsAny(d, "@/ ") {
+	for _, d := range append(append([]string{}, c.Domains...), c.TrustedEmailDomains...) {
+		if d == "" || strings.ContainsAny(d, "@/ ") || !strings.Contains(d, ".") {
 			return fmt.Errorf("sso provider %s: %q is not a domain", c.Name, d)
+		}
+	}
+	if c.GroupsClaim != "" && c.Kind == KindGitHub {
+		return fmt.Errorf("sso provider %s: groups-claim applies to OpenID Connect; GitHub's groups are its teams", c.Name)
+	}
+	if len(c.TrustedEmailDomains) > 0 {
+		if c.Kind != KindOIDC {
+			return fmt.Errorf("sso provider %s: trust-email-domain applies to Microsoft Entra ID only", c.Name)
+		}
+		if EntraTenant(c.Issuer) == "" {
+			return fmt.Errorf("sso provider %s: trust-email-domain needs a single-tenant Microsoft Entra ID issuer, "+
+				"https://login.microsoftonline.com/<tenant-id>/v2.0 with the tenant's id (a GUID); the shared common, "+
+				"organizations and consumers endpoints admit accounts from any tenant, whose administrators decide what "+
+				"their email claims say (issuer %q)", c.Name, c.Issuer)
 		}
 	}
 	switch c.Kind {

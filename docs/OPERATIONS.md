@@ -176,6 +176,55 @@ URL, and whichever claims an event sends it. `conductor_notifications_total{kind
 counts sends (`delivered`, `retry`, `failed`, `expired`) and
 `conductor_notify_relay_errors_total` counts failed passes.
 
+## The config file
+
+`conductord --config conductor.yaml` (or `CONDUCTOR_CONFIG=conductor.yaml`) reads a YAML file
+instead of, or as well as, flags. **Precedence, highest first: a command-line flag, its
+environment variable, the config file, the built-in default.** The file's values are applied
+through the flags themselves, so each is parsed and checked exactly like the same value typed on
+the command line. Relative paths in it are relative to the file.
+
+`conductord config check --config conductor.yaml [flags]` parses the file and the flags as the
+server would, without opening the database, and either lists every problem (exit 1) or prints
+each effective setting with where it came from — `flag`, `env`, `file` or `default`, secrets
+redacted (exit 0). Run it in CI and before a restart. The same table is shown to the primary
+organization's administrators in the dashboard (Admin → Configuration) and at
+`GET /v1/admin/config`.
+
+The file is strict: an unknown key, a wrong type, a missing `version: 1`, a secret written
+inline, or a reference to an empty variable or unreadable file is an error naming the key.
+
+| Key | Flag it sets | Notes |
+|---|---|---|
+| `version` | — | `1`, required |
+| `server.addr` | `--addr` | |
+| `server.public_url` | `--public-url` | needed (https) for single sign-on |
+| `server.behind_proxy`, `server.insecure` | `--behind-proxy`, `--insecure` | |
+| `server.security_mode` | `--security-mode` | `local` or `enhanced` |
+| `server.tls_cert`, `server.tls_key` | `--tls-cert`, `--tls-key` | together |
+| `server.secret_key_file` | `--secret-key-file` | |
+| `database.url_env` / `database.url_file` | `--dsn` | by reference only; `database.url` inline is refused |
+| `database.statement_timeout`, `database.lock_timeout` | `--db-statement-timeout`, `--db-lock-timeout` | durations |
+| `retention.events_days`, `.audit_days`, `.outbox_undelivered_days`, `.usage_days` | `--retention-days`, `--audit-retention-days`, `--outbox-undelivered-days`, `--usage-retention-days` | |
+| `retention.idempotency_ttl` | `--idempotency-ttl` | |
+| `metrics.token_env` / `metrics.token_file` | `--metrics-token` | by reference only |
+| `notifications.poll`, `.allow_private_networks`, `.allow_http`, `.proxy` | `--notify-poll`, `--notify-allow-private-networks`, `--notify-allow-http`, `--notify-proxy` | a proxy URL with credentials is refused in the file |
+| `sso.token_ttl`, `sso.auto_provision`, `sso.default_project` | `--sso-token-ttl`, `--sso-auto-provision`, `--sso-default-project` | |
+| `sso.providers[]` | `--sso-provider` | `name`, `type`, `label`, `issuer`, `client_id`, `client_secret_env` or `client_secret_file` (default `CONDUCTOR_SSO_<NAME>_CLIENT_SECRET`), `domains`, `orgs`, `api_url`, `web_url`, `groups_claim`, `trusted_email_domains`. Providers given by `--sso-provider` or `CONDUCTOR_SSO_PROVIDERS` replace the file's rather than adding to them |
+| `features.<name>` | — | locks a feature flag for every organization |
+| `branding.display_name`, `.accent_color`, `.login_banner`, `.logo_file` | — | locks branding; the logo is read and checked at startup |
+| `policy.*` | — | locks organization policy: `require_sso`, `allowed_domains`, `allowed_github_orgs`, `auto_provision`, `default_role`, `default_project`, `group_rules`, `max_group_role`, `human_token_max_ttl`, `service_token_max_ttl`, `sso_session_ttl` |
+
+The `features`, `branding` and `policy` sections have no flag: they apply to **every
+organization on the server** and are read-only in the admin area. Durations are Go durations or
+whole days (`12h`, `30d`).
+
+**Getting back in.** If single sign-on is required and the identity provider is unavailable,
+nobody's ordinary token works. Set `policy: {require_sso: false}` in the config file and
+restart (the lock overrides the stored policy), or, with database access,
+`UPDATE org_policies SET policy = policy - 'require_sso'`. Tokens refused while the policy was on
+work again at once, because require-SSO refuses tokens rather than revoking them.
+
 ## Running more than one replica
 
 Several conductord processes may share one database behind a load balancer. What they
@@ -209,6 +258,10 @@ What stays per process:
   allow N times the failures before throttling a client.
 - **Event-stream feeds and caps**, which are per process; the database load is one poll per
   watched project per replica.
+- **Each organization's policy**, cached for five seconds on every replica because every
+  authenticated request consults it. A change made through one replica (require-SSO, a token
+  lifetime, a feature) applies on the others within five seconds. Every replica must also be
+  started with the same config file, or the settings it locks will differ between them.
 
 The GitHub App's credentials are stored in the database (the `github_app` table) so every
 replica can act as the app, with its private key, webhook secret and client secret sealed

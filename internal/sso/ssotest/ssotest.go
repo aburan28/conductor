@@ -30,6 +30,10 @@ type User struct {
 	Email         string
 	EmailVerified bool
 	Name          string
+	// Groups, when set, is sent as the groups claim.
+	Groups []string
+	// UPN is Entra's user principal name (NewEntra only; defaults to Email).
+	UPN string
 }
 
 // grant is an issued authorization code.
@@ -57,23 +61,37 @@ type OIDC struct {
 	signer crypto.Signer // overrides key for signing, to forge a token
 	// JWKSFetches counts key set requests, for rotation tests.
 	JWKSFetches int
+	// entraTenant, when set, shapes ID tokens like Microsoft Entra ID's.
+	entraTenant string
 }
 
 // NewOIDC starts a fake issuer signing with a fresh 2048-bit RSA key.
-func NewOIDC(t testing.TB) *OIDC {
+func NewOIDC(t testing.TB) *OIDC { return NewOIDCAt(t, "") }
+
+// NewEntra starts a fake issuer shaped like a single Microsoft Entra ID tenant: its issuer
+// is <server>/<tenant>/v2.0, and its ID tokens carry tid, upn and preferred_username but no
+// email_verified, as Entra's do.
+func NewEntra(t testing.TB, tenant string) *OIDC {
+	f := NewOIDCAt(t, "/"+tenant+"/v2.0")
+	f.entraTenant = tenant
+	return f
+}
+
+// NewOIDCAt starts a fake issuer whose issuer URL is the server's address plus path.
+func NewOIDCAt(t testing.TB, path string) *OIDC {
 	t.Helper()
 	f := &OIDC{ClientID: "conductor-test", ClientSecret: "s3cret", codes: map[string]grant{}, alg: "RS256"}
 	f.key, f.kid = newRSA(t), "k1"
 	f.keys, f.kids = []crypto.Signer{f.key}, []string{f.kid}
 	f.user = User{Subject: "sub-1", Email: "user@example.com", EmailVerified: true, Name: "User"}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /.well-known/openid-configuration", f.discovery)
-	mux.HandleFunc("GET /jwks", f.jwks)
-	mux.HandleFunc("GET /authorize", f.authorize)
-	mux.HandleFunc("POST /token", f.token)
+	mux.HandleFunc("GET "+path+"/.well-known/openid-configuration", f.discovery)
+	mux.HandleFunc("GET "+path+"/jwks", f.jwks)
+	mux.HandleFunc("GET "+path+"/authorize", f.authorize)
+	mux.HandleFunc("POST "+path+"/token", f.token)
 	f.Server = httptest.NewServer(mux)
 	t.Cleanup(f.Server.Close)
-	f.Issuer = f.Server.URL
+	f.Issuer = f.Server.URL + path
 	return f
 }
 
@@ -224,7 +242,19 @@ func (f *OIDC) token(w http.ResponseWriter, r *http.Request) {
 		"nonce": g.nonce, "email": g.user.Email, "email_verified": g.user.EmailVerified,
 		"name": g.user.Name,
 	}
+	if g.user.Groups != nil {
+		claims["groups"] = g.user.Groups
+	}
 	f.mu.Lock()
+	if f.entraTenant != "" {
+		// Entra ID: no email_verified at all, the tenant, and the sign-in name.
+		delete(claims, "email_verified")
+		upn := g.user.UPN
+		if upn == "" {
+			upn = g.user.Email
+		}
+		claims["tid"], claims["upn"], claims["preferred_username"] = f.entraTenant, upn, upn
+	}
 	if f.tamper != nil {
 		f.tamper(claims)
 	}
@@ -285,6 +315,8 @@ type GitHubUser struct {
 	Emails []GitHubEmail
 	// Orgs maps an organization to the membership state ("active", "pending").
 	Orgs map[string]string
+	// Teams maps an organization to the slugs of the account's teams in it.
+	Teams map[string][]string
 }
 
 // GitHubEmail is one entry of /user/emails.
@@ -331,6 +363,24 @@ func NewGitHub(t testing.TB) *GitHub {
 			return
 		}
 		writeJSON(w, map[string]any{"state": state})
+	}))
+	mux.HandleFunc("GET /user/memberships/orgs", g.withUser(func(w http.ResponseWriter, _ *http.Request, u GitHubUser) {
+		out := []map[string]any{}
+		for org, state := range u.Orgs {
+			if state == "active" {
+				out = append(out, map[string]any{"state": state, "organization": map[string]any{"login": org}})
+			}
+		}
+		writeJSON(w, out)
+	}))
+	mux.HandleFunc("GET /user/teams", g.withUser(func(w http.ResponseWriter, _ *http.Request, u GitHubUser) {
+		out := []map[string]any{}
+		for org, slugs := range u.Teams {
+			for _, slug := range slugs {
+				out = append(out, map[string]any{"slug": slug, "organization": map[string]any{"login": org}})
+			}
+		}
+		writeJSON(w, out)
 	}))
 	g.Server = httptest.NewServer(mux)
 	t.Cleanup(g.Server.Close)

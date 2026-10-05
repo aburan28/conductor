@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -29,6 +30,8 @@ type Store struct {
 	// now is injectable so time-dependent behaviour (lease expiry, stall detection) can be
 	// driven deterministically in tests instead of with sleeps.
 	now func() time.Time
+	// auditHook, when set, sees every audit record after it is written (audit.go).
+	auditHook atomic.Pointer[AuditHook]
 }
 
 // Default server-side bounds on a single statement and on a single lock wait. Every request

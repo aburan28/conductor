@@ -42,9 +42,9 @@ export default defineView({
     const owners = [...new Set(tasks.map(t => t.owner).filter(Boolean))].sort();
     const labels = [...new Set(tasks.flatMap(t => t.labels || []))].sort();
 
-    const search = h('input', { type: 'search', placeholder: 'Filter by ref, title, scope…', value: state.q, oninput: ev => { state.q = ev.target.value; drawBody(); } });
-    const ownerSel = h('select', { onchange: ev => { state.owner = ev.target.value; drawBody(); } }, h('option', { value: '' }, 'any owner'), owners.map(o => h('option', { value: o, selected: o === state.owner }, o)));
-    const labelSel = h('select', { onchange: ev => { state.label = ev.target.value; drawBody(); } }, h('option', { value: '' }, 'any label'), labels.map(o => h('option', { value: o, selected: o === state.label }, o)));
+    const search = h('input', { type: 'search', placeholder: 'Filter by ref, title, scope…', 'aria-label': 'Filter tasks', value: state.q, oninput: ev => { state.q = ev.target.value; drawBody(); } });
+    const ownerSel = h('select', { 'aria-label': 'Owner', onchange: ev => { state.owner = ev.target.value; drawBody(); } }, h('option', { value: '' }, 'any owner'), owners.map(o => h('option', { value: o, selected: o === state.owner }, o)));
+    const labelSel = h('select', { 'aria-label': 'Label', onchange: ev => { state.label = ev.target.value; drawBody(); } }, h('option', { value: '' }, 'any label'), labels.map(o => h('option', { value: o, selected: o === state.label }, o)));
     const showAll = h('label', { class: 'field', style: { flexDirection: 'row', alignItems: 'center', gap: '6px' } },
       h('input', { type: 'checkbox', checked: !!state.showAll, onchange: ev => { state.showAll = ev.target.checked; refresh(); } }), 'include finished');
 
@@ -59,7 +59,7 @@ export default defineView({
 
     function drawBody() {
       const list = filtered();
-      if (!tasks.length) return replace(bodyEl, empty('No tasks yet. File one here, or from the CLI.', 'conductor task create --title "…" --scope path:…'));
+      if (!tasks.length) return replace(bodyEl, empty(state.showAll ? 'No tasks yet. File one here, or from the CLI.' : 'No open tasks. File one here, or check before your next edit and claim it.', 'conductor task create --title "…" --scope path:…'));
       if (state.mode === 'list') return replace(bodyEl, card({ flush: true, body: table({
         columns: [
           { key: 'ref', label: 'Ref', mono: true, render: t => h('a', { class: 'ref', href: `/tasks/${encodeURIComponent(t.ref)}`, 'data-link': true }, t.ref) },
@@ -78,7 +78,7 @@ export default defineView({
       }) }));
       replace(bodyEl, h('div', { class: 'board' }, COLUMNS.map(([label, statuses]) => {
         const items = list.filter(t => statuses.includes(t.status)).sort((a, b) => (b.priority || 0) - (a.priority || 0) || new Date(b.updated_at) - new Date(a.updated_at));
-        return h('div', { class: 'col' }, h('h3', {}, label, h('span', { class: 'badge' }, items.length)),
+        return h('section', { class: 'col', 'aria-label': label }, h('h2', {}, label, h('span', { class: 'badge' }, items.length)),
           items.length ? items.map(taskCard) : h('div', { class: 'empty', style: { padding: '10px' } }, '—'));
       })));
     }
@@ -88,7 +88,7 @@ export default defineView({
       h('div', { class: 'toolbar' },
         h('div', { class: 'search' }, icon('search'), search), ownerSel, labels.length ? labelSel : null, showAll,
         h('div', { class: 'spacer' }),
-        segmented([{ value: 'board', label: 'Board' }, { value: 'list', label: 'List' }], state.mode, v => { state.mode = v; prefs.set('tasks_mode', v); drawBody(); }),
+        segmented([{ value: 'board', label: 'Board' }, { value: 'list', label: 'List' }], state.mode, v => { state.mode = v; prefs.set('tasks_mode', v); drawBody(); }, 'Layout'),
         h('button', { class: 'btn primary', onclick: () => openTaskForm(ctx, { onCreated: v => { refresh(); ctx.navigate('/tasks/' + encodeURIComponent(v.ref)); } }) }, icon('plus'), 'New task')),
       bodyEl);
   },

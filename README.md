@@ -490,8 +490,8 @@ Server adds `api-url=https://HOST/api/v3,web-url=https://HOST`.
 with the redirect URI, and pass its issuer exactly as its
 `/.well-known/openid-configuration` states it, e.g.
 `--sso-provider name=okta,issuer=https://acme.okta.com,client-id=0oa…`. The provider must assert
-`email_verified`; one that does not (Microsoft Entra ID, for one) is refused rather than trusted
-with unverified addresses.
+`email_verified`; one that does not is refused rather than trusted with unverified addresses —
+except a single Microsoft Entra ID tenant you explicitly trust (below).
 
 | `--sso-provider` key | Meaning |
 |---|---|
@@ -503,6 +503,26 @@ with unverified addresses.
 | `org` | GitHub: admit only active members of this organization (repeatable) |
 | `label` | the button text, "Sign in with …" |
 | `api-url`, `web-url` | GitHub Enterprise Server |
+| `groups-claim` | the ID token claim listing the account's groups, for group → role mapping (default `groups`) |
+| `trust-email-domain` | Entra ID only: accept this tenant's sign-in names in this domain without `email_verified` (repeatable) |
+
+**Microsoft Entra ID.** Entra issues no `email_verified` claim, so it needs an explicit trust.
+In the Entra admin center, *App registrations → New registration*, single tenant, with a *Web*
+redirect URI `https://conductor.example.com/v1/sso/entra/callback`; under *Certificates &
+secrets* create a client secret; under *Token configuration* add the optional `email` claim (and
+a groups claim if you will map groups to roles). Then use the tenant's own issuer — with its
+tenant id, never `common` or `organizations` — and list the domains whose addresses it may vouch
+for:
+
+```bash
+export CONDUCTOR_SSO_ENTRA_CLIENT_SECRET='…'
+conductord … --sso-provider name=entra,issuer=https://login.microsoftonline.com/<tenant-id>/v2.0,client-id=<application-id>,trust-email-domain=example.com
+```
+
+The address is taken from `upn`, then `preferred_username`, then `email`, and only in a listed
+domain; the token's `tid` must be the tenant, and guests from other directories are refused.
+Why that is safe enough, and what it does not protect against, is in
+[DESIGN.md §25.7](docs/DESIGN.md).
 
 Several providers are several `--sso-provider` flags, or one `CONDUCTOR_SSO_PROVIDERS` variable
 with the specs separated by `;`.
@@ -534,6 +554,114 @@ restricted with `domain=` or `org=` — otherwise anyone with a Google account w
 `--sso-token-ttl` sets how long a sign-in lasts; signing in again re-checks the provider (an
 address still allowed, a membership still active). The design and threat model are in
 [DESIGN.md §25.7](docs/DESIGN.md).
+
+### For enterprises
+
+Everything an organization's administrator needs is in the dashboard's **Admin** area (shown
+to `org_admin`s only) and under `/v1/admin`. The first person bootstrapped into a new
+organization is its `org_admin`; promote others with `conductor member role HANDLE org_admin`.
+
+| Admin section | What it does |
+|---|---|
+| Organization | display name, accent color (checked for contrast), logo (PNG/JPEG/GIF, 64 KiB), sign-in banner |
+| Authentication | providers, **require single sign-on**, allowed email domains and GitHub organizations, account provisioning, group → role mapping, token lifetimes |
+| Provisioning | SCIM tokens and the SCIM base URL for Okta or Entra ID |
+| Members & roles | every account, its projects and roles, linked identities; change a role, unlink, deactivate |
+| Features | which advanced areas (queue, swarm, budget sharing, mesh, local models, checkpoints by account) the dashboard shows. A new organization starts with none; turning one off hides it, it never revokes access |
+| Audit log | filter by actor, action and time; export as CSV or JSON lines |
+| Configuration | the server's effective configuration, secrets redacted, and what its config file locks |
+
+**A config file.** `conductord --config /etc/conductor/conductor.yaml` (or `CONDUCTOR_CONFIG`)
+holds what otherwise takes a page of flags, and can *lock* organization settings: a locked
+setting is read-only in the admin area, marked "managed by your administrator's config file".
+Secrets are never written in it — only the environment variable or file that holds them:
+
+```yaml
+version: 1
+server:
+  addr: 0.0.0.0:8443
+  public_url: https://conductor.example.com
+  tls_cert: /etc/conductor/tls/cert.pem
+  tls_key: /etc/conductor/tls/key.pem
+  security_mode: enhanced
+database:
+  url_env: DATABASE_URL            # or url_file: /run/secrets/database-url
+retention:
+  events_days: 90
+  audit_days: 400
+metrics:
+  token_file: /run/secrets/metrics-token
+sso:
+  token_ttl: 10h
+  providers:
+    - name: okta
+      issuer: https://example.okta.com
+      client_id: 0oa1b2c3
+      client_secret_env: OKTA_CLIENT_SECRET
+      domains: [example.com]
+    - name: entra
+      issuer: https://login.microsoftonline.com/<tenant-id>/v2.0
+      client_id: <application-id>
+      client_secret_file: /run/secrets/entra
+      trusted_email_domains: [example.com]
+features:            # locked for every organization on this server
+  queue: true
+branding:            # locked; logo_file is read and checked at startup
+  display_name: Example Engineering
+  login_banner: Authorized use only. Activity is logged.
+policy:              # locked
+  require_sso: true
+  human_token_max_ttl: 30d
+  allowed_domains: [example.com]
+```
+
+A command-line flag wins over its environment variable, which wins over the file, which wins
+over the default. `conductord config check --config FILE` validates a file — every unknown key,
+wrong type, inline secret, empty reference and invalid policy is reported — without touching the
+database, and prints each effective setting with where it came from. The full key list is in
+[docs/OPERATIONS.md](docs/OPERATIONS.md#the-config-file).
+
+**Require single sign-on.** Admin → Authentication, or `policy.require_sso` in the file. A
+person's token is then accepted only if single sign-on minted it (or a token minted from such a
+session, which never outlives it); runners and other service accounts keep their tokens, and
+local sign-in on the server's own machine follows the security mode. Older tokens are refused,
+not revoked, so turning the policy off — say, while the identity provider is down — restores
+them; anyone whose access should end for good is deactivated. Turn it on while signed in
+through single sign-on: the server refuses to do it from a token session, so you cannot lock
+yourself out.
+
+**SCIM provisioning.** Admin → Provisioning → *New token*, then:
+
+- **Okta:** in the app, *General → App Settings → Provisioning: SCIM*; under *Provisioning →
+  Integration*, *SCIM connector base URL* `https://conductor.example.com/scim/v2`, *Unique
+  identifier field for users* `userName`, supported actions *Push New Users*, *Push Profile
+  Updates*, *Push Groups*, authentication mode *HTTP Header* with the token. Enable *Create
+  Users*, *Update User Attributes* and *Deactivate Users* under *To App*.
+- **Microsoft Entra ID:** *Enterprise applications → (your app) → Provisioning → Automatic*,
+  *Tenant URL* `https://conductor.example.com/scim/v2`, *Secret Token* the token, *Test
+  Connection*, then start provisioning.
+
+Provisioning creates and updates people (they join the policy's default project with its default
+role, contributor at most), deactivates them (`active=false`: every token revoked and refused at
+once; history and memberships kept), and deletes them (memberships and identities removed, the
+account kept for the audit trail). Groups it pushes feed group → role mapping. SCIM never grants
+`org_admin`, and refuses to deactivate a project's last administrator.
+
+**Group → role mapping.** Rules such as `engineering → contributor in app` apply at every sign-in,
+from the ID token's groups claim, GitHub teams (`org/team-slug`) and SCIM groups. A mapped role
+never exceeds the configured ceiling (maintainer by default, never `org_admin`), never touches a
+role above it, never demotes a project's last administrator, and never removes anyone.
+
+**Audit export.** Admin → Audit log, or:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" "https://conductor.example.com/v1/admin/audit?format=csv&since=2026-09-01" > audit.csv
+curl -H "Authorization: Bearer $TOKEN" "https://conductor.example.com/v1/admin/audit?format=jsonl&action=sso." > sso.jsonl
+```
+
+Filters: `actor=HANDLE`, `action=` (exact, or a family ending in `.`), `since=`/`until=` (RFC 3339
+or a date). Exports are audited, and CSV cells that a spreadsheet would run as formulas are
+defused.
 
 ---
 
@@ -1204,9 +1332,13 @@ Implemented and exercised by tests:
 - A pooled-capacity swarm view and per-member budget sharing across a team, and an admission
   queue that makes sessions and attempts wait for a slot instead of failing when the team is at
   capacity, granted in arrival order with heartbeat-expiry hand-off.
-- A single-page dashboard (no build step, no external requests) with task board, fleet and
-  swarm views, live usage charts, the admission queue, conflict radar, and a per-tool
-  integration guide.
+- A single-page dashboard (no build step, no external requests): Home (check before an edit,
+  who is on what, what is waiting on you), Tasks, People and Settings, with the fleet, swarm,
+  usage, events, queue and integration views under More, and an Admin area for organization
+  administrators.
+- Enterprise administration: a server config file that can lock organization settings,
+  require-SSO, Entra ID tenant trust, SCIM 2.0 provisioning, group → role mapping, token
+  lifetime caps, feature flags, branding, and an exportable audit log.
 - Notifications to Slack, Discord, and signed webhooks, relayed from the transactional outbox
   with retries, through the same privacy projection as the API.
 
@@ -1381,6 +1513,10 @@ the required checks run as `sh -c` inside the worktree the agent just edited —
 from their environment (and hands the agent a short-lived, project-scoped token instead of
 yours), but it cannot stop code from reading that user's files. Run a worker only for
 repositories and teammates you would let run code on that machine (DESIGN.md §25.3).
+
+The control plane's own configuration — flags, environment, and the server config file
+(`conductord --config`) — is described in [docs/OPERATIONS.md](docs/OPERATIONS.md#the-config-file)
+and, for organization policy, in [For enterprises](#for-enterprises).
 
 Running the control plane itself — probes and `/metrics`, shutdown and outage behaviour,
 database timeouts, retention windows, running several replicas, and backing up and restoring

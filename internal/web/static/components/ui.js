@@ -41,20 +41,23 @@ export function copyButton(text, label = 'Copy') {
 }
 
 export function snippet(code, { language } = {}) {
-  return h('div', { class: 'snippet' }, h('pre', { 'data-lang': language }, code), copyButton(code));
+  // Focusable, so a keyboard can scroll a long snippet.
+  return h('div', { class: 'snippet' }, h('pre', { 'data-lang': language, tabindex: '0' }, code), copyButton(code));
 }
 
-export function meter(part, whole, { warnAt = 0.75, dangerAt = 0.95 } = {}) {
+export function meter(part, whole, { warnAt = 0.75, dangerAt = 0.95, label = 'Share used' } = {}) {
   const frac = whole > 0 ? Math.max(0, Math.min(1, part / whole)) : 0;
   const kind = frac >= dangerAt ? 'danger' : frac >= warnAt ? 'warn' : '';
-  return h('div', { class: 'bar-meter', role: 'meter', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': Math.round(frac * 100) },
+  return h('div', { class: 'bar-meter', role: 'meter', 'aria-label': label, 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': Math.round(frac * 100) },
     h('div', { class: kind, style: { width: Math.round(frac * 100) + '%' } }));
 }
 
-export function segmented(options, value, onChange) {
-  const el = h('div', { class: 'seg', role: 'tablist' });
+// segmented is a set of toggle buttons; the pressed one is the current choice. (Toggle
+// buttons, not tabs: nothing here owns a tab panel.)
+export function segmented(options, value, onChange, label) {
+  const el = h('div', { class: 'seg', role: 'group', 'aria-label': label || null });
   const render = () => {
-    el.replaceChildren(...options.map(o => h('button', { type: 'button', class: o.value === value ? 'active' : '', role: 'tab', 'aria-selected': o.value === value,
+    el.replaceChildren(...options.map(o => h('button', { type: 'button', class: o.value === value ? 'active' : '', 'aria-pressed': String(o.value === value),
       onclick: () => { value = o.value; render(); onChange(value); } }, o.label)));
   };
   render();

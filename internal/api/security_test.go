@@ -429,6 +429,7 @@ func TestNoGETRouteLeaksAPrivateTask(t *testing.T) {
 	subst := map[string]string{
 		"{project}": h.project.ID, "{task}": started.TaskID, "{attempt}": started.AttemptID,
 		"{session}": session.ID, "{ticket}": ticket.ID, "{provider}": "google",
+		"{id}": string(h.alice.ID),
 	}
 	routes := []string{
 		"/v1/whoami", "/v1/projects", "/v1/projects/{project}", "/v1/projects/{project}/members",
@@ -447,13 +448,26 @@ func TestNoGETRouteLeaksAPrivateTask(t *testing.T) {
 		"/v1/tokens", "/v1/peers", "/v1/security", "/v1/github/status",
 		"/v1/ready", "/metrics", "/v1/quota", "/v1/projects/{project}/quota",
 		"/v1/sso/providers", "/v1/sso/status", "/v1/sso/{provider}/start", "/v1/sso/{provider}/callback",
+		// Organization administration and SCIM. An org_admin of another project in the
+		// organization walks them too (below); SCIM refuses every ordinary token.
+		"/v1/org", "/v1/org/logo", "/v1/branding", "/v1/branding/logo",
+		"/v1/admin/policy", "/v1/admin/config", "/v1/admin/members", "/v1/admin/scim/tokens",
+		"/v1/admin/audit", "/v1/admin/audit?format=csv", "/v1/admin/audit?format=jsonl",
+		"/scim/v2/ServiceProviderConfig", "/scim/v2/ResourceTypes", "/scim/v2/Schemas",
+		"/scim/v2/Users", "/scim/v2/Users/{id}", "/scim/v2/Groups", "/scim/v2/Groups/{id}",
 		"/v1/projects/{project}/github/issues", "/v1/tasks/{task}/issue",
 		"/v1/projects/{project}/notifications",
 		// The stream is read separately below; it never ends on its own.
 	}
 	assertRoutesCovered(t, append(routes, "/v1/projects/{project}/events/stream"))
 
-	for _, viewer := range []struct{ name, tok string }{{"contributor", h.bobTok}, {"observer", obsTok}} {
+	// An administrator of the organization who is not a member of this project: the admin
+	// area must not be a way around the task's visibility.
+	orgAdmin, orgAdminTok := h.member("oscar", "")
+	if err := h.store.AddMember(ctx, h.secondProject("oscar-proj").ID, orgAdmin.ID, domain.RoleOrgAdmin); err != nil {
+		t.Fatal(err)
+	}
+	for _, viewer := range []struct{ name, tok string }{{"contributor", h.bobTok}, {"observer", obsTok}, {"org admin elsewhere", orgAdminTok}} {
 		for _, route := range routes {
 			path := route
 			for k, v := range subst {
@@ -468,6 +482,9 @@ func TestNoGETRouteLeaksAPrivateTask(t *testing.T) {
 					t.Errorf("%s GET %s leaks %s:\n%s", viewer.name, route, marker, body)
 				}
 			}
+		}
+		if viewer.tok == orgAdminTok {
+			continue // not a member: the stream is a 404, which readStream would call broken
 		}
 		if leaked := readStream(t, h, viewer.tok); leaked != "" {
 			t.Errorf("%s event stream leaks %s", viewer.name, leaked)
