@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -175,6 +176,7 @@ func cmdResume(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("resume", flag.ExitOnError)
 	harness := fs.String("harness", "", "resume only this harness (claude, codex, opencode, …)")
 	list := fs.Bool("list", false, "show saved sessions without waking anything")
+	yes := fs.Bool("yes", false, "reopen sessions restored from another machine's backup without asking")
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, `conductor resume — wake the sessions `+"`conductor pause`"+` froze, and reopen the ones `+"`conductor sessions save`"+` kept
@@ -187,6 +189,9 @@ Conductor extension is installed, else a tmux window, the platform's terminal ap
 detached tmux session — running the harness's own resume invocation
 (claude --continue, codex resume --last, opencode --continue). Set CONDUCTOR_TERMINAL to
 choose the terminal, e.g. CONDUCTOR_TERMINAL="kitty --directory {cwd} sh -c {cmd}".
+
+A session restored from an off-host backup (`+"`conductor backup pull`"+`) was not saved on this
+machine, so resume shows what it would run and asks first; --yes answers for you.
 
 Flags:
 `)
@@ -285,6 +290,13 @@ Flags:
 			// resume invocation. A session that lived in VS Code goes back to VS Code when the
 			// companion extension can take it — the record stays paused until the extension
 			// actually opens the terminal, so a handoff that goes nowhere is retryable.
+			if rec.RestoredFrom != "" && !*yes {
+				argv, _ := relaunchArgv(rec, exe)
+				if ok, detail := confirmRestored(rec, argv); !ok {
+					res = pauseAction{Record: rec, Action: "skipped", Detail: detail}
+					break
+				}
+			}
 			if where, ok := localstate.ResumeInVSCode(rec); ok {
 				res = pauseAction{Record: rec, Action: "reopened", Detail: "handed to " + where}
 				break
@@ -322,6 +334,7 @@ Flags:
 			mark, failed = "FAILED", failed+1
 		case "running":
 			running++
+		case "skipped":
 		default:
 			woken++
 		}
@@ -339,6 +352,24 @@ Flags:
 		return fmt.Errorf("no session could be resumed")
 	}
 	return nil
+}
+
+// confirmRestored asks before running a session record that came from another machine's
+// backup. Its working directory came from the bucket, and a harness started in a directory
+// runs that directory's own configuration (hooks, MCP servers), so the person resuming should
+// see exactly what will run, and where, before it does. Off a terminal it never runs.
+func confirmRestored(rec localstate.Record, argv []string) (bool, string) {
+	if !stdinIsTerminal() {
+		return false, fmt.Sprintf("restored from %s's backup; not run without confirmation (re-run with --yes)", rec.RestoredFrom)
+	}
+	fmt.Printf("\nThis session was restored from %s's backup, not saved on this machine. Resuming runs:\n\n  %s\n  in %s\n\nRun it? [y/N] ",
+		rec.RestoredFrom, shellJoin(argv), orDash(rec.Cwd))
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return true, ""
+	}
+	return false, "not confirmed"
 }
 
 // Plans: what pause and resume decide to do with one record, given what the process table

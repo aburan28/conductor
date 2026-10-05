@@ -308,8 +308,14 @@ func InstallClaude(b *Bundle, configDir, cwd string, force bool) (ClaudeInstall,
 	prefix := NativeDir + "/claude/" + m.SessionID + "/"
 	for _, p := range b.Files(prefix) {
 		rel := strings.TrimPrefix(p, prefix)
-		if rel == "" || strings.Contains(rel, "..") {
+		if rel == "" {
 			continue
+		}
+		// The session id was validated with the manifest; rel must stay beneath it too. The
+		// harness's state directory is the user's own, and a bundle writes no links into it,
+		// so a containment check is enough here (contrast writeInside for a checkout).
+		if !SafeRelPath(rel) {
+			return ClaudeInstall{}, fmt.Errorf("checkpoint member %s leaves its directory", p)
 		}
 		extra, _ := b.File(p)
 		out := filepath.Join(projectDir, m.SessionID, filepath.FromSlash(rel))
