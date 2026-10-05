@@ -9,7 +9,6 @@ package api
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -20,7 +19,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/adamburan/conductor/internal/coord"
 	"github.com/adamburan/conductor/internal/db"
@@ -54,6 +52,8 @@ type Server struct {
 	local LocalLoginOptions
 	// github is the GitHub App integration; nil when no app is configured (github.go).
 	github *GitHub
+	// ops is the operational surface: lifetime context, background work, streams (observe.go).
+	ops *opsState
 }
 
 type Options struct {
@@ -76,6 +76,9 @@ type Options struct {
 	LocalLogin LocalLoginOptions
 	// GitHub is the GitHub App integration. Nil serves only the setup page.
 	GitHub *GitHub
+	// Ops configures metrics, request deadlines, stream caps and the server lifetime
+	// (observe.go).
+	Ops OpsOptions
 }
 
 func New(store *db.Store, svc *coord.Service, opts Options) *Server {
@@ -97,7 +100,9 @@ func New(store *db.Store, svc *coord.Service, opts Options) *Server {
 		local:       opts.LocalLogin,
 		github:      opts.GitHub,
 	}
+	s.ops = newOpsState(store, s, opts.Ops)
 	s.routes()
+	s.opsRoutes(s.mux)
 	return s
 }
 
@@ -105,9 +110,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 
-// Handler wraps the mux with logging, panic recovery, and security headers.
+// Handler wraps the mux with request IDs, access logging, metrics, panic recovery and body
+// deadlines (observe.go), and security headers.
 func (s *Server) Handler() http.Handler {
-	return s.recoverPanic(s.securityHeaders(s.logRequests(s.mux)))
+	return s.observe(s.securityHeaders(s.mux))
 }
 
 // securityHeaders sets the headers that matter for a page which holds a bearer token in its
@@ -271,6 +277,7 @@ func (s *Server) authenticateWith(allowQueryToken bool, next func(http.ResponseW
 			}
 		}
 		s.limiter.succeed(client)
+		notePrincipal(r, principal.ID)
 		ctx := context.WithValue(r.Context(), principalKey, principal)
 		ctx = context.WithValue(ctx, tokenNameKey, name)
 		if info.ProjectID != "" {
@@ -414,26 +421,24 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		// The detail of a server fault — usually a database error naming tables, columns,
 		// constraints, or the database host — stays in the server log. The client gets a
 		// request id to quote, which is all an operator needs to find that line.
-		id := newRequestID()
+		// The observe middleware has already put this id on the response's X-Request-Id.
+		id := requestID(r)
+		if id == "" {
+			id = newRequestID()
+			w.Header().Set("X-Request-Id", id)
+		}
 		s.logger.Error("request failed", "request_id", id, "method", r.Method,
 			"path", r.URL.Path, "error", err)
-		w.Header().Set("X-Request-Id", id)
 		s.ok(w, r, status, ErrorBody{Error: "internal error", Code: code, RequestID: id})
 		return
 	}
 	if status >= 500 {
 		// A mapped 5xx (no capacity) is a domain answer whose message is meant for the
 		// client, but it is still worth a log line.
-		s.logger.Warn("request failed", "method", r.Method, "path", r.URL.Path, "error", err)
+		s.logger.Warn("request failed", "request_id", requestID(r), "method", r.Method,
+			"path", r.URL.Path, "error", err)
 	}
 	s.ok(w, r, status, ErrorBody{Error: err.Error(), Code: code})
-}
-
-// newRequestID returns a short random identifier correlating a 5xx response with its log line.
-func newRequestID() string {
-	var b [8]byte
-	_, _ = rand.Read(b[:])
-	return hex.EncodeToString(b[:])
 }
 
 // decode reads a JSON body with a size limit, so a malformed or hostile request cannot
@@ -488,56 +493,6 @@ func (s *Server) remember(r *http.Request, principal domain.Principal, status in
 	}
 	_ = s.store.RememberIdempotent(r.Context(), key, principal.ID,
 		r.Header.Get("X-Conductor-Body-Hash"), status, encoded)
-}
-
-// ---------------------------------------------------------------------------
-// Middleware
-// ---------------------------------------------------------------------------
-
-func (s *Server) logRequests(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-		next.ServeHTTP(rec, r)
-
-		// Log identifiers and outcomes only. Bodies routinely contain task titles, which are
-		// project-visibility data and do not belong in a server log (DESIGN.md §26.3).
-		s.logger.Debug("request",
-			"method", r.Method, "path", r.URL.Path, "status", rec.status,
-			"duration", time.Since(start).Round(time.Millisecond).String())
-	})
-}
-
-func (s *Server) recoverPanic(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer func() {
-			if rec := recover(); rec != nil {
-				id := newRequestID()
-				s.logger.Error("panic recovered", "request_id", id, "path", r.URL.Path, "panic", rec)
-				s.ok(w, r, http.StatusInternalServerError,
-					ErrorBody{Error: "internal error", Code: "panic", RequestID: id})
-			}
-		}()
-		next.ServeHTTP(w, r)
-	})
-}
-
-type statusRecorder struct {
-	http.ResponseWriter
-	status int
-}
-
-func (w *statusRecorder) WriteHeader(status int) {
-	w.status = status
-	w.ResponseWriter.WriteHeader(status)
-}
-
-// Flush forwards to the underlying writer so SSE streaming keeps working through the
-// recorder.
-func (w *statusRecorder) Flush() {
-	if f, ok := w.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
 }
 
 func intParam(r *http.Request, name string, fallback int) int {

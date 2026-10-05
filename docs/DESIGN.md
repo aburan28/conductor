@@ -2021,6 +2021,15 @@ faults return `internal error` with a request id, and the detail goes to the ser
 - frontier-planner-to-worker token ratio;
 - worker utilization and provider rate-limit pressure.
 
+Implemented so far: conductord serves operational metrics in the Prometheus text format at
+`/metrics` (loopback only, or behind a bearer token) — HTTP requests and latency by route
+pattern, scheduler pass duration and errors, active, reclaimed and outage-extended leases,
+events written by type, retention deletions, GitHub polls, event streams, and database pool
+statistics — from a small standard-library registry (`internal/metrics`) rather than the
+Prometheus client, per §4's dependency posture. `/v1/ready` reports database, schema
+version, scheduler and poller health. The product metrics above are still served by the API
+and dashboard rather than as series. docs/OPERATIONS.md lists every metric.
+
 ### 26.2 Tracing
 
 Use a trace per task and spans for:
@@ -2045,6 +2054,11 @@ Do not put raw prompts, source contents, or secrets in span attributes.
 
 Structured logs include IDs, transitions, durations, retry classes, and policy decisions. Full harness stdout is owner-private by default and may remain local. Team logs contain sanitized summaries.
 
+Every request carries an id (`X-Request-Id`, propagated when the caller sends a well-formed
+one) that appears in its access-log line, in error responses, and in any log line about
+it. The access log records method, route pattern, status, duration and principal — never a
+query string, header or body.
+
 ### 26.4 Dashboard views
 
 1. **Project board:** tasks, owners, states, dependencies, conflicts.
@@ -2066,6 +2080,20 @@ Structured logs include IDs, transitions, durations, retry classes, and policy d
 - Mark expired attempts stale.
 - Requeue eligible tasks.
 - Rebuild presence and conflict projections from current rows/events.
+
+Reconciling must not mistake the outage itself for dead workers. Workers renew leases
+through the control plane, so while every replica is down none can, and a restart that
+simply reclaimed expired leases would fence off all in-flight work after any outage longer
+than the lease TTL. Each scheduler pass therefore stamps a heartbeat shared by all replicas;
+a gap longer than the normal pass interval is an outage, and open leases are extended by
+the gap before anything is reclaimed (once, under a row lock, however many replicas start
+together). The extension runs before a restarted process accepts requests, so a worker's
+first heartbeat after the outage succeeds. A worker that died while the control plane was
+up leaves no gap and is reclaimed on time.
+
+Shutdown is ordered too: background loops and long-lived streams end first, in-flight
+requests complete, and only then is the database pool closed, within a bounded grace
+period. docs/OPERATIONS.md covers both, and backup and restore.
 
 ### 27.2 Runner crash
 
@@ -2248,6 +2276,19 @@ Recommended properties:
 ### 28.3 Scaling model
 
 Stateless API replicas are safe when all claim operations are transactional in PostgreSQL. Scheduler replicas use leader election or `SKIP LOCKED`. Runner dispatch uses a durable queue/outbox. Presence is a projection and can tolerate eventual consistency; claims cannot.
+
+As built, conductord replicas share one database and need no leader election: scheduler
+steps use `SKIP LOCKED`, and everything else replicas must agree on is a row — the scheduler
+heartbeat (§27.1), the last budget alert level announced per project and the stalls already
+announced, the GitHub App's credentials (its secrets sealed with AES-256-GCM under a key kept
+outside the database, so a backup cannot act as the app) and pending setups, and the check
+run posted per commit. The one singleton
+duty, polling GitHub, runs under `pg_try_advisory_lock`, which Postgres releases if its
+holder dies. Two things stay per process: MCP HTTP sessions, which hold an agent's fence in
+memory and so need session affinity on `Mcp-Session-Id` at the load balancer, and the
+authentication failure limiter. Retention prunes events, audit, outbox, idempotency and
+usage rows on configurable windows, keeping each aggregate's newest event so sequence
+numbers continue. docs/OPERATIONS.md has the operator's view.
 
 ### 28.4 Daemon-to-daemon peering
 
