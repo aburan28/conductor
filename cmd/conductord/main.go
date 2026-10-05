@@ -34,10 +34,21 @@ import (
 	"github.com/adamburan/conductor/internal/githubapp"
 	"github.com/adamburan/conductor/internal/peer"
 	"github.com/adamburan/conductor/internal/scheduler"
+	"github.com/adamburan/conductor/internal/version"
 	"github.com/adamburan/conductor/internal/web"
 )
 
+// isVersionArg accepts the spellings people try first; the flag package would otherwise
+// reject --version as an undefined flag.
+func isVersionArg(arg string) bool {
+	return arg == "--version" || arg == "-version" || arg == "version"
+}
+
 func main() {
+	if len(os.Args) > 1 && isVersionArg(os.Args[1]) {
+		fmt.Println("conductord", version.Get())
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "bootstrap" {
 		if err := bootstrap(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "bootstrap:", err)
@@ -92,6 +103,7 @@ func serve(args []string) error {
 Usage:
   conductord [flags]
   conductord bootstrap [flags]     create an organization, project, principal, and token
+  conductord --version             print the version and exit
 
 Flags:
 `)
