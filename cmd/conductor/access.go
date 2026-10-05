@@ -10,8 +10,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/adamburan/conductor/internal/client"
-	"github.com/adamburan/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/client"
+	"github.com/aburan28/conductor/internal/db"
 )
 
 // Member and token administration from the CLI, so onboarding a coworker does not require

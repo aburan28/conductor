@@ -4,7 +4,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // MappedRoles returns, for each project slug a rule names, the highest role the groups map

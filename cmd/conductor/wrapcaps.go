@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // Session capability declaration for `conductor wrap` (DESIGN.md §7.3).

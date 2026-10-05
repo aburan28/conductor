@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/mcp"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/mcp"
 )
 
 // mountMCP exposes the coordination tools over MCP's Streamable HTTP transport, so a coding

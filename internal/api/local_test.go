@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/adamburan/conductor/internal/coord"
-	"github.com/adamburan/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/coord"
+	"github.com/aburan28/conductor/internal/db"
 )
 
 // Local sign-in is the one unauthenticated way to obtain a token. These tests pin every

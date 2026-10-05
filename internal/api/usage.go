@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adamburan/conductor/internal/coord"
-	"github.com/adamburan/conductor/internal/db"
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/usage"
+	"github.com/aburan28/conductor/internal/coord"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/usage"
 )
 
 // Token usage (DESIGN.md §26.1). Collectors post hourly buckets; reports read them back.

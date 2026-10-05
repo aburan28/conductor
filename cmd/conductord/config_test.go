@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adamburan/conductor/internal/admin"
-	"github.com/adamburan/conductor/internal/api"
-	"github.com/adamburan/conductor/internal/db"
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/admin"
+	"github.com/aburan28/conductor/internal/api"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 func writeConfig(t *testing.T, body string) string {

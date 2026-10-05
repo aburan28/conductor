@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 
-	"github.com/adamburan/conductor/internal/db"
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/privacy"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/privacy"
 )
 
 // Presence answers "who is working on what, right now" (DESIGN.md §8.5).

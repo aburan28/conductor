@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // EventType is a domain event a channel can subscribe to.

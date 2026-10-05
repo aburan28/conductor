@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/adamburan/conductor/internal/coord"
+	"github.com/aburan28/conductor/internal/coord"
 )
 
 // printStatusNextStep tells a user looking at an idle project what to do next. On a new

@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/adamburan/conductor/internal/db"
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/githubapp"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/githubapp"
 )
 
 // The pull request lifecycle: linking a task to the pull request its work travels in, and

@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adamburan/conductor/internal/client"
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/client"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // lockedPlane records requests from more than one goroutine (the tool caller and the lease

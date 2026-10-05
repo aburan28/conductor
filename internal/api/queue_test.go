@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 func (h *harness) setQueueCap(t *testing.T, q domain.QueuePolicy) {

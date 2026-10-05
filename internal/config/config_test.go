@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // The shipped .conductor files are documentation as much as configuration, and documentation

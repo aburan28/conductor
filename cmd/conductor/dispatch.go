@@ -8,11 +8,11 @@ import (
 	"os"
 	"strings"
 
-	"github.com/adamburan/conductor/internal/client"
-	"github.com/adamburan/conductor/internal/config"
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/policy"
-	"github.com/adamburan/conductor/internal/router"
+	"github.com/aburan28/conductor/internal/client"
+	"github.com/aburan28/conductor/internal/config"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/policy"
+	"github.com/aburan28/conductor/internal/router"
 )
 
 // ---------------------------------------------------------------------------

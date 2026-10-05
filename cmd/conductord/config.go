@@ -11,10 +11,10 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/adamburan/conductor/internal/api"
-	"github.com/adamburan/conductor/internal/config"
-	"github.com/adamburan/conductor/internal/secretbox"
-	"github.com/adamburan/conductor/internal/sso"
+	"github.com/aburan28/conductor/internal/api"
+	"github.com/aburan28/conductor/internal/config"
+	"github.com/aburan28/conductor/internal/secretbox"
+	"github.com/aburan28/conductor/internal/sso"
 )
 
 // The server config file (`--config`, CONDUCTOR_CONFIG). Precedence, highest first:

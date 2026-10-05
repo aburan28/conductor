@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/adamburan/conductor/internal/githubapp"
-	"github.com/adamburan/conductor/internal/secretbox"
+	"github.com/aburan28/conductor/internal/githubapp"
+	"github.com/aburan28/conductor/internal/secretbox"
 )
 
 // How the GitHub App's credentials are stored in github_app.credentials.

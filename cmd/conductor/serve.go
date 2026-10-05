@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/adamburan/conductor/internal/config"
+	"github.com/aburan28/conductor/internal/config"
 )
 
 // Local vLLM launchers folded into the CLI so OpenCode workers share one entrypoint

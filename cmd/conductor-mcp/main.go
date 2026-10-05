@@ -18,8 +18,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/adamburan/conductor/internal/mcp"
-	"github.com/adamburan/conductor/internal/version"
+	"github.com/aburan28/conductor/internal/mcp"
+	"github.com/aburan28/conductor/internal/version"
 )
 
 func main() {

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 func (f *fixture) countEvents(t *testing.T, eventType string) int {

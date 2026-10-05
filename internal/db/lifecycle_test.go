@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/resource"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/resource"
 )
 
 // The claim loop end to end at the store level: a claim stays alive exactly as long as the

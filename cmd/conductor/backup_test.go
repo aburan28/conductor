@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adamburan/conductor/internal/backup"
-	"github.com/adamburan/conductor/internal/checkpoint"
-	"github.com/adamburan/conductor/internal/localstate"
+	"github.com/aburan28/conductor/internal/backup"
+	"github.com/aburan28/conductor/internal/checkpoint"
+	"github.com/aburan28/conductor/internal/localstate"
 )
 
 // inMemoryS3 is a tiny path-style S3 for CLI-level backup tests.

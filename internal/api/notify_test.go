@@ -11,10 +11,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/adamburan/conductor/internal/coord"
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/notify"
-	"github.com/adamburan/conductor/internal/secretbox"
+	"github.com/aburan28/conductor/internal/coord"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/notify"
+	"github.com/aburan28/conductor/internal/secretbox"
 )
 
 // withNotifications swaps the harness's server for one with notifications enabled. The

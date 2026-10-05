@@ -3,7 +3,7 @@ package selector
 import (
 	"strings"
 
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // Resolve fills in the catalog's opinion of a session's declared model.

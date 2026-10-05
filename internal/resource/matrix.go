@@ -1,6 +1,6 @@
 package resource
 
-import "github.com/adamburan/conductor/internal/domain"
+import "github.com/aburan28/conductor/internal/domain"
 
 // Policy carries the configurable cells of the conflict matrix. DESIGN.md §11.3 marks
 // several cells "block by policy" or "warn or block"; those are the knobs here, and they

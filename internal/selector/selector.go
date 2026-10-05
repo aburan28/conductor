@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // Candidate is one session considered for work.

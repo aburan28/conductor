@@ -13,8 +13,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/policy"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/policy"
 )
 
 // AliasPolicy is a role definition: the capability floor a model must meet, not a model name.

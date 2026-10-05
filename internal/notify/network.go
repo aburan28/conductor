@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // Outbound requests go to URLs that project maintainers type in, from inside the network the

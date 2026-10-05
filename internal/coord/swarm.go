@@ -5,7 +5,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // The swarm view (DESIGN.md §7.10, §13.8).

@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/taskcard"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/taskcard"
 )
 
 // DESIGN.md §31.6: a task can be handed from one harness to another without sharing the

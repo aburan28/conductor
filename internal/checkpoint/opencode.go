@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adamburan/conductor/internal/usage"
+	"github.com/aburan28/conductor/internal/usage"
 )
 
 // OpenCode keeps sessions in its own database and offers the round trip this package

@@ -4,11 +4,11 @@ import (
 	"context"
 	"sort"
 
-	"github.com/adamburan/conductor/internal/config"
-	"github.com/adamburan/conductor/internal/db"
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/privacy"
-	"github.com/adamburan/conductor/internal/resource"
+	"github.com/aburan28/conductor/internal/config"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/privacy"
+	"github.com/aburan28/conductor/internal/resource"
 )
 
 // DetectConflicts rebuilds the merge-risk graph for a project (DESIGN.md §11.6).

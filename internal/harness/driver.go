@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // Capabilities is what a harness advertises about itself (DESIGN.md §16.1).

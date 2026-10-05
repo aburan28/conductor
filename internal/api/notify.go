@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/notify"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/notify"
 )
 
 // Notification channels (internal/notify): where a project's events go besides the dashboard.

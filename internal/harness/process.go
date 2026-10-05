@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // Adapter turns one line of a harness's native event stream into a sanitized Event.

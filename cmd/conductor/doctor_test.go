@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/adamburan/conductor/internal/client"
-	"github.com/adamburan/conductor/internal/coord"
-	"github.com/adamburan/conductor/internal/privacy"
+	"github.com/aburan28/conductor/internal/client"
+	"github.com/aburan28/conductor/internal/coord"
+	"github.com/aburan28/conductor/internal/privacy"
 )
 
 // fakeDoctorEnv is a machine with git, without Docker, and with nothing listening for Postgres.

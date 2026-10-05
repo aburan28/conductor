@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 func ptr[T any](v T) *T { return &v }

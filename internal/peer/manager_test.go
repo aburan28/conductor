@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adamburan/conductor/internal/peer"
+	"github.com/aburan28/conductor/internal/peer"
 )
 
 // Mesh fixtures: one CA and any number of named daemon certificates, mirroring what

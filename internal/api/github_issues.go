@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adamburan/conductor/internal/db"
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/githubapp"
-	"github.com/adamburan/conductor/internal/metrics"
-	"github.com/adamburan/conductor/internal/tracker"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/githubapp"
+	"github.com/aburan28/conductor/internal/metrics"
+	"github.com/aburan28/conductor/internal/tracker"
 )
 
 // GitHub Issues sync: the GitHub adapter of internal/tracker.

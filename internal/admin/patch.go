@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // Patch is a partial policy: the settings an administrator changes in one request, or the

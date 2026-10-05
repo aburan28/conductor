@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adamburan/conductor/internal/admin"
-	"github.com/adamburan/conductor/internal/db"
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/admin"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // SCIM 2.0 provisioning (RFC 7643, RFC 7644; DESIGN.md §25.8), so an organization's

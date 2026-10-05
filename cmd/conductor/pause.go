@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/adamburan/conductor/internal/localstate"
+	"github.com/aburan28/conductor/internal/localstate"
 )
 
 // ---------------------------------------------------------------------------

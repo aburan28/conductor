@@ -3,8 +3,8 @@ package api
 import (
 	"net/http"
 
-	"github.com/adamburan/conductor/internal/coord"
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/coord"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // Endpoints a remote runner needs, so a machine that executes work never requires database

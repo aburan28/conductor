@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // Message is the body of a generic webhook request, and what the Slack and Discord renderings

@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/adamburan/conductor/internal/client"
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/client"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // The MCP gateway is a translation layer (DESIGN.md §7.2), so these tests use a stub control

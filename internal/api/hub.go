@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/adamburan/conductor/internal/db"
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/metrics"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/metrics"
 )
 
 // eventHub fans one read of a project's event log out to every stream open on it.

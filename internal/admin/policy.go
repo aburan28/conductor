@@ -19,7 +19,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // GroupRule maps an identity-provider group to a role in one project.

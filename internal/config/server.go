@@ -12,8 +12,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/adamburan/conductor/internal/admin"
-	"github.com/adamburan/conductor/internal/sso"
+	"github.com/aburan28/conductor/internal/admin"
+	"github.com/aburan28/conductor/internal/sso"
 )
 
 // ServerFile is conductord's own configuration file (`conductord --config conductor.yaml`,
