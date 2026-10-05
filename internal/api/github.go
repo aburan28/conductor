@@ -974,9 +974,11 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Answer GitHub at once (it times a delivery out after ten seconds) and check in the
-	// background.
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	// background — under the server's lifetime, not the request's (which ends with this
+	// response) and not context.Background (which would outlive the store at shutdown), and
+	// within a bounded pool. A delivery past the pool is left to the poller.
+	started := s.goBackground(func(ctx context.Context) {
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 		projects, err := s.github.projectsFor(ctx, owner, repo)
 		if err != nil || len(projects) == 0 {
@@ -985,7 +987,13 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		if _, err := s.github.checkPull(ctx, ev.Installation.ID, owner, repo, ev.Repository.Private, ev.PullRequest, projects); err != nil {
 			s.logger.Warn("github check failed", "repo", owner+"/"+repo, "pr", ev.PullRequest.Number, "error", err)
 		}
-	}()
+	})
+	if !started {
+		webhookDeferred.Inc()
+		s.github.Kick()
+		s.ok(w, r, http.StatusAccepted, map[string]any{"deferred": ev.PullRequest.Number})
+		return
+	}
 	s.ok(w, r, http.StatusAccepted, map[string]any{"checking": ev.PullRequest.Number})
 }
 

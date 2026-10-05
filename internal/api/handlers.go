@@ -117,10 +117,13 @@ func (s *Server) routes() {
 // Health and identity
 // ---------------------------------------------------------------------------
 
+// health is the unauthenticated liveness probe. It names a failure without quoting it: the
+// driver's error text can carry the database host, user and more. /v1/ready has the detail.
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.Pool().Ping(r.Context()); err != nil {
+		s.logger.Error("health: database unreachable", "request_id", requestID(r), "error", err)
 		s.ok(w, r, http.StatusServiceUnavailable,
-			map[string]any{"status": "degraded", "database": err.Error()})
+			map[string]any{"status": "degraded", "database": "unreachable", "request_id": requestID(r)})
 		return
 	}
 	s.ok(w, r, http.StatusOK, map[string]any{"status": "ok", "time": time.Now().UTC()})
@@ -1436,7 +1439,8 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request, p domain.Pri
 }
 
 // streamEvents is the SSE feed behind the dashboard (DESIGN.md §7.1: SSE first, because it
-// passes through load balancers without special handling).
+// passes through load balancers without special handling). Live events come from the shared
+// per-project feed (hub.go) rather than a poll per connection.
 func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request, p domain.Principal) {
 	project, _, err := s.project(r, p, domain.RoleObserver)
 	if err != nil {
@@ -1448,6 +1452,15 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request, p domain.P
 		s.fail(w, r, errors.New("streaming unsupported"))
 		return
 	}
+	// Subscribe before reading the backlog, so nothing committed in between is missed.
+	sub, err := s.ops.hub.subscribe(project.ID, p.ID)
+	if err != nil {
+		w.Header().Set("Retry-After", "30")
+		s.ok(w, r, http.StatusServiceUnavailable, ErrorBody{Code: "no_capacity",
+			Error: "too many open event streams; close a dashboard tab or retry later"})
+		return
+	}
+	defer sub.close()
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1456,11 +1469,29 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request, p domain.P
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	cursor := time.Now().Add(-2 * time.Minute)
+	cursor := time.Now().Add(-streamBacklog)
 	var lastID domain.ID
+	send := func(e domain.Event) {
+		if !after(e, cursor, lastID) {
+			return // already sent from the backlog
+		}
+		body, err := json.Marshal(e)
+		if err != nil {
+			return
+		}
+		_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", e.Type, body)
+		cursor, lastID = e.OccurredAt, e.ID
+	}
 
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
+	backlog, err := s.store.EventsSince(r.Context(), project.ID, cursor, lastID, 200)
+	if err != nil {
+		return
+	}
+	for _, e := range backlog {
+		send(e)
+	}
+	flusher.Flush()
+
 	keepalive := time.NewTicker(20 * time.Second)
 	defer keepalive.Stop()
 
@@ -1474,22 +1505,25 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request, p domain.P
 			_, _ = fmt.Fprint(w, ": keepalive\n\n")
 			flusher.Flush()
 
-		case <-ticker.C:
-			events, err := s.store.EventsSince(r.Context(), project.ID, cursor, lastID, 200)
-			if err != nil {
-				return
+		case e, open := <-sub.events:
+			if !open {
+				return // too slow to keep up, or the server is shutting down
 			}
-			for _, e := range events {
-				body, err := json.Marshal(e)
-				if err != nil {
-					continue
+			send(e)
+			// Drain whatever else is ready before flushing, so a burst is one write.
+			for drained := false; !drained; {
+				select {
+				case e, open := <-sub.events:
+					if !open {
+						flusher.Flush()
+						return
+					}
+					send(e)
+				default:
+					drained = true
 				}
-				_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", e.Type, body)
-				cursor, lastID = e.OccurredAt, e.ID
 			}
-			if len(events) > 0 {
-				flusher.Flush()
-			}
+			flusher.Flush()
 		}
 	}
 }
