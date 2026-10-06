@@ -1,3 +1,6 @@
+Before pushing, run `make check`; before opening or updating a pull request, run `make ci`
+(the same checks CI runs, against a throwaway Postgres it starts itself). See README "Testing".
+
 <!-- conductor:begin -->
 Before making code changes, obtain or attach to a Conductor task. Run
 `conductor check --summary "…" --scope path:…` first — if someone already holds

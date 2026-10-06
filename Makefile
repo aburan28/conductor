@@ -28,7 +28,7 @@ BUILD_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || ech
 BUILD_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null)
 LDFLAGS := -X $(MODULE)/internal/version.version=$(BUILD_VERSION) -X $(MODULE)/internal/version.commit=$(BUILD_COMMIT)
 
-.PHONY: all build test unit vet fmt db-up db-down db-wait bootstrap setup run serve login up down mcp wrap claude codex opencode clean e2e install install-local uninstall
+.PHONY: all build test unit vet fmt check ci hooks db-up db-down db-wait bootstrap setup run serve login up down mcp wrap claude codex opencode clean e2e install install-local uninstall
 
 all: vet build test
 
@@ -44,6 +44,21 @@ vet:
 
 fmt:
 	$(GO) fmt ./...
+
+# The checks CI runs, on this machine, before you push (scripts/ci-local.sh says how).
+# check: gofmt, vet, staticcheck, build, and the tests that need no database (about a minute).
+# ci: everything CI's Linux jobs run, against a throwaway Postgres the script starts and stops.
+check:
+	@./scripts/ci-local.sh quick
+
+ci:
+	@./scripts/ci-local.sh full
+
+# Run `make check` on every git push. Skip once with git push --no-verify;
+# CONDUCTOR_PREPUSH=full runs `make ci` instead, CONDUCTOR_PREPUSH=off turns it off.
+hooks:
+	git config core.hooksPath .githooks
+	@echo "pre-push hook installed: git push now runs scripts/ci-local.sh first"
 
 # Pure-logic tests; no database required.
 unit:

@@ -1372,6 +1372,25 @@ OpenCode SDK are TypeScript, so their drivers here are CLI-based rather than SDK
 
 ## Testing
 
+Run the checks CI runs before you push:
+
+```bash
+make check    # gofmt, vet, staticcheck, build, and the tests that need no database (~40s)
+make ci       # everything CI's Linux jobs run: + govulncheck, the Postgres suite,
+              # the race detector, and the end-to-end script (~2 min)
+make hooks    # once per clone: git push runs `make check` first
+```
+
+Both are `scripts/ci-local.sh`, which CI itself calls step by step, so a local pass is the
+same check CI makes. `make ci` needs Postgres 16+ and brings its own: a throwaway server from
+the local Postgres binaries (Debian/Ubuntu `postgresql`, Homebrew `postgresql@17`, or
+Postgres.app), or a `postgres:17-alpine` container if Docker is running, stopped again when
+the run ends. To use an existing database instead, set `CI_DATABASE_URL`. Run single steps
+with `scripts/ci-local.sh race e2e` (`--help` lists them). The pre-push hook skips once with
+`git push --no-verify`; `CONDUCTOR_PREPUSH=full` makes it run `make ci`, and `off` disables it.
+
+The narrower targets still work:
+
 ```bash
 make unit     # pure logic, no database
 make test     # everything; integration tests skip without DATABASE_URL

@@ -34,23 +34,17 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Every check below is a step of scripts/ci-local.sh, the same script `make check` and
+      # `make ci` run before a push, so what passes locally is what CI runs. The pinned tool
+      # versions (staticcheck, govulncheck) live there too.
       - name: gofmt
-        run: |
-          unformatted=$(gofmt -l .)
-          if [ -n "$unformatted" ]; then
-            echo "These files are not gofmt'd:"
-            echo "$unformatted"
-            gofmt -d $unformatted
-            exit 1
-          fi
+        run: ./scripts/ci-local.sh gofmt
 
       - name: go vet
-        run: go vet ./...
+        run: ./scripts/ci-local.sh vet
 
-      # Pinned: staticcheck 2026.1 (v0.7.0) is the newest release that builds with the Go
-      # 1.25 toolchain go.mod selects; 2026.2 needs Go 1.26. Configuration: staticcheck.conf.
       - name: staticcheck
-        run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
+        run: ./scripts/ci-local.sh staticcheck
 
   govulncheck:
     name: govulncheck
@@ -67,10 +61,9 @@ jobs:
           cache: true
 
       # Scans with the toolchain go.mod selects, so standard-library fixes count only once
-      # go.mod actually requires them. Pinned: v1.7.0 is the newest govulncheck that builds
-      # with Go 1.25 (v1.8.0 needs Go 1.26); the vulnerability database is always current.
+      # go.mod actually requires them; the vulnerability database is always current.
       - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+        run: ./scripts/ci-local.sh govulncheck
 
   test:
     name: test (Postgres ${{ matrix.postgres }})
@@ -102,6 +95,8 @@ jobs:
 
     env:
       DATABASE_URL: postgres://conductor:conductor@localhost:5432/conductor?sslmode=disable
+      # ci-local.sh uses this database instead of starting a throwaway one.
+      CI_DATABASE_URL: postgres://conductor:conductor@localhost:5432/conductor?sslmode=disable
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -116,26 +111,18 @@ jobs:
           cache: true
 
       - name: build
-        run: make build
+        run: ./scripts/ci-local.sh build
 
-      # The integration tests skip themselves without DATABASE_URL, which would turn a
-      # misconfigured service container into a silently green run. Fail loudly instead.
-      - name: verify the database is actually reachable
-        run: |
-          go test ./internal/db/ -run TestConcurrentClaimsYieldExactlyOneLease -v 2>&1 | tee /tmp/dbcheck.log
-          if grep -q "SKIP" /tmp/dbcheck.log; then
-            echo "Integration tests skipped — DATABASE_URL is not reaching Postgres."
-            exit 1
-          fi
-
+      # Each database step first proves the integration tests reach Postgres rather than
+      # skipping, which would turn a misconfigured service container into a silently green run.
       - name: test
-        run: go test ./... -count=1
+        run: ./scripts/ci-local.sh test
 
       - name: test with the race detector
-        run: go test -race ./... -count=1
+        run: ./scripts/ci-local.sh race
 
       - name: end-to-end
-        run: ./scripts/e2e.sh
+        run: ./scripts/ci-local.sh e2e
 
       - name: server logs on failure
         if: failure()
@@ -162,7 +149,7 @@ jobs:
           cache: true
 
       - name: build
-        run: make build
+        run: ./scripts/ci-local.sh build
 
       - name: test
-        run: env -u DATABASE_URL go test ./... -count=1
+        run: ./scripts/ci-local.sh unit

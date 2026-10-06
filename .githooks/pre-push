@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Runs the quick local CI checks (gofmt, vet, staticcheck, build, tests without a database)
+# before every push, so a pull request is not the first place they fail. Installed by
+# `make hooks`. Skip once with `git push --no-verify`; run the full CI set with `make ci`.
+#
+# CONDUCTOR_PREPUSH=full runs the full set (Postgres-backed suite, race detector, e2e) instead;
+# CONDUCTOR_PREPUSH=off disables the hook without uninstalling it.
+set -euo pipefail
+
+mode="${CONDUCTOR_PREPUSH:-quick}"
+[ "$mode" = off ] && exit 0
+
+# A push that only deletes branches carries nothing to check.
+deleting_only=1
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+  [ "$local_sha" != 0000000000000000000000000000000000000000 ] && deleting_only=0
+done
+[ "$deleting_only" = 1 ] && exit 0
+
+exec "$(git rev-parse --show-toplevel)/scripts/ci-local.sh" "$mode"
