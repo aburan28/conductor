@@ -75,6 +75,18 @@ harnesses:
         env:
           CAIRN_EPOCH_SECONDS: "1"
 
+# Measured bounds, read as routing facts (bounds.*): the frontier of ECDLP method costs and
+# the verdicts of challenges against it, as the ecbench bounds protocol seals them
+# (aburan28/crypto, docs/bounds/README.md). Both are generated, write-once, content-addressed
+# documents; a routing rule may read them as facts because anyone holding the records can
+# rebuild them and check the seal. Point these at your checkout of that repository: paths are
+# relative to this repository's root, and a path with nothing behind it leaves the facts
+# absent, never zero. The glob is filepath.Match syntax: one `*` per path element, no `**`.
+# See docs/bounds-integration.md.
+bounds:
+  frontier: ../crypto/docs/bounds/frontier.json
+  verdicts: ../crypto/research/*/verdict.json
+
 artifacts:
   backend: filesystem
   root: .conductor/runtime/artifacts

@@ -81,6 +81,20 @@ type MCPServerSpec struct {
 	Env     map[string]string `yaml:"env"`
 }
 
+// BoundsSpec mirrors project.yaml's optional `bounds:` block: where the measured-bound
+// documents a routing policy may read live. Both paths are relative to the repository root
+// unless absolute. A path with nothing behind it leaves the bounds.* facts absent, never
+// zero; a document that is present but does not read is an error. It is a copy of
+// bounds.Config's shape rather than that type, for the reason HarnessSpec gives: this package
+// parses YAML and internal/bounds reads documents, with neither importing the other. The
+// documents and the facts derived from them are described in docs/bounds-integration.md.
+type BoundsSpec struct {
+	// Frontier is the path of a frontier.json (`ecbench.frontier/v1`).
+	Frontier string `yaml:"frontier"`
+	// Verdicts is a glob of verdict files (`ecbench.verdict/v1`), in filepath.Match syntax.
+	Verdicts string `yaml:"verdicts"`
+}
+
 // ProjectFile mirrors .conductor/project.yaml.
 type ProjectFile struct {
 	APIVersion string `yaml:"apiVersion"`
@@ -119,6 +133,9 @@ type ProjectFile struct {
 	// this build has never heard of, which harness.BuildRegistry drives through its generic
 	// exec driver. Absent or empty, the built-in defaults apply unchanged.
 	Harnesses map[string]HarnessSpec `yaml:"harnesses"`
+	// Bounds names the measured-bound documents the project reads as routing facts. Absent,
+	// every bounds.* fact is absent.
+	Bounds    BoundsSpec `yaml:"bounds"`
 	Artifacts struct {
 		Backend       string `yaml:"backend"`
 		Root          string `yaml:"root"`

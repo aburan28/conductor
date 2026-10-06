@@ -3,10 +3,12 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/policy"
 )
 
 // The shipped .conductor files are documentation as much as configuration, and documentation
@@ -199,5 +201,66 @@ func TestMemberTokenBudgetParses(t *testing.T) {
 	}
 	if got := empty.ProjectConfig().Budget.MemberTokens; got != 0 {
 		t.Errorf("member tokens default = %d, want 0 (disabled)", got)
+	}
+}
+
+// The `bounds:` block is optional and names documents outside this repository, so the only
+// thing to hold the shipped project.yaml to is that it parses into the field a reader will
+// look at -- yaml.v3 ignores a key the struct does not carry, and a block that silently went
+// nowhere would leave every bounds.* fact absent for a reason nobody could see.
+func TestBoundsBlockParses(t *testing.T) {
+	bundle, err := Load(repoRoot(t))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if b := bundle.Project.Bounds; b.Frontier == "" || b.Verdicts == "" {
+		t.Errorf("the shipped project.yaml declares no bounds documents: %+v", b)
+	}
+
+	root := t.TempDir()
+	dir := filepath.Join(root, Dir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	project := "bounds:\n  frontier: ../crypto/docs/bounds/frontier.json\n  verdicts: ../crypto/research/*/verdict.json\n"
+	if err := os.WriteFile(filepath.Join(dir, "project.yaml"), []byte(project), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Project.Bounds.Frontier != "../crypto/docs/bounds/frontier.json" ||
+		got.Project.Bounds.Verdicts != "../crypto/research/*/verdict.json" {
+		t.Errorf("bounds = %+v", got.Project.Bounds)
+	}
+
+	none, err := Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("Load empty: %v", err)
+	}
+	if none.Project.Bounds != (BoundsSpec{}) {
+		t.Errorf("a project without the block reads bounds %+v, want none", none.Project.Bounds)
+	}
+}
+
+// The shipped dispatch.yaml is documentation as much as policy, and its rules read facts by
+// name. Every one of them must be a name the evaluator produces, or `conductor policy lint`
+// would be warning about the repository's own example.
+func TestRepositoryDispatchPolicyLintsClean(t *testing.T) {
+	bundle, err := Load(repoRoot(t))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if bundle.Dispatch.Empty() {
+		t.Fatal("the repository ships no dispatch.yaml")
+	}
+	_, issues := policy.CompileDispatch(&bundle.Dispatch.DispatchPolicy)
+	for _, i := range issues {
+		if i.Severity == "error" || strings.Contains(i.Message, "unknown fact") {
+			t.Errorf("shipped dispatch.yaml: %s", i)
+		} else {
+			t.Logf("shipped dispatch.yaml: %s", i)
+		}
 	}
 }
