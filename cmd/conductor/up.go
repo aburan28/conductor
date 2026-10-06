@@ -282,6 +282,15 @@ func dockerAvailable() bool {
 	return exec.Command("docker", "info", "-f", "{{.ServerVersion}}").Run() == nil
 }
 
+// Volume names. Compose prefixes the declared volume with the project name, which is the
+// checkout directory when that directory is "conductor": conductor_conductor-pgdata. Earlier
+// `conductor up` runs created the bare name instead, so a recreated container must find
+// whichever of the two already holds the data rather than starting an empty database.
+const (
+	barePostgresVolume    = "conductor-pgdata"
+	composePostgresVolume = "conductor_conductor-pgdata"
+)
+
 // ensurePostgresContainer starts conductor-db when it is stopped, and creates it when it
 // does not exist, matching the repository's compose definition (image, published port,
 // named volume). The port is published on loopback only, and the password comes from the
@@ -307,11 +316,15 @@ func ensurePostgresContainer(port, password string) error {
 	if password == "" {
 		return errors.New("the database DSN has no password; refusing to create a database without one")
 	}
+	volume, err := postgresVolume()
+	if err != nil {
+		return err
+	}
 	cmd := exec.Command("docker", "run", "-d",
 		"--name", "conductor-db", "--restart", "unless-stopped",
 		"-e", "POSTGRES_USER=conductor", "-e", "POSTGRES_PASSWORD", "-e", "POSTGRES_DB=conductor",
 		"-p", "127.0.0.1:"+port+":5432",
-		"-v", "conductor-pgdata:/var/lib/postgresql/data",
+		"-v", volume+":/var/lib/postgresql/data",
 		"postgres:17-alpine")
 	cmd.Env = append(withoutEnv(os.Environ(), "POSTGRES_PASSWORD"), "POSTGRES_PASSWORD="+password)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -328,6 +341,83 @@ func dockerNotFound(output string) bool {
 	return strings.Contains(low, "no such object") ||
 		strings.Contains(low, "no such container") ||
 		strings.Contains(low, "no such volume")
+}
+
+// choosePostgresVolume picks the volume a recreated conductor-db must mount.
+// A compose-labeled volume is the one `docker compose` initialized. The canonical
+// compose name wins when several checkouts each have one. Otherwise an existing
+// volume wins over creating a new empty one. Two unlabeled candidates is ambiguous:
+// attaching the wrong one would look like the database had been wiped.
+func choosePostgresVolume(labeled []string, bareExists, composeExists bool) (string, error) {
+	var other string
+	for _, name := range labeled {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if name == composePostgresVolume {
+			return composePostgresVolume, nil
+		}
+		if other != "" && other != name {
+			return "", fmt.Errorf("several Postgres volumes are labeled for this database (%s); remove the unused ones so only one remains", strings.Join(labeled, ", "))
+		}
+		other = name
+	}
+	if other != "" {
+		return other, nil
+	}
+	switch {
+	case composeExists && bareExists:
+		return "", fmt.Errorf("both %s and %s exist; remove the unused one so the database is unambiguous", composePostgresVolume, barePostgresVolume)
+	case composeExists:
+		return composePostgresVolume, nil
+	case bareExists:
+		return barePostgresVolume, nil
+	default:
+		return composePostgresVolume, nil
+	}
+}
+
+// postgresVolume resolves the volume to mount, asking Docker which candidates exist.
+func postgresVolume() (string, error) {
+	labeled, err := dockerVolumeNames("label=com.docker.compose.volume=" + barePostgresVolume)
+	if err != nil {
+		return "", err
+	}
+	bare, err := dockerVolumeExists(barePostgresVolume)
+	if err != nil {
+		return "", err
+	}
+	compose, err := dockerVolumeExists(composePostgresVolume)
+	if err != nil {
+		return "", err
+	}
+	return choosePostgresVolume(labeled, bare, compose)
+}
+
+func dockerVolumeNames(filter string) ([]string, error) {
+	out, err := exec.Command("docker", "volume", "ls", "-q", "--filter", filter).CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("docker volume ls: %v\n%s", err, out)
+	}
+	var names []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			names = append(names, line)
+		}
+	}
+	return names, nil
+}
+
+func dockerVolumeExists(name string) (bool, error) {
+	out, err := exec.Command("docker", "volume", "inspect", name).CombinedOutput()
+	if err == nil {
+		return true, nil
+	}
+	if dockerNotFound(string(out)) {
+		return false, nil
+	}
+	return false, fmt.Errorf("docker volume inspect %s: %v\n%s", name, err, out)
 }
 
 // warnIfPublished tells the operator when an existing conductor-db container publishes its
