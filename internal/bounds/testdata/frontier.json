@@ -1,0 +1,2841 @@
+{
+  "axes": [
+    "ops",
+    "memory"
+  ],
+  "built_from": [
+    "ECBND1h0069f2c753d5",
+    "ECBND1h01d56ac05650",
+    "ECBND1h0588ab084d8e",
+    "ECBND1h05a2ea918f3c",
+    "ECBND1h11f6a579f4ae",
+    "ECBND1h1573ea580e89",
+    "ECBND1h18e0d9d32693",
+    "ECBND1h242c8c9495a1",
+    "ECBND1h25ac58612850",
+    "ECBND1h2eb0cf5648a1",
+    "ECBND1h3271f30a876a",
+    "ECBND1h36247411dca1",
+    "ECBND1h412ef80d6c1a",
+    "ECBND1h435dff125a94",
+    "ECBND1h46fbc9140ac3",
+    "ECBND1h4bf964dff427",
+    "ECBND1h63df4ec3d936",
+    "ECBND1h65b55d17b35c",
+    "ECBND1h7a905c0d78e4",
+    "ECBND1h7b69b9787056",
+    "ECBND1h7ec91aa7b4a8",
+    "ECBND1h7edffa0407e6",
+    "ECBND1h7f1d4d59799f",
+    "ECBND1h83091af19aee",
+    "ECBND1h8406f3255acf",
+    "ECBND1h8a535b61cad3",
+    "ECBND1h9834244fe7f6",
+    "ECBND1h9d3beb6852c6",
+    "ECBND1h9db4ac1ad04e",
+    "ECBND1ha2a17b22c9c0",
+    "ECBND1ha6fbf0c678d0",
+    "ECBND1hb4b4be548e88",
+    "ECBND1hbab6d6dc37fc",
+    "ECBND1hbc8602528f48",
+    "ECBND1hc0f4d1ce156a",
+    "ECBND1hc2936a598d20",
+    "ECBND1hc58599b47139",
+    "ECBND1hce4cbf18c091",
+    "ECBND1hcf67af806cc5",
+    "ECBND1hd392c8f42bb0",
+    "ECBND1hd53ee4aa6eb3",
+    "ECBND1hdb2a8a16cc26",
+    "ECBND1he0aea8671f10",
+    "ECBND1he508a84e4e20",
+    "ECBND1he8163c29cc39",
+    "ECBND1he836821517fb"
+  ],
+  "domains": [
+    {
+      "axes": [
+        "ops",
+        "memory"
+      ],
+      "domain": {
+        "envelope": {
+          "precomputation": "none",
+          "targets": 1,
+          "threads": 1
+        },
+        "family": "koblitz",
+        "problem": "ecdlp.single_target",
+        "target_kind": "planted",
+        "tier": "toy",
+        "unit": "ecbench.gae"
+      },
+      "domain_id": "ECDOM1h080dd3dc639e",
+      "entries": [
+        {
+          "alpha": 0.3129362459892526,
+          "alpha_ci95": [
+            0.0,
+            0.38318062085119187
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.006996530552682905,
+                0.021043465770426786
+              ],
+              "known": true,
+              "value": 0.014444440933441997
+            },
+            "ops": {
+              "ci95": [
+                2.3293588844059223,
+                4.288202448008188
+              ],
+              "known": true,
+              "value": 3.305716205796698
+            },
+            "uncharged": {
+              "ci95": [
+                0.24809463444170105,
+                0.3746116660467282
+              ],
+              "known": true,
+              "value": 0.3091486036843125
+            }
+          },
+          "bound_id": "ECBND1hc2936a598d20",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [],
+          "dominated_by": [],
+          "improves_on": [],
+          "is_frontier": true,
+          "label": "rho.signed_frobenius on 3 koblitz curves, toy tier",
+          "level": "constant",
+          "log2_r": [
+            16.001122266128682,
+            18.002194205049015,
+            22.00089368896064
+          ],
+          "method": "rho.signed_frobenius",
+          "method_id": "ECM1h64b303e4183b",
+          "params": {
+            "cap_multiple": "64"
+          },
+          "runs": 72,
+          "scaling_claim": false
+        },
+        {
+          "alpha": 0.22868614647649035,
+          "alpha_ci95": [
+            -0.01272415326021109,
+            0.4909801454342841
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.009976565797179456,
+                0.02174356141050072
+              ],
+              "known": true,
+              "value": 0.016681889181988718
+            },
+            "ops": {
+              "ci95": [
+                2.9850368392824165,
+                7.373907617621451
+              ],
+              "known": true,
+              "value": 4.996338855670581
+            },
+            "uncharged": {
+              "ci95": [
+                0.2893240025029879,
+                0.841509883249411
+              ],
+              "known": true,
+              "value": 0.4828216390844438
+            }
+          },
+          "bound_id": "ECBND1hbc8602528f48",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [],
+          "dominated_by": [],
+          "improves_on": [
+            "ECBND1h1573ea580e89"
+          ],
+          "is_frontier": true,
+          "label": "rho.signed_frobenius against rho.signed_frobenius_strong in challenge ECCH1h76d71da2a89c epoch 1",
+          "level": "exponent",
+          "log2_r": [
+            15.373714813957372,
+            16.001122266128682,
+            16.997807964508816,
+            20.99910610127197
+          ],
+          "method": "rho.signed_frobenius",
+          "method_id": "ECM1h64b303e4183b",
+          "params": {
+            "cap_multiple": "64"
+          },
+          "runs": 96,
+          "scaling_claim": true
+        },
+        {
+          "alpha": 0.19866140566317708,
+          "alpha_ci95": [
+            -0.4092793982591526,
+            0.3879836205743792
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.01039982778552224,
+                0.01982317079174315
+              ],
+              "known": true,
+              "value": 0.015796221652121186
+            },
+            "ops": {
+              "ci95": [
+                2.932881180426605,
+                19.89750665661397
+              ],
+              "known": true,
+              "value": 9.455226514767691
+            },
+            "uncharged": {
+              "ci95": [
+                0.28867781071295906,
+                2.9545027401858883
+              ],
+              "known": true,
+              "value": 1.294391245114139
+            }
+          },
+          "bound_id": "ECBND1h3271f30a876a",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [],
+          "dominated_by": [],
+          "improves_on": [],
+          "is_frontier": true,
+          "label": "rho.signed_frobenius on 4 koblitz curves, toy tier",
+          "level": "exponent",
+          "log2_r": [
+            15.373714813957372,
+            16.001122266128682,
+            16.997807964508816,
+            20.99910610127197
+          ],
+          "method": "rho.signed_frobenius",
+          "method_id": "ECM1h64b303e4183b",
+          "params": {
+            "cap_multiple": "64"
+          },
+          "runs": 96,
+          "scaling_claim": true
+        },
+        {
+          "alpha": 0.49865557197848576,
+          "alpha_ci95": [
+            -1.0,
+            0.5726957145125282
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.5008214195618135,
+                0.5076150258506258
+              ],
+              "known": true,
+              "value": 0.5039865479316605
+            },
+            "ops": {
+              "ci95": [
+                4.551016060679841,
+                5.488174441681217
+              ],
+              "known": true,
+              "value": 5.003292753898564
+            },
+            "uncharged": {
+              "ci95": [
+                0.9171266826772484,
+                1.0519434990992411
+              ],
+              "known": true,
+              "value": 0.983773532434598
+            }
+          },
+          "bound_id": "ECBND1h435dff125a94",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [
+            "ECBND1hc2936a598d20 (rho.signed_frobenius) is clearly better on ops, memory",
+            "ECBND1hbc8602528f48 (rho.signed_frobenius) is clearly better on memory"
+          ],
+          "dominated_by": [
+            "ECBND1hc2936a598d20",
+            "ECBND1hbc8602528f48"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "bsgs.negation on 3 koblitz curves, toy tier",
+          "level": "constant",
+          "log2_r": [
+            16.001122266128682,
+            18.002194205049015,
+            22.00089368896064
+          ],
+          "method": "bsgs.negation",
+          "method_id": "ECM1h87f6341629c3",
+          "params": {},
+          "runs": 72,
+          "scaling_claim": false
+        },
+        {
+          "alpha": 0.5146538873175605,
+          "alpha_ci95": [
+            -0.3487383346759463,
+            0.7727966236842979
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.5019415142959062,
+                0.5085988462718992
+              ],
+              "known": true,
+              "value": 0.5052701802839037
+            },
+            "ops": {
+              "ci95": [
+                4.674117867215585,
+                7.187658607227296
+              ],
+              "known": true,
+              "value": 5.876711130775258
+            },
+            "uncharged": {
+              "ci95": [
+                0.9317585122142616,
+                1.19800435178485
+              ],
+              "known": true,
+              "value": 1.0762676100602306
+            }
+          },
+          "bound_id": "ECBND1h8406f3255acf",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [
+            "ECBND1hc2936a598d20 (rho.signed_frobenius) is clearly better on ops, memory",
+            "ECBND1hbc8602528f48 (rho.signed_frobenius) is clearly better on memory"
+          ],
+          "dominated_by": [
+            "ECBND1hc2936a598d20",
+            "ECBND1hbc8602528f48"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "bsgs.negation on 4 koblitz curves, toy tier",
+          "level": "exponent",
+          "log2_r": [
+            15.373714813957372,
+            16.001122266128682,
+            16.997807964508816,
+            20.99910610127197
+          ],
+          "method": "bsgs.negation",
+          "method_id": "ECM1h87f6341629c3",
+          "params": {},
+          "runs": 96,
+          "scaling_claim": true
+        },
+        {
+          "alpha": 0.4432485000753196,
+          "alpha_ci95": [
+            0.0,
+            0.5239150755451422
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                1.1457700169063547,
+                1.4336307429118025
+              ],
+              "known": true,
+              "value": 1.291489946978547
+            },
+            "ops": {
+              "ci95": [
+                5.945963112774116,
+                7.109385877513529
+              ],
+              "known": true,
+              "value": 6.517429024984014
+            },
+            "uncharged": {
+              "ci95": [
+                2.296170983549676,
+                2.913599664996513
+              ],
+              "known": true,
+              "value": 2.5850947277272462
+            }
+          },
+          "bound_id": "ECBND1hdb2a8a16cc26",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [
+            "ECBND1h435dff125a94 (bsgs.negation) is clearly better on ops, memory",
+            "ECBND1hc2936a598d20 (rho.signed_frobenius) is clearly better on ops, memory",
+            "ECBND1hbc8602528f48 (rho.signed_frobenius) is clearly better on memory",
+            "ECBND1h8406f3255acf (bsgs.negation) is clearly better on memory"
+          ],
+          "dominated_by": [
+            "ECBND1h435dff125a94",
+            "ECBND1hc2936a598d20",
+            "ECBND1hbc8602528f48",
+            "ECBND1h8406f3255acf"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "bsgs.interleaved on 3 koblitz curves, toy tier",
+          "level": "constant",
+          "log2_r": [
+            16.001122266128682,
+            18.002194205049015,
+            22.00089368896064
+          ],
+          "method": "bsgs.interleaved",
+          "method_id": "ECM1h6153371050b8",
+          "params": {},
+          "runs": 72,
+          "scaling_claim": false
+        },
+        {
+          "alpha": 0.3893724796068086,
+          "alpha_ci95": [
+            -0.01249999999999929,
+            0.4857390175373266
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.027551381395139768,
+                0.06250957975839155
+              ],
+              "known": true,
+              "value": 0.046443224850027304
+            },
+            "ops": {
+              "ci95": [
+                5.79840435455167,
+                7.728513297785053
+              ],
+              "known": true,
+              "value": 6.792172338552804
+            },
+            "uncharged": {
+              "ci95": [
+                0.8605088277027373,
+                1.1613552365988655
+              ],
+              "known": true,
+              "value": 1.0087739766684507
+            }
+          },
+          "bound_id": "ECBND1h7ec91aa7b4a8",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [
+            "ECBND1hc2936a598d20 (rho.signed_frobenius) is clearly better on ops, memory",
+            "ECBND1hbc8602528f48 (rho.signed_frobenius) is clearly better on memory"
+          ],
+          "dominated_by": [
+            "ECBND1hc2936a598d20",
+            "ECBND1hbc8602528f48"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "rho.negation on 3 koblitz curves, toy tier",
+          "level": "constant",
+          "log2_r": [
+            16.001122266128682,
+            18.002194205049015,
+            22.00089368896064
+          ],
+          "method": "rho.negation",
+          "method_id": "ECM1hefea4e0ebe79",
+          "params": {
+            "cap_multiple": "64"
+          },
+          "runs": 72,
+          "scaling_claim": false
+        },
+        {
+          "alpha": 0.5041267503876816,
+          "alpha_ci95": [
+            -0.24994750355584344,
+            0.8022760244479948
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                1.177098459279108,
+                1.4601836500843524
+              ],
+              "known": true,
+              "value": 1.326467205207088
+            },
+            "ops": {
+              "ci95": [
+                5.916087426762066,
+                8.602994541019397
+              ],
+              "known": true,
+              "value": 7.205835994222621
+            },
+            "uncharged": {
+              "ci95": [
+                2.3566852591798826,
+                2.9244475319900665
+              ],
+              "known": true,
+              "value": 2.6559876309667727
+            }
+          },
+          "bound_id": "ECBND1h0069f2c753d5",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [
+            "ECBND1h435dff125a94 (bsgs.negation) is clearly better on ops, memory",
+            "ECBND1hc2936a598d20 (rho.signed_frobenius) is clearly better on ops, memory",
+            "ECBND1h7ec91aa7b4a8 (rho.negation) is clearly better on memory",
+            "ECBND1hbc8602528f48 (rho.signed_frobenius) is clearly better on memory",
+            "ECBND1h8406f3255acf (bsgs.negation) is clearly better on memory"
+          ],
+          "dominated_by": [
+            "ECBND1h435dff125a94",
+            "ECBND1hc2936a598d20",
+            "ECBND1h7ec91aa7b4a8",
+            "ECBND1hbc8602528f48",
+            "ECBND1h8406f3255acf"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "bsgs.interleaved on 4 koblitz curves, toy tier",
+          "level": "exponent",
+          "log2_r": [
+            15.373714813957372,
+            16.001122266128682,
+            16.997807964508816,
+            20.99910610127197
+          ],
+          "method": "bsgs.interleaved",
+          "method_id": "ECM1h6153371050b8",
+          "params": {},
+          "runs": 96,
+          "scaling_claim": true
+        },
+        {
+          "alpha": 0.5084579197818817,
+          "alpha_ci95": [
+            -0.07646699183936521,
+            0.6857717135070986
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                1.0004280456037238,
+                1.0040608437103429
+              ],
+              "known": true,
+              "value": 1.002244444657035
+            },
+            "ops": {
+              "ci95": [
+                7.05569703700006,
+                10.115424801913791
+              ],
+              "known": true,
+              "value": 8.509835668043907
+            },
+            "uncharged": {
+              "ci95": [
+                1.429068655222425,
+                1.6981443137102263
+              ],
+              "known": true,
+              "value": 1.5751320892894312
+            }
+          },
+          "bound_id": "ECBND1h9db4ac1ad04e",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [
+            "ECBND1h435dff125a94 (bsgs.negation) is clearly better on ops, memory",
+            "ECBND1hc2936a598d20 (rho.signed_frobenius) is clearly better on ops, memory",
+            "ECBND1h7ec91aa7b4a8 (rho.negation) is clearly better on memory",
+            "ECBND1hbc8602528f48 (rho.signed_frobenius) is clearly better on memory",
+            "ECBND1h8406f3255acf (bsgs.negation) is clearly better on memory"
+          ],
+          "dominated_by": [
+            "ECBND1h435dff125a94",
+            "ECBND1hc2936a598d20",
+            "ECBND1h7ec91aa7b4a8",
+            "ECBND1hbc8602528f48",
+            "ECBND1h8406f3255acf"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "bsgs.textbook on 4 koblitz curves, toy tier",
+          "level": "exponent",
+          "log2_r": [
+            15.373714813957372,
+            16.001122266128682,
+            16.997807964508816,
+            20.99910610127197
+          ],
+          "method": "bsgs.textbook",
+          "method_id": "ECM1h2ee5b13dfb35",
+          "params": {},
+          "runs": 96,
+          "scaling_claim": true
+        },
+        {
+          "alpha": 0.2956200982732732,
+          "alpha_ci95": [
+            0.012667294464851916,
+            0.5732998376978917
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.03438278551038546,
+                0.0715100692620268
+              ],
+              "known": true,
+              "value": 0.05518748438494842
+            },
+            "ops": {
+              "ci95": [
+                6.471843537255783,
+                12.017351522799558
+              ],
+              "known": true,
+              "value": 9.04136607399036
+            },
+            "uncharged": {
+              "ci95": [
+                0.9822488983669776,
+                1.517078702245262
+              ],
+              "known": true,
+              "value": 1.233890599016083
+            }
+          },
+          "bound_id": "ECBND1h01d56ac05650",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [
+            "ECBND1hc2936a598d20 (rho.signed_frobenius) is clearly better on ops, memory",
+            "ECBND1hbc8602528f48 (rho.signed_frobenius) is clearly better on memory"
+          ],
+          "dominated_by": [
+            "ECBND1hc2936a598d20",
+            "ECBND1hbc8602528f48"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "rho.negation on 4 koblitz curves, toy tier",
+          "level": "exponent",
+          "log2_r": [
+            15.373714813957372,
+            16.001122266128682,
+            16.997807964508816,
+            20.99910610127197
+          ],
+          "method": "rho.negation",
+          "method_id": "ECM1hefea4e0ebe79",
+          "params": {
+            "cap_multiple": "64"
+          },
+          "runs": 96,
+          "scaling_claim": true
+        },
+        {
+          "alpha": 0.4049325627398655,
+          "alpha_ci95": [
+            0.0,
+            0.5254816087738171
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.04337798095784384,
+                0.09653588715652162
+              ],
+              "known": true,
+              "value": 0.0720033174063205
+            },
+            "ops": {
+              "ci95": [
+                7.882384799419893,
+                10.119785832164164
+              ],
+              "known": true,
+              "value": 9.093566718263054
+            },
+            "uncharged": {
+              "ci95": [
+                0.0,
+                0.0
+              ],
+              "known": true,
+              "value": 0.0
+            }
+          },
+          "bound_id": "ECBND1h63df4ec3d936",
+          "bounded": false,
+          "declared_alpha": 0.5,
+          "dominance_notes": [
+            "ECBND1hc2936a598d20 (rho.signed_frobenius) is clearly better on ops, memory",
+            "ECBND1h7ec91aa7b4a8 (rho.negation) is clearly better on ops",
+            "ECBND1hbc8602528f48 (rho.signed_frobenius) is clearly better on ops, memory"
+          ],
+          "dominated_by": [
+            "ECBND1hc2936a598d20",
+            "ECBND1h7ec91aa7b4a8",
+            "ECBND1hbc8602528f48"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "rho.plain on 3 koblitz curves, toy tier",
+          "level": "constant",
+          "log2_r": [
+            16.001122266128682,
+            18.002194205049015,
+            22.00089368896064
+          ],
+          "method": "rho.plain",
+          "method_id": "ECM1hb367476fce6c",
+          "params": {
+            "cap_multiple": "64"
+          },
+          "runs": 72,
+          "scaling_claim": false
+        },
+        {
+          "alpha": 0.4953677864963419,
+          "alpha_ci95": [
+            0.17857142857142858,
+            2.5
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.13045648157609338,
+                0.25761725636207117
+              ],
+              "known": true,
+              "value": 0.2011068296158719
+            },
+            "ops": {
+              "ci95": [
+                7.940422820086947,
+                11.401194835104992
+              ],
+              "known": true,
+              "value": 9.562477274971656
+            },
+            "uncharged": {
+              "ci95": [
+                0.2633129358417699,
+                0.5180172486174451
+              ],
+              "known": true,
+              "value": 0.4043284930018935
+            }
+          },
+          "bound_id": "ECBND1hc58599b47139",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [
+            "ECBND1hc2936a598d20 (rho.signed_frobenius) is clearly better on ops, memory",
+            "ECBND1h7ec91aa7b4a8 (rho.negation) is clearly better on ops, memory",
+            "ECBND1h63df4ec3d936 (rho.plain) is clearly better on memory",
+            "ECBND1hbc8602528f48 (rho.signed_frobenius) is clearly better on ops, memory",
+            "ECBND1h3271f30a876a (rho.signed_frobenius) is clearly better on memory",
+            "ECBND1h01d56ac05650 (rho.negation) is clearly better on memory"
+          ],
+          "dominated_by": [
+            "ECBND1hc2936a598d20",
+            "ECBND1h7ec91aa7b4a8",
+            "ECBND1h63df4ec3d936",
+            "ECBND1hbc8602528f48",
+            "ECBND1h3271f30a876a",
+            "ECBND1h01d56ac05650"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "kangaroo.vow on 3 koblitz curves, toy tier",
+          "level": "constant",
+          "log2_r": [
+            16.001122266128682,
+            18.002194205049015,
+            22.00089368896064
+          ],
+          "method": "kangaroo.vow",
+          "method_id": "ECM1h05c1dc19c164",
+          "params": {
+            "cap_multiple": "64"
+          },
+          "runs": 72,
+          "scaling_claim": false
+        },
+        {
+          "alpha": 0.36865147516837976,
+          "alpha_ci95": [
+            0.05645933207707329,
+            0.4637999727290983
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.05140909129103208,
+                0.09224929781830164
+              ],
+              "known": true,
+              "value": 0.07314740105298626
+            },
+            "ops": {
+              "ci95": [
+                8.25110265305867,
+                13.327802689345878
+              ],
+              "known": true,
+              "value": 10.31049282949114
+            },
+            "uncharged": {
+              "ci95": [
+                0.0,
+                0.0
+              ],
+              "known": true,
+              "value": 0.0
+            }
+          },
+          "bound_id": "ECBND1h9834244fe7f6",
+          "bounded": false,
+          "declared_alpha": 0.5,
+          "dominance_notes": [
+            "ECBND1hc2936a598d20 (rho.signed_frobenius) is clearly better on ops, memory",
+            "ECBND1h7ec91aa7b4a8 (rho.negation) is clearly better on ops",
+            "ECBND1hbc8602528f48 (rho.signed_frobenius) is clearly better on ops, memory",
+            "ECBND1h3271f30a876a (rho.signed_frobenius) is clearly better on memory"
+          ],
+          "dominated_by": [
+            "ECBND1hc2936a598d20",
+            "ECBND1h7ec91aa7b4a8",
+            "ECBND1hbc8602528f48",
+            "ECBND1h3271f30a876a"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "rho.plain on 4 koblitz curves, toy tier",
+          "level": "exponent",
+          "log2_r": [
+            15.373714813957372,
+            16.001122266128682,
+            16.997807964508816,
+            20.99910610127197
+          ],
+          "method": "rho.plain",
+          "method_id": "ECM1hb367476fce6c",
+          "params": {
+            "cap_multiple": "64"
+          },
+          "runs": 96,
+          "scaling_claim": true
+        },
+        {
+          "alpha": 0.5074108411285786,
+          "alpha_ci95": [
+            0.3106270362671435,
+            0.8468183290371695
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.16028927047218883,
+                0.28157773060531294
+              ],
+              "known": true,
+              "value": 0.2210050650201204
+            },
+            "ops": {
+              "ci95": [
+                9.619330977428124,
+                12.079236925599496
+              ],
+              "known": true,
+              "value": 10.800748931781415
+            },
+            "uncharged": {
+              "ci95": [
+                0.3287658075349283,
+                0.5653416119137296
+              ],
+              "known": true,
+              "value": 0.4450633505928384
+            }
+          },
+          "bound_id": "ECBND1h4bf964dff427",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [
+            "ECBND1hc2936a598d20 (rho.signed_frobenius) is clearly better on ops, memory",
+            "ECBND1h7ec91aa7b4a8 (rho.negation) is clearly better on ops, memory",
+            "ECBND1h63df4ec3d936 (rho.plain) is clearly better on memory",
+            "ECBND1hbc8602528f48 (rho.signed_frobenius) is clearly better on ops, memory",
+            "ECBND1h3271f30a876a (rho.signed_frobenius) is clearly better on memory",
+            "ECBND1h01d56ac05650 (rho.negation) is clearly better on memory",
+            "ECBND1h9834244fe7f6 (rho.plain) is clearly better on memory"
+          ],
+          "dominated_by": [
+            "ECBND1hc2936a598d20",
+            "ECBND1h7ec91aa7b4a8",
+            "ECBND1h63df4ec3d936",
+            "ECBND1hbc8602528f48",
+            "ECBND1h3271f30a876a",
+            "ECBND1h01d56ac05650",
+            "ECBND1h9834244fe7f6"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "kangaroo.vow on 4 koblitz curves, toy tier",
+          "level": "exponent",
+          "log2_r": [
+            15.373714813957372,
+            16.001122266128682,
+            16.997807964508816,
+            20.99910610127197
+          ],
+          "method": "kangaroo.vow",
+          "method_id": "ECM1h05c1dc19c164",
+          "params": {
+            "cap_multiple": "64"
+          },
+          "runs": 96,
+          "scaling_claim": true
+        },
+        {
+          "alpha": 0.13151456503674772,
+          "alpha_ci95": [
+            0.10388168116870948,
+            0.18974322842147864
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.02236805063462459,
+                0.03709142843361165
+              ],
+              "known": true,
+              "value": 0.02970523677413899
+            },
+            "ops": {
+              "ci95": [
+                9.106921784262797,
+                25.31049630445604
+              ],
+              "known": true,
+              "value": 16.79352705063938
+            },
+            "uncharged": {
+              "ci95": [
+                0.8001467243964232,
+                1.2852369287257683
+              ],
+              "known": true,
+              "value": 1.060414156430714
+            }
+          },
+          "bound_id": "ECBND1h1573ea580e89",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [
+            "ECBND1hc2936a598d20 (rho.signed_frobenius) is clearly better on ops, memory",
+            "ECBND1hbc8602528f48 (rho.signed_frobenius) is clearly better on ops, memory",
+            "ECBND1h3271f30a876a (rho.signed_frobenius) is clearly better on memory"
+          ],
+          "dominated_by": [
+            "ECBND1hc2936a598d20",
+            "ECBND1hbc8602528f48",
+            "ECBND1h3271f30a876a"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "rho.signed_frobenius_strong on 4 koblitz curves, toy tier",
+          "level": "exponent",
+          "log2_r": [
+            15.373714813957372,
+            16.001122266128682,
+            16.997807964508816,
+            20.99910610127197
+          ],
+          "method": "rho.signed_frobenius_strong",
+          "method_id": "ECM1hb6123afffc07",
+          "params": {
+            "dp_bits": "4",
+            "lanes": "32",
+            "step_cap_factor": "2000"
+          },
+          "runs": 96,
+          "scaling_claim": true
+        },
+        {
+          "alpha": 0.21592321550627583,
+          "alpha_ci95": [
+            -0.00998854602746716,
+            0.31256083553735026
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.021913325232791176,
+                0.06248473121940727
+              ],
+              "known": true,
+              "value": 0.04445993464997253
+            },
+            "ops": {
+              "ci95": [
+                18.69542794330539,
+                43.11217589135792
+              ],
+              "known": true,
+              "value": 29.860370546503972
+            },
+            "uncharged": {
+              "ci95": [
+                0.0,
+                0.0
+              ],
+              "known": true,
+              "value": 0.0
+            }
+          },
+          "bound_id": "ECBND1h2eb0cf5648a1",
+          "bounded": false,
+          "declared_alpha": 0.5,
+          "dominance_notes": [
+            "ECBND1hc2936a598d20 (rho.signed_frobenius) is clearly better on ops, memory",
+            "ECBND1hbc8602528f48 (rho.signed_frobenius) is clearly better on ops, memory",
+            "ECBND1h3271f30a876a (rho.signed_frobenius) is clearly better on memory"
+          ],
+          "dominated_by": [
+            "ECBND1hc2936a598d20",
+            "ECBND1hbc8602528f48",
+            "ECBND1h3271f30a876a"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "rho.frozen_reference on 4 koblitz curves, toy tier",
+          "level": "exponent",
+          "log2_r": [
+            15.373714813957372,
+            16.001122266128682,
+            16.997807964508816,
+            20.99910610127197
+          ],
+          "method": "rho.frozen_reference",
+          "method_id": "ECM1h9c08616a41bb",
+          "params": {
+            "cap_multiple": "64"
+          },
+          "runs": 96,
+          "scaling_claim": true
+        }
+      ],
+      "floor_model": "S_floor = sqrt(pi / 2A), A the usable automorphisms; ops = S / S_floor",
+      "memory_leader": "ECBND1hc2936a598d20",
+      "ops_leader": "ECBND1hc2936a598d20"
+    },
+    {
+      "axes": [
+        "ops",
+        "memory"
+      ],
+      "domain": {
+        "envelope": {
+          "precomputation": "none",
+          "targets": 1,
+          "threads": 1
+        },
+        "family": "koblitz",
+        "problem": "ecdlp.single_target",
+        "target_kind": "planted",
+        "tier": "medium",
+        "unit": "ecbench.gae"
+      },
+      "domain_id": "ECDOM1h3962632c9fe8",
+      "entries": [
+        {
+          "alpha": 0.4506815501621097,
+          "alpha_ci95": [
+            0.3989513852947253,
+            0.512294010716587
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.007028198127880184,
+                0.009590056027832222
+              ],
+              "known": true,
+              "value": 0.00823451684689526
+            },
+            "ops": {
+              "ci95": [
+                0.9274075951859404,
+                1.260856076812353
+              ],
+              "known": true,
+              "value": 1.088842355475427
+            },
+            "uncharged": {
+              "ci95": [
+                0.22866341282777397,
+                0.31651830694954175
+              ],
+              "known": true,
+              "value": 0.2712953310299048
+            }
+          },
+          "bound_id": "ECBND1h05a2ea918f3c",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [],
+          "dominated_by": [],
+          "improves_on": [],
+          "is_frontier": true,
+          "label": "rho.signed_frobenius_strong on 6 koblitz curves, medium tier",
+          "level": "exponent",
+          "log2_r": [
+            32.112779548336775,
+            36.635865112243344,
+            39.00000151433405,
+            44.258533022667656,
+            44.51731807271853,
+            47.21087395347554
+          ],
+          "method": "rho.signed_frobenius_strong",
+          "method_id": "ECM1hb6123afffc07",
+          "params": {
+            "dp_bits": "4",
+            "lanes": "32",
+            "step_cap_factor": "2000"
+          },
+          "runs": 144,
+          "scaling_claim": true
+        },
+        {
+          "alpha": 0.4509441677697551,
+          "alpha_ci95": [
+            0.03333333333333333,
+            0.5149337819922548
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.00013029410399949143,
+                0.0013694192961093386
+              ],
+              "known": true,
+              "value": 0.0007057904151789579
+            },
+            "ops": {
+              "ci95": [
+                0.9540213775115876,
+                1.463766148468154
+              ],
+              "known": true,
+              "value": 1.1880117771827217
+            },
+            "uncharged": {
+              "ci95": [
+                0.12920018463733457,
+                0.190303063266694
+              ],
+              "known": true,
+              "value": 0.15608367295226375
+            }
+          },
+          "bound_id": "ECBND1h46fbc9140ac3",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [],
+          "dominated_by": [],
+          "improves_on": [],
+          "is_frontier": true,
+          "label": "rho.signed_frobenius on 3 koblitz curves, medium tier",
+          "level": "constant",
+          "log2_r": [
+            27.78083708554834,
+            32.112779548336775,
+            39.00000151433405
+          ],
+          "method": "rho.signed_frobenius",
+          "method_id": "ECM1h64b303e4183b",
+          "params": {
+            "cap_multiple": "64"
+          },
+          "runs": 72,
+          "scaling_claim": false
+        },
+        {
+          "alpha": 0.4671499604732496,
+          "alpha_ci95": [
+            0.4228301440959636,
+            0.4986030000662402
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.13330839333638542,
+                0.15035744779136578
+              ],
+              "known": true,
+              "value": 0.14175033410253876
+            },
+            "ops": {
+              "ci95": [
+                2.1598721597291606,
+                2.6386021727365896
+              ],
+              "known": true,
+              "value": 2.3904184122708383
+            },
+            "uncharged": {
+              "ci95": [
+                0.3931573891180127,
+                0.4887185036540483
+              ],
+              "known": true,
+              "value": 0.4413648271229246
+            }
+          },
+          "bound_id": "ECBND1h25ac58612850",
+          "bounded": true,
+          "declared_alpha": null,
+          "dominance_notes": [
+            "ECBND1h46fbc9140ac3 (rho.signed_frobenius) is clearly better on ops, memory",
+            "ECBND1h05a2ea918f3c (rho.signed_frobenius_strong) is clearly better on ops, memory"
+          ],
+          "dominated_by": [
+            "ECBND1h46fbc9140ac3",
+            "ECBND1h05a2ea918f3c"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "claw.pair_table on 6 koblitz curves, medium tier",
+          "level": "exponent",
+          "log2_r": [
+            32.112779548336775,
+            36.635865112243344,
+            39.00000151433405,
+            44.258533022667656,
+            44.51731807271853,
+            47.21087395347554
+          ],
+          "method": "claw.pair_table",
+          "method_id": "ECM1h3f1995f505fa",
+          "params": {
+            "base_scale": "4",
+            "cap_multiple": "64",
+            "table_scale": "1"
+          },
+          "runs": 144,
+          "scaling_claim": true
+        },
+        {
+          "alpha": 0.4730809148230779,
+          "alpha_ci95": [
+            0.125,
+            0.5530522766519244
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.0008506807730212317,
+                0.006897056928059661
+              ],
+              "known": true,
+              "value": 0.0037569479713330817
+            },
+            "ops": {
+              "ci95": [
+                5.780019536328315,
+                7.245124036261784
+              ],
+              "known": true,
+              "value": 6.51608532493694
+            },
+            "uncharged": {
+              "ci95": [
+                0.8041322045994934,
+                1.006960951996022
+              ],
+              "known": true,
+              "value": 0.8998852070964909
+            }
+          },
+          "bound_id": "ECBND1h83091af19aee",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [
+            "ECBND1h46fbc9140ac3 (rho.signed_frobenius) is clearly better on ops"
+          ],
+          "dominated_by": [
+            "ECBND1h46fbc9140ac3"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "rho.negation on 3 koblitz curves, medium tier",
+          "level": "constant",
+          "log2_r": [
+            27.78083708554834,
+            32.112779548336775,
+            39.00000151433405
+          ],
+          "method": "rho.negation",
+          "method_id": "ECM1hefea4e0ebe79",
+          "params": {
+            "cap_multiple": "64"
+          },
+          "runs": 72,
+          "scaling_claim": false
+        },
+        {
+          "alpha": 0.4964660286082181,
+          "alpha_ci95": [
+            0.1,
+            0.5307590498845995
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.5000016256360309,
+                0.500078241936258
+              ],
+              "known": true,
+              "value": 0.5000357030691767
+            },
+            "ops": {
+              "ci95": [
+                6.6428071195713505,
+                7.681793721931567
+              ],
+              "known": true,
+              "value": 7.143403061115375
+            },
+            "uncharged": {
+              "ci95": [
+                0.9381218254318212,
+                1.056516799359016
+              ],
+              "known": true,
+              "value": 0.9966643192405782
+            }
+          },
+          "bound_id": "ECBND1h7a905c0d78e4",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [
+            "ECBND1h46fbc9140ac3 (rho.signed_frobenius) is clearly better on ops, memory",
+            "ECBND1h83091af19aee (rho.negation) is clearly better on memory",
+            "ECBND1h25ac58612850 (claw.pair_table) is clearly better on ops, memory",
+            "ECBND1h05a2ea918f3c (rho.signed_frobenius_strong) is clearly better on ops, memory"
+          ],
+          "dominated_by": [
+            "ECBND1h46fbc9140ac3",
+            "ECBND1h83091af19aee",
+            "ECBND1h25ac58612850",
+            "ECBND1h05a2ea918f3c"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "bsgs.negation on 3 koblitz curves, medium tier",
+          "level": "constant",
+          "log2_r": [
+            27.78083708554834,
+            32.112779548336775,
+            39.00000151433405
+          ],
+          "method": "bsgs.negation",
+          "method_id": "ECM1h87f6341629c3",
+          "params": {},
+          "runs": 72,
+          "scaling_claim": false
+        },
+        {
+          "alpha": 0.503234201892189,
+          "alpha_ci95": [
+            0.47353147656274386,
+            0.5314561540933609
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.5000004339135834,
+                0.5000142825954715
+              ],
+              "known": true,
+              "value": 0.5000054883085925
+            },
+            "ops": {
+              "ci95": [
+                6.98094082193663,
+                8.375206417213178
+              ],
+              "known": true,
+              "value": 7.668839800318845
+            },
+            "uncharged": {
+              "ci95": [
+                0.8936908238394499,
+                1.02526248975636
+              ],
+              "known": true,
+              "value": 0.957248028875986
+            }
+          },
+          "bound_id": "ECBND1he836821517fb",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [
+            "ECBND1h46fbc9140ac3 (rho.signed_frobenius) is clearly better on ops, memory",
+            "ECBND1h83091af19aee (rho.negation) is clearly better on memory",
+            "ECBND1h25ac58612850 (claw.pair_table) is clearly better on ops, memory",
+            "ECBND1h05a2ea918f3c (rho.signed_frobenius_strong) is clearly better on ops, memory"
+          ],
+          "dominated_by": [
+            "ECBND1h46fbc9140ac3",
+            "ECBND1h83091af19aee",
+            "ECBND1h25ac58612850",
+            "ECBND1h05a2ea918f3c"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "bsgs.negation on 6 koblitz curves, medium tier",
+          "level": "exponent",
+          "log2_r": [
+            32.112779548336775,
+            36.635865112243344,
+            39.00000151433405,
+            44.258533022667656,
+            44.51731807271853,
+            47.21087395347554
+          ],
+          "method": "bsgs.negation",
+          "method_id": "ECM1h87f6341629c3",
+          "params": {},
+          "runs": 144,
+          "scaling_claim": true
+        },
+        {
+          "alpha": 0.4942479751958708,
+          "alpha_ci95": [
+            0.0,
+            0.5628778626948344
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                1.1685345073751847,
+                1.420213895414359
+              ],
+              "known": true,
+              "value": 1.2839641637403938
+            },
+            "ops": {
+              "ci95": [
+                8.275721568239044,
+                10.432484277407026
+              ],
+              "known": true,
+              "value": 9.209016443614765
+            },
+            "uncharged": {
+              "ci95": [
+                2.332452089755621,
+                2.8452111468194685
+              ],
+              "known": true,
+              "value": 2.5679556189269457
+            }
+          },
+          "bound_id": "ECBND1hd53ee4aa6eb3",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [
+            "ECBND1h7a905c0d78e4 (bsgs.negation) is clearly better on ops, memory",
+            "ECBND1h46fbc9140ac3 (rho.signed_frobenius) is clearly better on ops, memory",
+            "ECBND1h83091af19aee (rho.negation) is clearly better on ops, memory",
+            "ECBND1he836821517fb (bsgs.negation) is clearly better on memory",
+            "ECBND1h25ac58612850 (claw.pair_table) is clearly better on ops, memory",
+            "ECBND1h05a2ea918f3c (rho.signed_frobenius_strong) is clearly better on ops, memory"
+          ],
+          "dominated_by": [
+            "ECBND1h7a905c0d78e4",
+            "ECBND1h46fbc9140ac3",
+            "ECBND1h83091af19aee",
+            "ECBND1he836821517fb",
+            "ECBND1h25ac58612850",
+            "ECBND1h05a2ea918f3c"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "bsgs.interleaved on 3 koblitz curves, medium tier",
+          "level": "constant",
+          "log2_r": [
+            27.78083708554834,
+            32.112779548336775,
+            39.00000151433405
+          ],
+          "method": "bsgs.interleaved",
+          "method_id": "ECM1h6153371050b8",
+          "params": {},
+          "runs": 72,
+          "scaling_claim": false
+        },
+        {
+          "alpha": 0.424258182026831,
+          "alpha_ci95": [
+            0.03333333333333333,
+            0.5563457677110596
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.001002909490368836,
+                0.011637537413062027
+              ],
+              "known": true,
+              "value": 0.006043658445385615
+            },
+            "ops": {
+              "ci95": [
+                7.171706840108945,
+                11.134355534765824
+              ],
+              "known": true,
+              "value": 9.22774764153028
+            },
+            "uncharged": {
+              "ci95": [
+                0.0,
+                0.0
+              ],
+              "known": true,
+              "value": 0.0
+            }
+          },
+          "bound_id": "ECBND1h0588ab084d8e",
+          "bounded": false,
+          "declared_alpha": 0.5,
+          "dominance_notes": [
+            "ECBND1h46fbc9140ac3 (rho.signed_frobenius) is clearly better on ops"
+          ],
+          "dominated_by": [
+            "ECBND1h46fbc9140ac3"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "rho.plain on 3 koblitz curves, medium tier",
+          "level": "constant",
+          "log2_r": [
+            27.78083708554834,
+            32.112779548336775,
+            39.00000151433405
+          ],
+          "method": "rho.plain",
+          "method_id": "ECM1hb367476fce6c",
+          "params": {
+            "cap_multiple": "64"
+          },
+          "runs": 72,
+          "scaling_claim": false
+        },
+        {
+          "alpha": 0.4862451354150665,
+          "alpha_ci95": [
+            -0.3125,
+            0.5710645564651016
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.0037887037281741217,
+                0.03511917639608863
+              ],
+              "known": true,
+              "value": 0.019088672438596525
+            },
+            "ops": {
+              "ci95": [
+                13.74219404361621,
+                17.597474987532877
+              ],
+              "known": true,
+              "value": 15.558271994608438
+            },
+            "uncharged": {
+              "ci95": [
+                0.007557415811696762,
+                0.0715955392098338
+              ],
+              "known": true,
+              "value": 0.03820463632335383
+            }
+          },
+          "bound_id": "ECBND1h7f1d4d59799f",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [
+            "ECBND1h46fbc9140ac3 (rho.signed_frobenius) is clearly better on ops, memory",
+            "ECBND1h83091af19aee (rho.negation) is clearly better on ops",
+            "ECBND1h0588ab084d8e (rho.plain) is clearly better on ops",
+            "ECBND1h05a2ea918f3c (rho.signed_frobenius_strong) is clearly better on ops"
+          ],
+          "dominated_by": [
+            "ECBND1h46fbc9140ac3",
+            "ECBND1h83091af19aee",
+            "ECBND1h0588ab084d8e",
+            "ECBND1h05a2ea918f3c"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "kangaroo.vow on 3 koblitz curves, medium tier",
+          "level": "constant",
+          "log2_r": [
+            27.78083708554834,
+            32.112779548336775,
+            39.00000151433405
+          ],
+          "method": "kangaroo.vow",
+          "method_id": "ECM1h05c1dc19c164",
+          "params": {
+            "cap_multiple": "64"
+          },
+          "runs": 72,
+          "scaling_claim": false
+        },
+        {
+          "alpha": 0.4833976781026389,
+          "alpha_ci95": [
+            0.3777209125505681,
+            0.5654462106021532
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.004166678495162671,
+                0.004705087191805947
+              ],
+              "known": true,
+              "value": 0.004432480799341712
+            },
+            "ops": {
+              "ci95": [
+                28.64517248221349,
+                42.83050755773386
+              ],
+              "known": true,
+              "value": 35.59623632504961
+            },
+            "uncharged": {
+              "ci95": [
+                3.555314515130893,
+                5.560266502852053
+              ],
+              "known": true,
+              "value": 4.488159241591442
+            }
+          },
+          "bound_id": "ECBND1hc0f4d1ce156a",
+          "bounded": true,
+          "declared_alpha": null,
+          "dominance_notes": [
+            "ECBND1h46fbc9140ac3 (rho.signed_frobenius) is clearly better on ops, memory",
+            "ECBND1h83091af19aee (rho.negation) is clearly better on ops"
+          ],
+          "dominated_by": [
+            "ECBND1h46fbc9140ac3",
+            "ECBND1h83091af19aee"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "claw.pair_table on 6 koblitz curves, medium tier",
+          "level": "exponent",
+          "log2_r": [
+            32.112779548336775,
+            36.635865112243344,
+            39.00000151433405,
+            44.258533022667656,
+            44.51731807271853,
+            47.21087395347554
+          ],
+          "method": "claw.pair_table",
+          "method_id": "ECM1hd9f76acb83c0",
+          "params": {
+            "base_scale": "1.06",
+            "cap_multiple": "64",
+            "table_scale": "0.03125"
+          },
+          "runs": 144,
+          "scaling_claim": true
+        }
+      ],
+      "floor_model": "S_floor = sqrt(pi / 2A), A the usable automorphisms; ops = S / S_floor",
+      "memory_leader": "ECBND1h46fbc9140ac3",
+      "ops_leader": "ECBND1h05a2ea918f3c"
+    },
+    {
+      "axes": [
+        "ops",
+        "memory"
+      ],
+      "domain": {
+        "envelope": {
+          "precomputation": "none",
+          "targets": 1,
+          "threads": 1
+        },
+        "family": "prime",
+        "problem": "ecdlp.single_target",
+        "target_kind": "planted",
+        "tier": "toy",
+        "unit": "ecbench.gae"
+      },
+      "domain_id": "ECDOM1ha1f283af3a5d",
+      "entries": [
+        {
+          "alpha": 0.5285348228378631,
+          "alpha_ci95": [
+            0.4845240986132446,
+            0.5960289561415117
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.5006420564912815,
+                0.5046068740827305
+              ],
+              "known": true,
+              "value": 0.5023209987962317
+            },
+            "ops": {
+              "ci95": [
+                0.978097816630334,
+                1.224656447411972
+              ],
+              "known": true,
+              "value": 1.1000317918105358
+            },
+            "uncharged": {
+              "ci95": [
+                0.847308954664371,
+                1.0778465581668342
+              ],
+              "known": true,
+              "value": 0.9584088281343964
+            }
+          },
+          "bound_id": "ECBND1he8163c29cc39",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [],
+          "dominated_by": [],
+          "improves_on": [],
+          "is_frontier": true,
+          "label": "bsgs.negation on 6 prime curves, toy tier",
+          "level": "exponent",
+          "log2_r": [
+            15.696886046427368,
+            17.696675535624497,
+            19.101306328859888,
+            21.215969580418943,
+            23.974409950711376,
+            25.3461752358282
+          ],
+          "method": "bsgs.negation",
+          "method_id": "ECM1h87f6341629c3",
+          "params": {},
+          "runs": 144,
+          "scaling_claim": true
+        },
+        {
+          "alpha": 0.45779951496245297,
+          "alpha_ci95": [
+            0.3492422796678856,
+            0.5476509483230162
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.5005415492284316,
+                0.5027786360437511
+              ],
+              "known": true,
+              "value": 0.5015101558342762
+            },
+            "ops": {
+              "ci95": [
+                1.0477039080539872,
+                1.2544062781269616
+              ],
+              "known": true,
+              "value": 1.15374501190364
+            },
+            "uncharged": {
+              "ci95": [
+                0.9237721131947294,
+                1.090153099581825
+              ],
+              "known": true,
+              "value": 1.0081132383055311
+            }
+          },
+          "bound_id": "ECBND1hd392c8f42bb0",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [],
+          "dominated_by": [],
+          "improves_on": [],
+          "is_frontier": true,
+          "label": "bsgs.negation on 4 prime curves, toy tier",
+          "level": "exponent",
+          "log2_r": [
+            17.696675535624497,
+            19.101306328859888,
+            21.215969580418943,
+            23.974409950711376
+          ],
+          "method": "bsgs.negation",
+          "method_id": "ECM1h87f6341629c3",
+          "params": {},
+          "runs": 96,
+          "scaling_claim": true
+        },
+        {
+          "alpha": 0.4599920540920802,
+          "alpha_ci95": [
+            0.3770187748496841,
+            0.5024599649323193
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.5005415492284316,
+                0.5027786360437511
+              ],
+              "known": true,
+              "value": 0.5015101558342762
+            },
+            "ops": {
+              "ci95": [
+                1.0682914381883128,
+                1.2479117119182437
+              ],
+              "known": true,
+              "value": 1.1602219187509542
+            },
+            "uncharged": {
+              "ci95": [
+                0.9446352892257546,
+                1.0818651763146072
+              ],
+              "known": true,
+              "value": 1.013853247547271
+            }
+          },
+          "bound_id": "ECBND1he0aea8671f10",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [],
+          "dominated_by": [],
+          "improves_on": [
+            "ECBND1h7b69b9787056"
+          ],
+          "is_frontier": true,
+          "label": "bsgs.negation against rho.negation in challenge ECCH1h904625668686 epoch 1",
+          "level": "exponent",
+          "log2_r": [
+            17.696675535624497,
+            19.101306328859888,
+            21.215969580418943,
+            23.974409950711376
+          ],
+          "method": "bsgs.negation",
+          "method_id": "ECM1h87f6341629c3",
+          "params": {},
+          "runs": 96,
+          "scaling_claim": true
+        },
+        {
+          "alpha": 0.3983913864362024,
+          "alpha_ci95": [
+            0.30762078652911695,
+            0.47631021078116786
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.020085650670820115,
+                0.05013637192153068
+              ],
+              "known": true,
+              "value": 0.033717852443164525
+            },
+            "ops": {
+              "ci95": [
+                1.183698663858357,
+                1.7716331694623857
+              ],
+              "known": true,
+              "value": 1.4530828753839578
+            },
+            "uncharged": {
+              "ci95": [
+                0.9096140710159692,
+                1.1961731231969706
+              ],
+              "known": true,
+              "value": 1.0421668972453344
+            }
+          },
+          "bound_id": "ECBND1ha6fbf0c678d0",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [],
+          "dominated_by": [],
+          "improves_on": [],
+          "is_frontier": true,
+          "label": "rho.negation on 6 prime curves, toy tier",
+          "level": "exponent",
+          "log2_r": [
+            15.696886046427368,
+            17.696675535624497,
+            19.101306328859888,
+            21.215969580418943,
+            23.974409950711376,
+            25.3461752358282
+          ],
+          "method": "rho.negation",
+          "method_id": "ECM1hefea4e0ebe79",
+          "params": {
+            "cap_multiple": "64"
+          },
+          "runs": 144,
+          "scaling_claim": true
+        },
+        {
+          "alpha": 0.4544521140612318,
+          "alpha_ci95": [
+            0.273450018785023,
+            0.6071657296197525
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.020397236764511727,
+                0.04904287009049884
+              ],
+              "known": true,
+              "value": 0.0339995565077037
+            },
+            "ops": {
+              "ci95": [
+                1.278072243919189,
+                1.6525760269448382
+              ],
+              "known": true,
+              "value": 1.466137316459902
+            },
+            "uncharged": {
+              "ci95": [
+                0.9332166895777604,
+                1.3072609885400706
+              ],
+              "known": true,
+              "value": 1.1080822671715589
+            }
+          },
+          "bound_id": "ECBND1h7b69b9787056",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [],
+          "dominated_by": [],
+          "improves_on": [],
+          "is_frontier": true,
+          "label": "rho.negation on 4 prime curves, toy tier",
+          "level": "exponent",
+          "log2_r": [
+            17.696675535624497,
+            19.101306328859888,
+            21.215969580418943,
+            23.974409950711376
+          ],
+          "method": "rho.negation",
+          "method_id": "ECM1hefea4e0ebe79",
+          "params": {
+            "cap_multiple": "64"
+          },
+          "runs": 96,
+          "scaling_claim": true
+        },
+        {
+          "alpha": 0.4306251538444177,
+          "alpha_ci95": [
+            0.38226548901941937,
+            0.48911690743243313
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.030103388255681065,
+                0.07140213857306467
+              ],
+              "known": true,
+              "value": 0.04978724440047553
+            },
+            "ops": {
+              "ci95": [
+                1.633469957715918,
+                2.2213287184231327
+              ],
+              "known": true,
+              "value": 1.9197524781278732
+            },
+            "uncharged": {
+              "ci95": [
+                0.0,
+                0.0
+              ],
+              "known": true,
+              "value": 0.0
+            }
+          },
+          "bound_id": "ECBND1h7edffa0407e6",
+          "bounded": false,
+          "declared_alpha": 0.5,
+          "dominance_notes": [],
+          "dominated_by": [],
+          "improves_on": [],
+          "is_frontier": true,
+          "label": "rho.plain on 6 prime curves, toy tier",
+          "level": "exponent",
+          "log2_r": [
+            15.696886046427368,
+            17.696675535624497,
+            19.101306328859888,
+            21.215969580418943,
+            23.974409950711376,
+            25.3461752358282
+          ],
+          "method": "rho.plain",
+          "method_id": "ECM1hb367476fce6c",
+          "params": {
+            "cap_multiple": "64"
+          },
+          "runs": 144,
+          "scaling_claim": true
+        },
+        {
+          "alpha": 0.3239829051266733,
+          "alpha_ci95": [
+            0.1111111111111111,
+            0.4471193530501562
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.0044898170773026505,
+                0.02128180049356682
+              ],
+              "known": true,
+              "value": 0.011751161642072915
+            },
+            "ops": {
+              "ci95": [
+                2.7496797075391224,
+                5.660330226983236
+              ],
+              "known": true,
+              "value": 4.066050497229104
+            },
+            "uncharged": {
+              "ci95": [
+                0.0,
+                0.0
+              ],
+              "known": true,
+              "value": 0.0
+            }
+          },
+          "bound_id": "ECBND1h412ef80d6c1a",
+          "bounded": false,
+          "declared_alpha": 0.5,
+          "dominance_notes": [],
+          "dominated_by": [],
+          "improves_on": [],
+          "is_frontier": true,
+          "label": "rho.frozen_reference on 4 prime curves, toy tier",
+          "level": "exponent",
+          "log2_r": [
+            17.696675535624497,
+            19.101306328859888,
+            21.215969580418943,
+            23.974409950711376
+          ],
+          "method": "rho.frozen_reference",
+          "method_id": "ECM1h9c08616a41bb",
+          "params": {
+            "cap_multiple": "64"
+          },
+          "runs": 96,
+          "scaling_claim": true
+        },
+        {
+          "alpha": 0.3180585407121486,
+          "alpha_ci95": [
+            0.23465113294289855,
+            0.4053520259828382
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.005282172721879032,
+                0.031041307803719383
+              ],
+              "known": true,
+              "value": 0.016712271188025134
+            },
+            "ops": {
+              "ci95": [
+                2.91223988164074,
+                5.78044034277896
+              ],
+              "known": true,
+              "value": 4.292634874985735
+            },
+            "uncharged": {
+              "ci95": [
+                0.0,
+                0.0
+              ],
+              "known": true,
+              "value": 0.0
+            }
+          },
+          "bound_id": "ECBND1ha2a17b22c9c0",
+          "bounded": false,
+          "declared_alpha": 0.5,
+          "dominance_notes": [],
+          "dominated_by": [],
+          "improves_on": [],
+          "is_frontier": true,
+          "label": "rho.frozen_reference on 6 prime curves, toy tier",
+          "level": "exponent",
+          "log2_r": [
+            15.696886046427368,
+            17.696675535624497,
+            19.101306328859888,
+            21.215969580418943,
+            23.974409950711376,
+            25.3461752358282
+          ],
+          "method": "rho.frozen_reference",
+          "method_id": "ECM1h9c08616a41bb",
+          "params": {
+            "cap_multiple": "64"
+          },
+          "runs": 144,
+          "scaling_claim": true
+        },
+        {
+          "alpha": 0.518730136814918,
+          "alpha_ci95": [
+            0.47724501911784256,
+            0.5591672796164081
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                1.2785959801472209,
+                1.4654153308125253
+              ],
+              "known": true,
+              "value": 1.374987618980257
+            },
+            "ops": {
+              "ci95": [
+                1.4696426880226818,
+                1.6760961701441464
+              ],
+              "known": true,
+              "value": 1.572906892366167
+            },
+            "uncharged": {
+              "ci95": [
+                2.5571946749103875,
+                2.9393505519103473
+              ],
+              "known": true,
+              "value": 2.7514555960133347
+            }
+          },
+          "bound_id": "ECBND1hce4cbf18c091",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [
+            "ECBND1he8163c29cc39 (bsgs.negation) is clearly better on ops, memory",
+            "ECBND1ha6fbf0c678d0 (rho.negation) is clearly better on memory",
+            "ECBND1he0aea8671f10 (bsgs.negation) is clearly better on ops, memory",
+            "ECBND1hd392c8f42bb0 (bsgs.negation) is clearly better on ops, memory",
+            "ECBND1h7b69b9787056 (rho.negation) is clearly better on memory"
+          ],
+          "dominated_by": [
+            "ECBND1he8163c29cc39",
+            "ECBND1ha6fbf0c678d0",
+            "ECBND1he0aea8671f10",
+            "ECBND1hd392c8f42bb0",
+            "ECBND1h7b69b9787056"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "bsgs.interleaved on 6 prime curves, toy tier",
+          "level": "exponent",
+          "log2_r": [
+            15.696886046427368,
+            17.696675535624497,
+            19.101306328859888,
+            21.215969580418943,
+            23.974409950711376,
+            25.3461752358282
+          ],
+          "method": "bsgs.interleaved",
+          "method_id": "ECM1h6153371050b8",
+          "params": {},
+          "runs": 144,
+          "scaling_claim": true
+        },
+        {
+          "alpha": 0.4086962582459416,
+          "alpha_ci95": [
+            0.21100273914481993,
+            0.5928907474734058
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                1.185294523876897,
+                1.5893968920086023
+              ],
+              "known": true,
+              "value": 1.3964568773933097
+            },
+            "ops": {
+              "ci95": [
+                1.3558721970614953,
+                1.8260947758246189
+              ],
+              "known": true,
+              "value": 1.592524923878691
+            },
+            "uncharged": {
+              "ci95": [
+                2.3749040728741497,
+                3.18560816363385
+              ],
+              "known": true,
+              "value": 2.7940112789071585
+            }
+          },
+          "bound_id": "ECBND1h65b55d17b35c",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [
+            "ECBND1he8163c29cc39 (bsgs.negation) is clearly better on ops, memory",
+            "ECBND1ha6fbf0c678d0 (rho.negation) is clearly better on memory",
+            "ECBND1he0aea8671f10 (bsgs.negation) is clearly better on ops, memory",
+            "ECBND1hd392c8f42bb0 (bsgs.negation) is clearly better on ops, memory",
+            "ECBND1h7b69b9787056 (rho.negation) is clearly better on memory"
+          ],
+          "dominated_by": [
+            "ECBND1he8163c29cc39",
+            "ECBND1ha6fbf0c678d0",
+            "ECBND1he0aea8671f10",
+            "ECBND1hd392c8f42bb0",
+            "ECBND1h7b69b9787056"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "bsgs.interleaved on 4 prime curves, toy tier",
+          "level": "exponent",
+          "log2_r": [
+            17.696675535624497,
+            19.101306328859888,
+            21.215969580418943,
+            23.974409950711376
+          ],
+          "method": "bsgs.interleaved",
+          "method_id": "ECM1h6153371050b8",
+          "params": {},
+          "runs": 96,
+          "scaling_claim": true
+        },
+        {
+          "alpha": 0.5182055335469695,
+          "alpha_ci95": [
+            0.489312427762555,
+            0.5624592428142953
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                1.0000535415265064,
+                1.0011999223578112
+              ],
+              "known": true,
+              "value": 1.000464212660378
+            },
+            "ops": {
+              "ci95": [
+                1.539673265223328,
+                1.788642916771578
+              ],
+              "known": true,
+              "value": 1.6624772875508222
+            },
+            "uncharged": {
+              "ci95": [
+                1.345213474304244,
+                1.5770555785765663
+              ],
+              "known": true,
+              "value": 1.4568716973285825
+            }
+          },
+          "bound_id": "ECBND1h36247411dca1",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [
+            "ECBND1he8163c29cc39 (bsgs.negation) is clearly better on ops, memory",
+            "ECBND1ha6fbf0c678d0 (rho.negation) is clearly better on memory",
+            "ECBND1he0aea8671f10 (bsgs.negation) is clearly better on ops, memory",
+            "ECBND1hd392c8f42bb0 (bsgs.negation) is clearly better on ops, memory",
+            "ECBND1h7b69b9787056 (rho.negation) is clearly better on memory"
+          ],
+          "dominated_by": [
+            "ECBND1he8163c29cc39",
+            "ECBND1ha6fbf0c678d0",
+            "ECBND1he0aea8671f10",
+            "ECBND1hd392c8f42bb0",
+            "ECBND1h7b69b9787056"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "bsgs.textbook on 6 prime curves, toy tier",
+          "level": "exponent",
+          "log2_r": [
+            15.696886046427368,
+            17.696675535624497,
+            19.101306328859888,
+            21.215969580418943,
+            23.974409950711376,
+            25.3461752358282
+          ],
+          "method": "bsgs.textbook",
+          "method_id": "ECM1h2ee5b13dfb35",
+          "params": {},
+          "runs": 144,
+          "scaling_claim": true
+        },
+        {
+          "alpha": 0.47372279953812735,
+          "alpha_ci95": [
+            0.4084543017706425,
+            0.5331816107754924
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                1.0000529085882708,
+                1.0001924377047573
+              ],
+              "known": true,
+              "value": 1.000122673146515
+            },
+            "ops": {
+              "ci95": [
+                1.6106625780336832,
+                1.81571272275215
+              ],
+              "known": true,
+              "value": 1.7156504835385673
+            },
+            "uncharged": {
+              "ci95": [
+                1.423297517005339,
+                1.5888517739492607
+              ],
+              "known": true,
+              "value": 1.507186520948171
+            }
+          },
+          "bound_id": "ECBND1he508a84e4e20",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [
+            "ECBND1he8163c29cc39 (bsgs.negation) is clearly better on ops, memory",
+            "ECBND1ha6fbf0c678d0 (rho.negation) is clearly better on memory",
+            "ECBND1he0aea8671f10 (bsgs.negation) is clearly better on ops, memory",
+            "ECBND1hd392c8f42bb0 (bsgs.negation) is clearly better on ops, memory",
+            "ECBND1h7b69b9787056 (rho.negation) is clearly better on memory"
+          ],
+          "dominated_by": [
+            "ECBND1he8163c29cc39",
+            "ECBND1ha6fbf0c678d0",
+            "ECBND1he0aea8671f10",
+            "ECBND1hd392c8f42bb0",
+            "ECBND1h7b69b9787056"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "bsgs.textbook on 4 prime curves, toy tier",
+          "level": "exponent",
+          "log2_r": [
+            17.696675535624497,
+            19.101306328859888,
+            21.215969580418943,
+            23.974409950711376
+          ],
+          "method": "bsgs.textbook",
+          "method_id": "ECM1h2ee5b13dfb35",
+          "params": {},
+          "runs": 96,
+          "scaling_claim": true
+        },
+        {
+          "alpha": 0.4241890916365018,
+          "alpha_ci95": [
+            0.25772307843666714,
+            0.501677401935098
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.029370222016512827,
+                0.08704440190442356
+              ],
+              "known": true,
+              "value": 0.05450778540720084
+            },
+            "ops": {
+              "ci95": [
+                1.7446084065662226,
+                2.2732975507348705
+              ],
+              "known": true,
+              "value": 1.9902615637735943
+            },
+            "uncharged": {
+              "ci95": [
+                0.0,
+                0.0
+              ],
+              "known": true,
+              "value": 0.0
+            }
+          },
+          "bound_id": "ECBND1hcf67af806cc5",
+          "bounded": false,
+          "declared_alpha": 0.5,
+          "dominance_notes": [
+            "ECBND1h7b69b9787056 (rho.negation) is clearly better on ops"
+          ],
+          "dominated_by": [
+            "ECBND1h7b69b9787056"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "rho.plain on 4 prime curves, toy tier",
+          "level": "exponent",
+          "log2_r": [
+            17.696675535624497,
+            19.101306328859888,
+            21.215969580418943,
+            23.974409950711376
+          ],
+          "method": "rho.plain",
+          "method_id": "ECM1hb367476fce6c",
+          "params": {
+            "cap_multiple": "64"
+          },
+          "runs": 96,
+          "scaling_claim": true
+        },
+        {
+          "alpha": 0.4051733028370664,
+          "alpha_ci95": [
+            0.282855781440578,
+            0.5272820242311035
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.07682586489700924,
+                0.2216900653649008
+              ],
+              "known": true,
+              "value": 0.14466232834991324
+            },
+            "ops": {
+              "ci95": [
+                1.8034586257998408,
+                2.527332350068145
+              ],
+              "known": true,
+              "value": 2.2032612296344847
+            },
+            "uncharged": {
+              "ci95": [
+                0.14947756954089267,
+                0.4427921637170729
+              ],
+              "known": true,
+              "value": 0.29080501475264975
+            }
+          },
+          "bound_id": "ECBND1hb4b4be548e88",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [
+            "ECBND1ha6fbf0c678d0 (rho.negation) is clearly better on ops, memory",
+            "ECBND1h7edffa0407e6 (rho.plain) is clearly better on memory",
+            "ECBND1h7b69b9787056 (rho.negation) is clearly better on ops, memory"
+          ],
+          "dominated_by": [
+            "ECBND1ha6fbf0c678d0",
+            "ECBND1h7edffa0407e6",
+            "ECBND1h7b69b9787056"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "kangaroo.vow on 6 prime curves, toy tier",
+          "level": "exponent",
+          "log2_r": [
+            15.696886046427368,
+            17.696675535624497,
+            19.101306328859888,
+            21.215969580418943,
+            23.974409950711376,
+            25.3461752358282
+          ],
+          "method": "kangaroo.vow",
+          "method_id": "ECM1h05c1dc19c164",
+          "params": {
+            "cap_multiple": "64"
+          },
+          "runs": 144,
+          "scaling_claim": true
+        },
+        {
+          "alpha": 0.5259774148947509,
+          "alpha_ci95": [
+            0.2359846057036605,
+            0.6408975262390517
+          ],
+          "axes": {
+            "memory": {
+              "ci95": [
+                0.09037438234615904,
+                0.2267342796154402
+              ],
+              "known": true,
+              "value": 0.14684165739546975
+            },
+            "ops": {
+              "ci95": [
+                2.2785423212621003,
+                2.7714319262554805
+              ],
+              "known": true,
+              "value": 2.5267052026360752
+            },
+            "uncharged": {
+              "ci95": [
+                0.17931581896667015,
+                0.4555884730087119
+              ],
+              "known": true,
+              "value": 0.29478083891147716
+            }
+          },
+          "bound_id": "ECBND1h8a535b61cad3",
+          "bounded": true,
+          "declared_alpha": 0.5,
+          "dominance_notes": [
+            "ECBND1ha6fbf0c678d0 (rho.negation) is clearly better on ops, memory",
+            "ECBND1h7edffa0407e6 (rho.plain) is clearly better on ops, memory",
+            "ECBND1h7b69b9787056 (rho.negation) is clearly better on ops, memory",
+            "ECBND1hcf67af806cc5 (rho.plain) is clearly better on ops, memory"
+          ],
+          "dominated_by": [
+            "ECBND1ha6fbf0c678d0",
+            "ECBND1h7edffa0407e6",
+            "ECBND1h7b69b9787056",
+            "ECBND1hcf67af806cc5"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "kangaroo.vow on 4 prime curves, toy tier",
+          "level": "exponent",
+          "log2_r": [
+            17.696675535624497,
+            19.101306328859888,
+            21.215969580418943,
+            23.974409950711376
+          ],
+          "method": "kangaroo.vow",
+          "method_id": "ECM1h05c1dc19c164",
+          "params": {
+            "cap_multiple": "64"
+          },
+          "runs": 96,
+          "scaling_claim": true
+        },
+        {
+          "alpha": 0.8406832362281925,
+          "alpha_ci95": [
+            0.4996242969474544,
+            1.0236338192501349
+          ],
+          "axes": {
+            "memory": {
+              "ci95": null,
+              "known": false,
+              "value": null
+            },
+            "ops": {
+              "ci95": [
+                11.420701404563468,
+                40.106912820117074
+              ],
+              "known": true,
+              "value": 22.68550285153695
+            },
+            "uncharged": {
+              "ci95": [
+                0.0,
+                0.0
+              ],
+              "known": true,
+              "value": 0.0
+            }
+          },
+          "bound_id": "ECBND1hbab6d6dc37fc",
+          "bounded": true,
+          "declared_alpha": null,
+          "dominance_notes": [
+            "ECBND1hce4cbf18c091 (bsgs.interleaved) is clearly better on ops; memory unknown on one side and left out",
+            "ECBND1he8163c29cc39 (bsgs.negation) is clearly better on ops; memory unknown on one side and left out",
+            "ECBND1h36247411dca1 (bsgs.textbook) is clearly better on ops; memory unknown on one side and left out",
+            "ECBND1hb4b4be548e88 (kangaroo.vow) is clearly better on ops; memory unknown on one side and left out",
+            "ECBND1ha2a17b22c9c0 (rho.frozen_reference) is clearly better on ops; memory unknown on one side and left out",
+            "ECBND1ha6fbf0c678d0 (rho.negation) is clearly better on ops; memory unknown on one side and left out",
+            "ECBND1h7edffa0407e6 (rho.plain) is clearly better on ops; memory unknown on one side and left out",
+            "ECBND1he0aea8671f10 (bsgs.negation) is clearly better on ops; memory unknown on one side and left out",
+            "ECBND1h65b55d17b35c (bsgs.interleaved) is clearly better on ops; memory unknown on one side and left out",
+            "ECBND1hd392c8f42bb0 (bsgs.negation) is clearly better on ops; memory unknown on one side and left out",
+            "ECBND1he508a84e4e20 (bsgs.textbook) is clearly better on ops; memory unknown on one side and left out",
+            "ECBND1h8a535b61cad3 (kangaroo.vow) is clearly better on ops; memory unknown on one side and left out",
+            "ECBND1h412ef80d6c1a (rho.frozen_reference) is clearly better on ops; memory unknown on one side and left out",
+            "ECBND1h7b69b9787056 (rho.negation) is clearly better on ops; memory unknown on one side and left out",
+            "ECBND1hcf67af806cc5 (rho.plain) is clearly better on ops; memory unknown on one side and left out"
+          ],
+          "dominated_by": [
+            "ECBND1hce4cbf18c091",
+            "ECBND1he8163c29cc39",
+            "ECBND1h36247411dca1",
+            "ECBND1hb4b4be548e88",
+            "ECBND1ha2a17b22c9c0",
+            "ECBND1ha6fbf0c678d0",
+            "ECBND1h7edffa0407e6",
+            "ECBND1he0aea8671f10",
+            "ECBND1h65b55d17b35c",
+            "ECBND1hd392c8f42bb0",
+            "ECBND1he508a84e4e20",
+            "ECBND1h8a535b61cad3",
+            "ECBND1h412ef80d6c1a",
+            "ECBND1h7b69b9787056",
+            "ECBND1hcf67af806cc5"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "ic.pipeline on 4 prime curves, toy tier",
+          "level": "exponent",
+          "log2_r": [
+            17.696675535624497,
+            19.101306328859888,
+            21.215969580418943,
+            23.974409950711376
+          ],
+          "method": "ic.pipeline",
+          "method_id": "ECM1he27eac0cec8f",
+          "params": {
+            "factor_base": "prime-abscissa:size=32",
+            "linalg": "incremental-gauss",
+            "max_trials": "100000000",
+            "oracle": "mitm:negation_folded=1",
+            "solver": "",
+            "solver_budget_seconds": "0",
+            "targets": "walk"
+          },
+          "runs": 96,
+          "scaling_claim": true
+        },
+        {
+          "alpha": 1.0054133004771464,
+          "alpha_ci95": [
+            0.7856771131175083,
+            1.0986697998455754
+          ],
+          "axes": {
+            "memory": {
+              "ci95": null,
+              "known": false,
+              "value": null
+            },
+            "ops": {
+              "ci95": [
+                395.6470915251534,
+                2482.9041619934223
+              ],
+              "known": true,
+              "value": 1258.2297948317716
+            },
+            "uncharged": {
+              "ci95": [
+                0.0,
+                0.0
+              ],
+              "known": true,
+              "value": 0.0
+            }
+          },
+          "bound_id": "ECBND1h9d3beb6852c6",
+          "bounded": true,
+          "declared_alpha": null,
+          "dominance_notes": [
+            "ECBND1hce4cbf18c091 (bsgs.interleaved) is clearly better on ops; memory unknown on one side and left out",
+            "ECBND1he8163c29cc39 (bsgs.negation) is clearly better on ops; memory unknown on one side and left out",
+            "ECBND1h36247411dca1 (bsgs.textbook) is clearly better on ops; memory unknown on one side and left out",
+            "ECBND1hb4b4be548e88 (kangaroo.vow) is clearly better on ops; memory unknown on one side and left out",
+            "ECBND1ha2a17b22c9c0 (rho.frozen_reference) is clearly better on ops; memory unknown on one side and left out",
+            "ECBND1ha6fbf0c678d0 (rho.negation) is clearly better on ops; memory unknown on one side and left out",
+            "ECBND1h7edffa0407e6 (rho.plain) is clearly better on ops; memory unknown on one side and left out",
+            "ECBND1he0aea8671f10 (bsgs.negation) is clearly better on ops; memory unknown on one side and left out",
+            "ECBND1h65b55d17b35c (bsgs.interleaved) is clearly better on ops; memory unknown on one side and left out",
+            "ECBND1hd392c8f42bb0 (bsgs.negation) is clearly better on ops; memory unknown on one side and left out",
+            "ECBND1he508a84e4e20 (bsgs.textbook) is clearly better on ops; memory unknown on one side and left out",
+            "ECBND1hbab6d6dc37fc (ic.pipeline) is clearly better on ops; memory unknown on one side and left out",
+            "ECBND1h8a535b61cad3 (kangaroo.vow) is clearly better on ops; memory unknown on one side and left out",
+            "ECBND1h412ef80d6c1a (rho.frozen_reference) is clearly better on ops; memory unknown on one side and left out",
+            "ECBND1h7b69b9787056 (rho.negation) is clearly better on ops; memory unknown on one side and left out",
+            "ECBND1hcf67af806cc5 (rho.plain) is clearly better on ops; memory unknown on one side and left out"
+          ],
+          "dominated_by": [
+            "ECBND1hce4cbf18c091",
+            "ECBND1he8163c29cc39",
+            "ECBND1h36247411dca1",
+            "ECBND1hb4b4be548e88",
+            "ECBND1ha2a17b22c9c0",
+            "ECBND1ha6fbf0c678d0",
+            "ECBND1h7edffa0407e6",
+            "ECBND1he0aea8671f10",
+            "ECBND1h65b55d17b35c",
+            "ECBND1hd392c8f42bb0",
+            "ECBND1he508a84e4e20",
+            "ECBND1hbab6d6dc37fc",
+            "ECBND1h8a535b61cad3",
+            "ECBND1h412ef80d6c1a",
+            "ECBND1h7b69b9787056",
+            "ECBND1hcf67af806cc5"
+          ],
+          "improves_on": [],
+          "is_frontier": false,
+          "label": "ic.pipeline on 4 prime curves, toy tier",
+          "level": "exponent",
+          "log2_r": [
+            17.696675535624497,
+            19.101306328859888,
+            21.215969580418943,
+            23.974409950711376
+          ],
+          "method": "ic.pipeline",
+          "method_id": "ECM1heb3c3fdeabc8",
+          "params": {
+            "factor_base": "prime-abscissa:size=32",
+            "linalg": "incremental-gauss",
+            "max_trials": "100000000",
+            "oracle": "subtract",
+            "solver": "",
+            "solver_budget_seconds": "0",
+            "targets": "walk"
+          },
+          "runs": 96,
+          "scaling_claim": true
+        }
+      ],
+      "floor_model": "S_floor = sqrt(pi / 2A), A the usable automorphisms; ops = S / S_floor",
+      "memory_leader": "ECBND1h412ef80d6c1a",
+      "ops_leader": "ECBND1he8163c29cc39"
+    }
+  ],
+  "frontier_id": "ECFR1h8b45b672c283",
+  "inadmissible": [
+    {
+      "bound_id": "ECBND1h11f6a579f4ae",
+      "label": "ic.pipeline on 2 koblitz curves, toy tier",
+      "reasons": [
+        "48 of 96 measured runs did not verify; only a wholly verified arm is admissible",
+        "2 size(s): below 4, so the exponent is descriptive and this is a constant bound"
+      ]
+    },
+    {
+      "bound_id": "ECBND1h18e0d9d32693",
+      "label": "ic.pipeline on 2 koblitz curves, toy tier",
+      "reasons": [
+        "48 of 96 measured runs did not verify; only a wholly verified arm is admissible",
+        "2 size(s): below 4, so the exponent is descriptive and this is a constant bound"
+      ]
+    },
+    {
+      "bound_id": "ECBND1h242c8c9495a1",
+      "label": "ic.pipeline on 2 koblitz curves, toy tier",
+      "reasons": [
+        "48 of 96 measured runs did not verify; only a wholly verified arm is admissible",
+        "2 size(s): below 4, so the exponent is descriptive and this is a constant bound"
+      ]
+    }
+  ],
+  "schema": "ecbench.frontier/v1"
+}

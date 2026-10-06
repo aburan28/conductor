@@ -101,6 +101,30 @@ rules:
     when: cairn.known && !cairn.settled && cairn.reward_remaining >= 1000000
     require: { tier: T3 }
 
+  # Bound-beating work: the same shape, read from measured-bound documents instead of a cairn
+  # ledger -- a frontier of method costs and the verdicts of challenges against it, both
+  # sealed and re-derivable from the records by anyone (docs/bounds-integration.md). A task
+  # carries the challenge id (ECCH1h...) in external_ref and the label "bounds".
+  #
+  # A challenge that has gone three epochs without an advance has shown what the cheap end of
+  # the ladder finds; the next epoch gets the frontier model. The guard is belt and braces as
+  # with cairn: an absent challenge fact is null and satisfies no threshold, so a task that
+  # names no challenge, or one nobody has run yet, never looks stalled.
+  - id: bounds-stalled-escalate
+    when: bounds.challenge_known && bounds.epochs_without_advance >= 3
+    require: { tier: T3 }
+
+  # Bounds work with no frontier to read is held at the cheap end of the ladder: without the
+  # document, "beat this bound" has no bound in it, and a frontier model would be spent
+  # proving nothing. Here the label guard is load-bearing, not decoration -- bounds.known is a
+  # fact about the project's configuration, false for every task when no frontier is
+  # configured, so without the guard this rule would prefer local on everything. Dispatch
+  # has no verb to refuse work and should not: a missing document is a configuration gap,
+  # never evidence about the bound.
+  - id: bounds-unknown-frontier-hold
+    when: task.labels has "bounds" && !bounds.known
+    prefer: { tag: local }
+
 defaults:
   lane: implement
   on_failure: escalate    # escalate | retry | stop

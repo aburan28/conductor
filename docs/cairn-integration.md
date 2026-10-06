@@ -227,6 +227,11 @@ is deliberately *not* declared, because a fact the system can never populate is 
 missing one — `policy lint` blesses the rule that reads it, and the rule then silently never
 fires.
 
+The same shape, read from sealed documents rather than a node, is **measured bounds**: a
+frontier of ECDLP method costs and the verdicts of challenges against it render as `bounds.*`
+facts — including the epochs-since-advance count this section could not populate for cairn,
+because a verdict carries its epoch. See [bounds-integration.md](bounds-integration.md).
+
 ### 4.4 cairn as a required check
 
 Conductor runs required checks per attempt as `sh -c` in the worktree

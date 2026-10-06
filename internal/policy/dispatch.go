@@ -27,6 +27,9 @@ type Facts struct {
 	Now       time.Time
 	// Cairn is the position of the cairn objective this task works, when it works one.
 	Cairn CairnFacts
+	// Bounds is the measured-bound frontier this project reads and, when the task works a
+	// challenge against it, that challenge's position.
+	Bounds BoundsFacts
 }
 
 // CairnFacts is one objective's position on a cairn ledger: what the best verified result
@@ -91,6 +94,9 @@ var KnownFacts = []string{
 	"budget.fraction", "budget.monthly_usd", "budget.spent_usd",
 	"cairn.known", "cairn.objective_id", "cairn.frontier_score", "cairn.reward_remaining",
 	"cairn.settled",
+	"bounds.known", "bounds.frontier_id", "bounds.domain_count", "bounds.frontier_entries",
+	"bounds.challenge_known", "bounds.challenge_epochs", "bounds.epochs_without_advance",
+	"bounds.last_outcome",
 	"role", "harnesses", "hour", "weekday",
 }
 
@@ -126,7 +132,7 @@ func (f Facts) Env() MapEnv {
 		cairnScore = f.Cairn.FrontierScore
 		cairnReward = f.Cairn.RewardRemaining
 	}
-	return MapEnv{
+	env := MapEnv{
 		"task.ref":                    t.Ref,
 		"task.title":                  t.Title,
 		"task.objective":              t.Objective,
@@ -179,6 +185,8 @@ func (f Facts) Env() MapEnv {
 		"hour":                   now.Hour(),
 		"weekday":                strings.ToLower(now.Weekday().String()),
 	}
+	f.Bounds.addTo(env)
+	return env
 }
 
 // ---------------------------------------------------------------------------
