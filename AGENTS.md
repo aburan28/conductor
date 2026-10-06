@@ -7,6 +7,11 @@ work the same repository at the same time. Entry points live in `cmd/`
 `resource`, `router`, `runner`, `scheduler`, `selector`, `taskcard`, `web`,
 `worktree`). Build/test with `make`. Design doc: `docs/DESIGN.md`.
 
+Before pushing, run `make check` (gofmt, vet, staticcheck, build, tests without a database);
+before opening or updating a pull request, run `make ci`, which is exactly what CI runs and
+starts its own throwaway Postgres. Both are `scripts/ci-local.sh`. `make hooks` installs a
+pre-push hook that runs `make check` on every push.
+
 ## Token discipline
 
 Context budget is a shared resource. Treat it that way.
