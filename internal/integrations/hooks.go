@@ -13,12 +13,7 @@ const HookCommand = "conductor hook"
 // tools is the enforcement point: a hard conflict blocks the edit before it happens, with
 // the holder named in the message the model reads. SessionStart injects the active task and
 // any offers as context; SessionEnd closes a bare session's presence record.
-var claudeHooks = []struct {
-	Event   string
-	Matcher string
-	Command string
-	Timeout int
-}{
+var claudeHooks = []hookSpec{
 	// --auto-reserve: a file edited outside the session's claimed scope is reserved under
 	// that claim on first edit, so scope drift is visible to teammates instead of silent.
 	{"PreToolUse", "Edit|Write|MultiEdit|NotebookEdit", HookCommand + " pre-tool --auto-reserve", 15},
@@ -30,6 +25,28 @@ var claudeHooks = []struct {
 	{"PreCompact", "", HookCommand + " checkpoint", 30},
 }
 
+// hookSpec is one hook a harness runs: on Event, for tools matching Matcher, run Command.
+type hookSpec struct {
+	Event   string
+	Matcher string
+	Command string
+	Timeout int
+}
+
+// codexHooks are the same hooks for Codex, whose hook system mirrors Claude Code's events
+// (https://developers.openai.com/codex/hooks). Three differences shape this list. Codex
+// edits files through apply_patch, so the PreToolUse matcher names it (Edit and Write are
+// accepted aliases for it). Every command says --harness codex: the checkpoint has to look
+// for a Codex transcript, and pre-tool has to answer in the output shape Codex accepts.
+// And SessionEnd is capped at three seconds, so it gets three.
+var codexHooks = []hookSpec{
+	{"PreToolUse", "^(apply_patch|Edit|Write)$", HookCommand + " pre-tool --auto-reserve --harness codex", 15},
+	{"SessionStart", "", HookCommand + " session-start", 15},
+	{"SessionEnd", "", HookCommand + " session-end --harness codex", 3},
+	{"Stop", "", HookCommand + " checkpoint --harness codex", 30},
+	{"PreCompact", "", HookCommand + " checkpoint --harness codex", 30},
+}
+
 // optionalHookEvents are events older Claude Code builds do not have; their absence does
 // not make an integration "not installed".
 var optionalHookEvents = map[string]bool{"SessionEnd": true, "Stop": true, "PreCompact": true}
@@ -37,6 +54,13 @@ var optionalHookEvents = map[string]bool{"SessionEnd": true, "Stop": true, "PreC
 // mergeClaudeHooks installs (or with remove, uninstalls) Conductor's hooks in a Claude Code
 // settings object, leaving every hook that is not ours exactly where it was.
 func mergeClaudeHooks(settings map[string]any, remove bool) {
+	mergeHooks(settings, claudeHooks, remove)
+}
+
+// mergeCodexHooks does the same for a Codex hooks.json, which has the same shape.
+func mergeCodexHooks(settings map[string]any, remove bool) { mergeHooks(settings, codexHooks, remove) }
+
+func mergeHooks(settings map[string]any, specs []hookSpec, remove bool) {
 	hooks, _ := settings["hooks"].(map[string]any)
 	if hooks == nil {
 		if remove {
@@ -45,7 +69,7 @@ func mergeClaudeHooks(settings map[string]any, remove bool) {
 		hooks = map[string]any{}
 	}
 
-	for _, h := range claudeHooks {
+	for _, h := range specs {
 		groups, _ := hooks[h.Event].([]any)
 		var kept []any
 		for _, g := range groups {
@@ -96,12 +120,17 @@ func mergeClaudeHooks(settings map[string]any, remove bool) {
 }
 
 // claudeHooksInstalled reports whether every Conductor hook is present.
-func claudeHooksInstalled(settings map[string]any) bool {
+func claudeHooksInstalled(settings map[string]any) bool { return hooksInstalled(settings, claudeHooks) }
+
+// codexHooksInstalled reports the same for a Codex hooks.json.
+func codexHooksInstalled(settings map[string]any) bool { return hooksInstalled(settings, codexHooks) }
+
+func hooksInstalled(settings map[string]any, specs []hookSpec) bool {
 	hooks, _ := settings["hooks"].(map[string]any)
 	if hooks == nil {
 		return false
 	}
-	for _, h := range claudeHooks {
+	for _, h := range specs {
 		if optionalHookEvents[h.Event] {
 			continue
 		}

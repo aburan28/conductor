@@ -214,6 +214,75 @@ func TestCodexTOMLPreservesEverythingElse(t *testing.T) {
 	}
 }
 
+func TestCodexProjectHooksAreWrittenMergedAndRemoved(t *testing.T) {
+	o := testOptions(t)
+	path := filepath.Join(o.Root, ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	userHook := `{"description":"mine","hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"my-policy"}]}]}}`
+	if err := os.WriteFile(path, []byte(userHook), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := codexTool.Plan(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apply(t, res)
+	m := readJSON(t, path)
+	if !codexHooksInstalled(m) || m["description"] != "mine" {
+		t.Fatalf("hooks not installed or user keys lost: %v", m)
+	}
+	body, _ := os.ReadFile(path)
+	for _, want := range []string{"my-policy", `"^(apply_patch|Edit|Write)$"`,
+		"conductor hook pre-tool --auto-reserve --harness codex", "conductor hook checkpoint --harness codex"} {
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("missing %q in:\n%s", want, body)
+		}
+	}
+	// SessionEnd is capped at three seconds by Codex.
+	for _, g := range toSlice(m["hooks"].(map[string]any)["SessionEnd"]) {
+		for _, hd := range toSlice(g.(map[string]any)["hooks"]) {
+			if isConductorHook(hd) && hd.(map[string]any)["timeout"].(float64) > 3 {
+				t.Fatalf("SessionEnd timeout over Codex's cap: %v", hd)
+			}
+		}
+	}
+	if st := codexTool.Status(o); !st.HooksSupported || !st.Hooks || !st.Configured {
+		t.Fatalf("status = %+v", st)
+	}
+
+	// Idempotent.
+	res2, _ := codexTool.Plan(o)
+	for _, op := range res2.Ops {
+		if op.Action != "unchanged" {
+			t.Fatalf("not idempotent: %s %s", op.Path, op.Action)
+		}
+	}
+
+	// Removal takes ours and leaves the user's hook.
+	o.Remove = true
+	res3, _ := codexTool.Plan(o)
+	apply(t, res3)
+	body, _ = os.ReadFile(path)
+	if strings.Contains(string(body), "conductor hook") || !strings.Contains(string(body), "my-policy") {
+		t.Fatalf("removal wrong:\n%s", body)
+	}
+}
+
+func TestCodexNoHooksWritesOnlyMCP(t *testing.T) {
+	o := testOptions(t)
+	o.Hooks = false
+	res, err := codexTool.Plan(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Ops) != 1 || !strings.HasSuffix(res.Ops[0].Path, "config.toml") {
+		t.Fatalf("ops = %+v", res.Ops)
+	}
+}
+
 func TestOpenCodeWritesConfigAndPlugin(t *testing.T) {
 	o := testOptions(t)
 	res, err := opencodeTool.Plan(o)
