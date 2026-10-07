@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -51,6 +54,49 @@ func TestRemoteEndpoint(t *testing.T) {
 	}
 	if !remoteEndpoint("https://conductor.example.com") {
 		t.Error("https://conductor.example.com not reported remote")
+	}
+}
+
+func TestRemoteUpNeedsNoLocalDaemonOrDatabase(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("DATABASE_URL", "")
+	t.Setenv("CONDUCTOR_DAEMON", "/missing/conductord")
+	t.Setenv("CONDUCTOR_TOKEN", "")
+	err := cmdUp(context.Background(), []string{"--endpoint", "https://leader.example"})
+	if err == nil || !strings.Contains(err.Error(), "no valid login") {
+		t.Fatalf("remote up should ask for login without starting a daemon: %v", err)
+	}
+	if strings.Contains(err.Error(), "conductord not found") {
+		t.Fatal("remote worker requires a local daemon")
+	}
+}
+
+func TestAuthenticatedRemoteUpDoesNotRequireDaemon(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/whoami" || r.Header.Get("Authorization") != "Bearer worker-token" {
+			t.Errorf("unexpected worker login verification request")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("{}"))
+	}))
+	defer server.Close()
+	oldTransport := http.DefaultTransport
+	transport := &http.Transport{DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
+	}}
+	http.DefaultTransport = transport
+	t.Cleanup(func() { http.DefaultTransport = oldTransport; transport.CloseIdleConnections() })
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("CONDUCTOR_DAEMON", "/missing/conductord")
+	t.Setenv("CONDUCTOR_ENDPOINT", "http://leader.example")
+	t.Setenv("CONDUCTOR_TOKEN", "worker-token")
+	t.Setenv("CONDUCTOR_CA_CERT", "")
+	// Even an inherited database URL must not be used when the worker is logged in.
+	t.Setenv("DATABASE_URL", "postgres://unused@localhost:1/db?sslmode=disable")
+	if err := cmdUp(context.Background(), nil); err != nil {
+		t.Fatalf("authenticated remote worker should need only the CLI: %v", err)
 	}
 }
 

@@ -51,36 +51,35 @@ func cmdUp(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	dsnValue, dsnSource, err := resolveDSN(*dsnFlag, os.Getenv("DATABASE_URL"))
-	if err != nil {
-		return err
-	}
-	dsn := &dsnValue
-
 	creds := client.LoadCredentials()
 	ep := strings.TrimRight(*endpoint, "/")
 	if ep == "" {
 		ep = creds.Endpoint
 	}
 
-	daemon, err := locateDaemon()
-	if err != nil {
-		return err
-	}
-
 	if remoteEndpoint(ep) {
 		// A non-local control plane has no local database or server to manage; the only
 		// thing this machine can fix is its own login, and it can bootstrap one only with a
 		// database it was told about.
-		remoteDSN := *dsn
-		if dsnSource == dsnGenerated {
-			remoteDSN = ""
+		remoteDSN := *dsnFlag
+		if remoteDSN == "" {
+			remoteDSN = os.Getenv("DATABASE_URL")
 		}
-		if err := ensureLogin(ctx, daemon, ep, remoteDSN, *project); err != nil {
+		if err := ensureLogin(ctx, "", ep, remoteDSN, *project); err != nil {
 			return err
 		}
 		fmt.Printf("control plane already serving at %s (remote; nothing started locally)\n", ep)
 		return nil
+	}
+
+	dsnValue, dsnSource, err := resolveDSN(*dsnFlag, os.Getenv("DATABASE_URL"))
+	if err != nil {
+		return err
+	}
+	dsn := &dsnValue
+	daemon, err := locateDaemon()
+	if err != nil {
+		return err
 	}
 
 	if err := ensureDatabase(*dsn); err != nil {
@@ -651,6 +650,13 @@ func ensureLogin(ctx context.Context, daemon, ep, dsn, project string) error {
 	if dsn == "" {
 		return fmt.Errorf("no valid login for %s; log in with `conductor login --endpoint %s --token …`, "+
 			"or pass --dsn to bootstrap its database from here", ep, ep)
+	}
+	if daemon == "" {
+		var err error
+		daemon, err = locateDaemon()
+		if err != nil {
+			return err
+		}
 	}
 	fmt.Println("no valid login for this endpoint — bootstrapping")
 	cmd := daemonCommand(daemon, dsn, "bootstrap", "--endpoint", ep)
