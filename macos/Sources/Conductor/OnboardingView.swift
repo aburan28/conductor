@@ -109,7 +109,7 @@ private struct ServicesStep: View {
             if model.phase.isFailed {
                 HStack {
                     Button("Try Again") { Task { await model.restartServices() } }
-                    Button("Settings…") { openSettings() }
+                    SettingsButton()
                 }
             }
         }

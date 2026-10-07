@@ -153,7 +153,7 @@ struct MenuBarView: View {
             .disabled(!model.signedIn)
             Button("Checkpoints…") { showWindow(WindowID.checkpoints, openWindow: openWindow) }
             HStack {
-                Button("Settings…") { openSettings() }
+                SettingsButton()
                 Spacer()
                 Button("Quit") { NSApp.terminate(nil) }
             }

@@ -121,11 +121,25 @@ func showWindow(_ id: String, openWindow: OpenWindowAction) {
     openWindow(id: id)
 }
 
-/// Settings, on macOS 13 and later.
+/// Settings on macOS 13. macOS 14 ignores this action from SwiftUI apps and has
+/// SettingsLink instead, which `SettingsButton` uses there.
 @MainActor
 func openSettings() {
     NSApp.activate(ignoringOtherApps: true)
     NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+}
+
+/// "Settings…" that opens the Settings scene on every supported macOS.
+struct SettingsButton: View {
+    var title = "Settings…"
+
+    var body: some View {
+        if #available(macOS 14.0, *) {
+            SettingsLink { Text(title) }
+        } else {
+            Button(title) { openSettings() }
+        }
+    }
 }
 
 enum StatusDotImage {

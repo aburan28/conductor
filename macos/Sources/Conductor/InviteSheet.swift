@@ -85,8 +85,7 @@ struct InviteSheet: View {
     @ViewBuilder private var reachabilityView: some View {
         if let r = reachability {
             VStack(alignment: .leading, spacing: 6) {
-                Label(r.endpoint == nil ? "Only this Mac can reach the link yet" : "Reachable at \(r.endpoint!)",
-                      systemImage: r.endpoint == nil ? "exclamationmark.triangle" : "network")
+                Label(Self.reachabilityTitle(r), systemImage: r.endpoint == nil ? "exclamationmark.triangle" : "network")
                     .foregroundStyle(r.endpoint == nil ? Color.orange : Color.primary)
                 Text(r.explanation).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 if r.offersTailscale {
@@ -97,6 +96,11 @@ struct InviteSheet: View {
         } else {
             HStack { ProgressView().controlSize(.small); Text("Checking how others can reach this Mac…").font(.callout) }
         }
+    }
+
+    static func reachabilityTitle(_ r: InviteReachability) -> String {
+        guard let endpoint = r.endpoint else { return "Only this Mac can reach the link yet" }
+        return "Reachable at \(endpoint)"
     }
 
     // MARK: - actions

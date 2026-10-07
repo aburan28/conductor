@@ -121,7 +121,6 @@ final class AppModel: ObservableObject {
             }
         }
         await startServices(restore: false)
-        startTimer()
     }
 
     private func makeSupervisor(_ binaries: ConductorBinaries) -> Supervisor {
@@ -140,10 +139,11 @@ final class AppModel: ObservableObject {
         guard let binaries else { return }
         restoreOffer = nil
         if supervisor == nil { supervisor = makeSupervisor(binaries) }
-        if settings.daemonPort == AppSettings.defaultPort, !settings.onboardingComplete,
-           !PortProbe.isFree(settings.daemonPort), !(await api.isHealthy()),
-           let free = PortProbe.firstFree(from: AppSettings.defaultPort + 1) {
-            // First run, and something that is not Conductor holds 8080.
+        let ours = FileManager.default.fileExists(atPath: paths.launchAgentPlist(LaunchAgents.daemonLabel).path)
+        if !settings.onboardingComplete, !ours, !PortProbe.isFree(settings.daemonPort),
+           let free = PortProbe.firstFree(from: settings.daemonPort + 1) {
+            // First run, and something else (a `conductor up` daemon, another server) holds
+            // the port: take the next free one rather than fail.
             settings.daemonPort = free
             saveSettings()
             supervisor = makeSupervisor(binaries)
@@ -159,6 +159,7 @@ final class AppModel: ObservableObject {
             problem = String(describing: error)
         }
         await connect()
+        if timer == nil { startTimer() }
     }
 
     /// Applies changed Settings (port, start at login, storage): rewrites the agents and
