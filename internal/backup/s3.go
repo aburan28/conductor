@@ -38,12 +38,33 @@ type S3 struct {
 	now func() time.Time
 }
 
+// Credentials are the keys a request is signed with.
+type Credentials struct {
+	AccessKey    string
+	SecretKey    string
+	SessionToken string
+	// Expires is when temporary credentials stop working; zero means they do not expire.
+	Expires time.Time
+	// Source says where the keys came from ("static (keychain)", "profile sso (dev)", …),
+	// for `conductor storage test` and error messages. It is never a secret.
+	Source string
+}
+
+// CredentialSource yields credentials for each request, so keys that expire (SSO, an
+// assumed role, an instance role) can be refreshed between requests. See internal/awscreds.
+type CredentialSource interface {
+	Retrieve(ctx context.Context) (Credentials, error)
+}
+
 // S3Config is everything needed to reach a bucket.
 type S3Config struct {
-	Bucket    string
-	Region    string
-	AccessKey string
-	SecretKey string
+	Bucket string
+	Region string
+	// Credentials, when set, is asked for keys on every request and takes precedence over
+	// the static AccessKey/SecretKey/SessionToken below.
+	Credentials CredentialSource
+	AccessKey   string
+	SecretKey   string
 	// SessionToken is set when credentials come from STS / an instance role.
 	SessionToken string
 	// Endpoint overrides the AWS host, for S3-compatible stores. Empty means AWS. When set,
@@ -144,6 +165,23 @@ func (s *S3) List(ctx context.Context, prefix string) ([]string, error) {
 	return keys, nil
 }
 
+// Delete removes key. Deleting a key that does not exist succeeds, as it does in S3.
+func (s *S3) Delete(ctx context.Context, key string) error {
+	req, err := s.newRequest(ctx, http.MethodDelete, key, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := s.do(req, nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+		return s3Error("delete", key, resp)
+	}
+	return nil
+}
+
 // ErrNotFound is returned by Get when the key is absent.
 var ErrNotFound = fmt.Errorf("backup: key not found")
 
@@ -213,10 +251,28 @@ func (s *S3) url(keyOrQuery string) (string, error) {
 // the AWS SDK is not a dependency; the algorithm is small and is pinned to AWS's published
 // S3 GET-Object example vector in s3_test.go, so a canonicalization regression is caught.
 func (s *S3) sign(req *http.Request, body []byte) error {
-	if s.cfg.AccessKey == "" || s.cfg.SecretKey == "" {
+	creds := Credentials{AccessKey: s.cfg.AccessKey, SecretKey: s.cfg.SecretKey, SessionToken: s.cfg.SessionToken}
+	if s.cfg.Credentials != nil {
+		c, err := s.cfg.Credentials.Retrieve(req.Context())
+		if err != nil {
+			return fmt.Errorf("backup: S3 credentials: %w", err)
+		}
+		creds = c
+	}
+	if creds.AccessKey == "" || creds.SecretKey == "" {
 		return fmt.Errorf("backup: no S3 credentials (set the access key and secret)")
 	}
-	now := s.now()
+	return SignV4(req, body, creds, s.cfg.Region, service, s.now())
+}
+
+// SignV4 applies AWS Signature Version 4 to req over body, for the named service ("s3",
+// "sts") in region. It sets Host, X-Amz-Date, X-Amz-Content-Sha256, the session token when
+// there is one, and Authorization. internal/awscreds uses it to sign STS calls.
+func SignV4(req *http.Request, body []byte, creds Credentials, region, service string, now time.Time) error {
+	if creds.AccessKey == "" || creds.SecretKey == "" {
+		return fmt.Errorf("sigv4: no credentials")
+	}
+	now = now.UTC()
 	amzDate := now.Format(isoLayout)
 	dateStamp := now.Format(dayLayout)
 
@@ -229,8 +285,8 @@ func (s *S3) sign(req *http.Request, body []byte) error {
 	req.Header.Set("Host", req.URL.Host)
 	req.Header.Set("X-Amz-Date", amzDate)
 	req.Header.Set("X-Amz-Content-Sha256", payloadHash)
-	if s.cfg.SessionToken != "" {
-		req.Header.Set("X-Amz-Security-Token", s.cfg.SessionToken)
+	if creds.SessionToken != "" {
+		req.Header.Set("X-Amz-Security-Token", creds.SessionToken)
 	}
 
 	// Canonical request.
@@ -246,7 +302,7 @@ func (s *S3) sign(req *http.Request, body []byte) error {
 	crHash := sha256.Sum256([]byte(canonicalRequest))
 
 	// String to sign.
-	scope := strings.Join([]string{dateStamp, s.cfg.Region, service, "aws4_request"}, "/")
+	scope := strings.Join([]string{dateStamp, region, service, "aws4_request"}, "/")
 	stringToSign := strings.Join([]string{
 		"AWS4-HMAC-SHA256",
 		amzDate,
@@ -255,15 +311,15 @@ func (s *S3) sign(req *http.Request, body []byte) error {
 	}, "\n")
 
 	// Signing key and signature.
-	kDate := hmacSHA256([]byte("AWS4"+s.cfg.SecretKey), dateStamp)
-	kRegion := hmacSHA256(kDate, s.cfg.Region)
+	kDate := hmacSHA256([]byte("AWS4"+creds.SecretKey), dateStamp)
+	kRegion := hmacSHA256(kDate, region)
 	kService := hmacSHA256(kRegion, service)
 	kSigning := hmacSHA256(kService, "aws4_request")
 	signature := hex.EncodeToString(hmacSHA256(kSigning, stringToSign))
 
 	req.Header.Set("Authorization", fmt.Sprintf(
 		"AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s",
-		s.cfg.AccessKey, scope, signedHeaders, signature))
+		creds.AccessKey, scope, signedHeaders, signature))
 	return nil
 }
 

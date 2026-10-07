@@ -1034,6 +1034,21 @@ non-destructive:
    `CONDUCTOR_BACKUP_S3_ENDPOINT`. As everywhere else, only coordination metadata travels:
    how to reopen a session, never a transcript. `CONDUCTOR_BACKUP=off` disables it.
 
+**One bucket, configured once.** `conductor storage set` writes `~/.conductor/storage.json`,
+which backup, checkpoints, and the database archive all read, and which the macOS app's
+Settings → Storage pane edits. It signs in to the bucket three ways: an access key (secret
+kept in the macOS Keychain), a profile from `~/.aws` (static keys, IAM Identity Center SSO,
+an assumed role, or `credential_process`), or the environment (AWS_* variables, web
+identity, the ECS task role, the EC2 instance role through IMDSv2). Credentials that expire
+are refreshed. `conductor storage test` signs in and round-trips a probe object, step by
+step. The `CONDUCTOR_BACKUP_S3_*` variables above still work and take precedence. See
+[docs/STORAGE.md](docs/STORAGE.md).
+
+```bash
+conductor storage set --bucket my-team-conductor --region us-east-1 --auth profile --profile dev
+conductor storage test
+```
+
 Wrapped sessions stay honest with the team while paused: the sidecar keeps heartbeating as
 `waiting_for_input`, so presence shows a parked session that is not offered work, rather than
 a mystery that stopped moving. A relaunched wrap registers a fresh session with the same

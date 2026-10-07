@@ -14,9 +14,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aburan28/conductor/internal/awscreds"
 	"github.com/aburan28/conductor/internal/backup"
 	"github.com/aburan28/conductor/internal/checkpoint"
 	"github.com/aburan28/conductor/internal/localstate"
+	"github.com/aburan28/conductor/internal/storage"
 	"github.com/aburan28/conductor/internal/usage"
 )
 
@@ -766,13 +768,14 @@ Flags:
 	if err != nil {
 		return err
 	}
-	store, err := openBackup()
+	store, err := openBackup(storage.UseCheckpoints)
 	if err != nil {
 		return err
 	}
-	pass := os.Getenv("CONDUCTOR_CHECKPOINT_KEY")
+	pass := storage.SealPassphrase(ctx, awscreds.Default())
 	if pass == "" {
-		return errors.New("CONDUCTOR_CHECKPOINT_KEY is not set; a checkpoint is pushed only sealed")
+		return errors.New("no seal passphrase: set CONDUCTOR_CHECKPOINT_KEY (or, on macOS, set one in the app's " +
+			"Storage settings); a checkpoint is pushed only sealed")
 	}
 	var targets []checkpoint.Manifest
 	switch {
@@ -875,7 +878,7 @@ Flags:
 	if err != nil {
 		return err
 	}
-	store, err := openBackup()
+	store, err := openBackup(storage.UseCheckpoints)
 	if err != nil {
 		return err
 	}
@@ -987,7 +990,7 @@ Flags:
 // checkpointPassphrase reads the sealing passphrase from CONDUCTOR_CHECKPOINT_KEY, or asks
 // on the terminal.
 func checkpointPassphrase(required bool) (string, error) {
-	if v := os.Getenv("CONDUCTOR_CHECKPOINT_KEY"); v != "" {
+	if v := storage.SealPassphrase(context.Background(), awscreds.Default()); v != "" {
 		return v, nil
 	}
 	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)

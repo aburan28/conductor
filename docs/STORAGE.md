@@ -106,26 +106,42 @@ Credentials that expire (SSO, assumed roles, instance roles) are refreshed befor
 conductor storage show [--json]
 conductor storage set --bucket B [--region R] [--endpoint URL] [--path-style] [--insecure]
                       [--prefix P]
-                      [--auth static --access-key-id ID [--secret-from keychain|file|stdin]]
+                      [--auth static --access-key-id ID [--secret-from stdin|keychain]
+                                                        [--secret-store keychain|file]]
                       [--auth profile [--profile NAME]]
                       [--auth environment]
-                      [--sessions=true] [--checkpoints=true] [--database=true]
+                      [--sessions=BOOL] [--checkpoints=BOOL] [--database=BOOL]
+                      [--archive-wal=BOOL] [--archive-timeout SECONDS]
+                      [--base-backup-every HOURS] [--keep N] [--seal=BOOL] [--json]
 conductor storage test [--json]      # resolve credentials, then put, get, list, delete a probe
-conductor storage unset
+conductor storage unset [--keep-secret]
+conductor storage profiles [--json]  # the AWS profiles on this machine and their kind
 ```
 
-`--secret-from stdin` reads the secret from standard input and stores it according to
-`auth.secret`. On macOS the default is `keychain`.
+`set` merges into the existing file: only the flags given change. `--secret-from stdin`
+reads the secret from standard input and keeps it where `--secret-store` says: `keychain`
+(the default on macOS) or `file` (the default elsewhere). `--secret-from keychain` means
+the secret is already in the Keychain under `dev.conductor.s3` / the access key ID.
+`unset` also removes that Keychain item unless `--keep-secret` is given.
+
+`profiles --json` prints `[{"name": "dev", "kind": "sso", "region": "us-east-1"}, …]`.
+`kind` is `static`, `sso`, `assume-role`, `process`, or `unknown`.
 
 `show --json` prints:
 
 ```json
 { "configured": true, "path": "/Users/me/.conductor/storage.json", "source": "file",
   "s3": { ... }, "auth": { "method": "static", "access_key_id": "AKIA...", "secret": "keychain",
-  "profile": "" }, "uses": { ... }, "database": { ... } }
+  "secret_access_key": "", "profile": "" },
+  "uses": { "sessions": true, "checkpoints": true, "database": true },
+  "database": { "archive_wal": true, "archive_timeout_seconds": 60, "base_backup_every_hours": 24,
+                "keep_base_backups": 7, "seal": true },
+  "effective_region": "us-east-1", "auth_description": "access key AKIA..., secret in the Keychain" }
 ```
 
-The secret itself is never printed. `source` is `file`, `env`, or `none`.
+The secret itself is never printed, and `uses` and `database` show effective values,
+with defaults applied. `source` is `file`, `env`, or `none`. `off` is true when
+`CONDUCTOR_BACKUP=off`.
 
 `test --json` prints:
 
