@@ -1,6 +1,8 @@
 # Conductor for macOS: plan
 
-Status: plan, not built. Scope: macOS 13 (Ventura) and later, Apple silicon and Intel.
+Status: phases 1 to 5 implemented in [`macos/`](../macos/README.md) (see "Phases" for what
+has been verified, and what needs a Mac and a Developer ID to verify). Scope: macOS 13
+(Ventura) and later, Apple silicon and Intel.
 
 ## Why an app
 
@@ -175,14 +177,50 @@ The cairn recipe, unchanged where possible:
 
 ## Phases
 
-| Phase | Delivers | Done when |
-|---|---|---|
-| 0. Groundwork (this repository) | local sign-in, `conductor security`, the GitHub App, Tailscale-aware invites, `--json` everywhere | merged (this PR) |
-| 1. Menu bar + supervisor | `ConductorKit`; launchd agents for the bundled Postgres and conductord; automatic sign-in; the menu bar popover from status + SSE; web-view window | a fresh Mac with no Docker opens the app and sees its dashboard with no terminal |
-| 2. Onboarding | first-run flow; Connect tools; Invite with the share sheet and the Tailscale option; `conductor://join` | a second person joins from a texted link, and their Claude Code shows Conductor's MCP tools |
-| 3. Portability | Checkpoints window; usage-limit notification; continue under another account or harness | a session stopped by a limit continues under a second login in two clicks |
-| 4. GitHub | the GitHub sheet; check-run status per pull request in the popover | the app is created and installed from the sheet |
-| 5. Ship | Developer ID, notarization, DMG/pkg, Sparkle | a notarized DMG installs and updates itself |
+| Phase | Delivers | Done when | State |
+|---|---|---|---|
+| 0. Groundwork (this repository) | local sign-in, `conductor security`, the GitHub App, Tailscale-aware invites, `--json` everywhere | merged (this PR) | done |
+| 1. Menu bar + supervisor | `ConductorKit`; launchd agents for the bundled Postgres and conductord; automatic sign-in; the menu bar popover from status + SSE; web-view window | a fresh Mac with no Docker opens the app and sees its dashboard with no terminal | implemented |
+| 2. Onboarding | first-run flow; Connect tools; Invite with the share sheet and the Tailscale option; `conductor://join` | a second person joins from a texted link, and their Claude Code shows Conductor's MCP tools | implemented |
+| 3. Portability | Checkpoints window; usage-limit notification; continue under another account or harness | a session stopped by a limit continues under a second login in two clicks | implemented |
+| 4. GitHub | the GitHub sheet; check-run status per pull request in the popover | the app is created and installed from the sheet | implemented |
+| 5. Ship | Developer ID, notarization, DMG/pkg, Sparkle | a notarized DMG installs and updates itself | implemented, unsigned |
+
+Beyond the plan, Settings → Storage configures the bucket of [STORAGE.md](STORAGE.md): the
+supervisor archives the bundled Postgres to it, installs a base-backup agent, and offers
+Restore from bucket on a new Mac.
+
+### What has been verified, and what has not
+
+The implementation was written where no Mac was available. What could be checked there:
+
+- `ConductorKit`, which holds all the logic (plists, supervisor, API and SSE clients,
+  decoders for every `--json` the app reads, storage settings, join links, AWS profiles),
+  builds and passes its tests on Linux.
+- An integration test ran the supervisor's Postgres setup and conductord for real (with
+  PostgreSQL 16 and this repository's conductord, without launchd): initdb with the app's
+  arguments, the socket-only configuration under a path with spaces, conductord on the
+  socket DSN, bootstrap, local sign-in, a `quota.exhausted` event through the SSE client,
+  and an invite link that `conductor join` accepted.
+- `build.sh --go-only` cross-compiled the Go commands for both architectures;
+  `fetch-postgres.sh` was exercised on a synthetic archive (the real one was downloaded
+  once to pin its hash); the signing rules and `notarytool` status parsing have tests.
+- The SwiftUI sources were syntax-checked, and the app model type-checked against
+  ConductorKit, but not compiled.
+
+What needs a Mac, and is left to the `macos-app` workflow and a person with one:
+
+- compiling the `Conductor` target and `ConductorKeychainACL`'s Security calls, and the
+  first run of the app: launchd loading the agents, the window, the menu bar, the share
+  sheet, notifications, `conductor://` links, SMAppService;
+- whether `/usr/bin/security` reads the shared Keychain items without a prompt (the item's
+  partition list, which macOS added after access lists, could still make it ask);
+- the EnterpriseDB binaries running from inside the bundle, signed by the app, under the
+  hardened runtime.
+
+What needs a Developer ID and an App Store Connect key, and has never run: Developer ID
+signing, notarization and stapling, a signed `.pkg`, and Sparkle updates (which also need
+`SPARKLE_PUBLIC_ED_KEY` and a published `appcast.xml`).
 
 ## Risks and open questions
 

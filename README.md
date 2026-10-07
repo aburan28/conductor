@@ -49,6 +49,17 @@ Every release archive carries a GitHub build-provenance attestation:
 `gh attestation verify conductor_vX.Y.Z_linux_amd64.tar.gz --repo aburan28/conductor`.
 `conductor version` (or `--version` on any of the three binaries) says which build you have.
 
+### The macOS app
+
+`Conductor.app` (in [`macos/`](macos/README.md)) is the same three binaries plus a private
+PostgreSQL in one app: it runs the control plane and its database as launchd agents, signs
+you in without a token, puts who is live and what is contested in the menu bar, invites a
+teammate by text through the share sheet, and continues a session that hit its usage limit
+under another login. Settings → Storage points it at an S3 bucket that keeps the database,
+session backups and checkpoints ([docs/STORAGE.md](docs/STORAGE.md)). Build it with
+`macos/build.sh`; the plan, and what has been verified so far, is
+[docs/MACOS_APP.md](docs/MACOS_APP.md).
+
 ## Quickstart
 
 From the repository you want to coordinate:

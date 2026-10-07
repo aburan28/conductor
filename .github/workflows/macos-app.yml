@@ -1,0 +1,129 @@
+name: macOS app
+
+# Conductor.app (macos/, docs/MACOS_APP.md). Two jobs: ConductorKit, where all the logic is,
+# built and tested on Linux in the Swift container; and the app itself built on a Mac,
+# tested, assembled by macos/build.sh (unsigned: no signing secrets are configured), run
+# against its own bundled Postgres and conductord, and uploaded as an artifact.
+
+on:
+  pull_request:
+    paths:
+      - "macos/**"
+      - "cmd/**"
+      - "internal/**"
+      - "go.mod"
+      - ".github/workflows/macos-app.yml"
+  push:
+    paths:
+      - "macos/**"
+      - "cmd/**"
+      - "internal/**"
+      - "go.mod"
+      - ".github/workflows/macos-app.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-app-${{ github.ref }}
+  cancel-in-progress: true
+
+# Actions are pinned to full commit SHAs, as in ci.yml, with the version in a comment.
+
+jobs:
+  kit-linux:
+    name: ConductorKit (Linux)
+    runs-on: ubuntu-latest
+    container: swift:6.1
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: swift build
+        working-directory: macos
+        run: swift build
+
+      - name: swift test
+        working-directory: macos
+        run: swift test
+
+      - name: packaging scripts
+        run: macos/packaging/test-signing.sh
+
+  app-macos:
+    name: Conductor.app (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # build.sh stamps `git describe` into the Go commands.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Toolchain
+        run: |
+          sw_vers
+          swift --version
+          xcodebuild -version || true
+
+      - name: swift build
+        working-directory: macos
+        run: swift build
+
+      - name: swift test
+        working-directory: macos
+        run: swift test
+
+      # The PostgreSQL bundle is 437 MB to download; the cut-down result is cached, keyed on
+      # the script that pins its URL and hash.
+      - name: Cache the PostgreSQL bundle
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: macos/build/postgres
+          key: postgres-${{ hashFiles('macos/fetch-postgres.sh') }}
+
+      - name: Build Conductor.app (universal, unsigned)
+        run: macos/build.sh
+
+      - name: Check the bundle
+        run: |
+          APP=macos/build/Conductor.app
+          plutil -lint "$APP/Contents/Info.plist"
+          for f in "$APP/Contents/MacOS/Conductor" "$APP"/Contents/Resources/bin/* "$APP/Contents/Resources/postgres/bin/postgres"; do
+            echo "$f: $(lipo -archs "$f")"
+            lipo -archs "$f" | grep -q arm64
+            lipo -archs "$f" | grep -q x86_64
+          done
+          "$APP/Contents/Resources/bin/conductor" version
+          "$APP/Contents/Resources/postgres/bin/postgres" --version
+          codesign --verify --strict --deep "$APP"
+          test -d "$APP/Contents/Frameworks/Sparkle.framework"
+
+      - name: Zip the app
+        run: ditto -c -k --keepParent macos/build/Conductor.app Conductor.app.zip
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Conductor.app
+          path: Conductor.app.zip
+          retention-days: 14
+
+      # The app's own Postgres and conductord, out of the built bundle, without launchd:
+      # initdb with the supervisor's arguments, the socket-only configuration, conductord on
+      # the socket DSN, bootstrap, local sign-in, the event stream, and an invite link that
+      # `conductor join` accepts (Tests/ConductorKitTests/IntegrationTests.swift).
+      - name: Integration (bundled Postgres and conductord)
+        working-directory: macos
+        env:
+          CONDUCTOR_IT_PG_BIN: ${{ github.workspace }}/macos/build/Conductor.app/Contents/Resources/postgres/bin
+          CONDUCTOR_IT_BIN: ${{ github.workspace }}/macos/build/Conductor.app/Contents/Resources/bin
+        run: swift test --filter IntegrationTests
