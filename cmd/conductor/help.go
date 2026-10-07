@@ -423,6 +423,35 @@ Example:
 Settings live in ~/.conductor/storage.json; CONDUCTOR_BACKUP_S3_* variables override it.
 See docs/STORAGE.md.
 `},
+	{name: "db", group: "Sessions and machines",
+		subs:    []string{"status", "backups", "base-backup", "restore", "prune", "archiving", "archive-wal", "fetch-wal"},
+		summary: "keep the control-plane database durable in the storage bucket",
+		topic: `conductor db — keep the control-plane database durable in the storage bucket
+
+Postgres stays the local database. Every WAL segment is archived to the bucket as Postgres
+finishes it, and base backups are streamed on a schedule, so a lost machine is rebuilt on
+another to within about a minute (or to any chosen moment). Sealed with your passphrase
+unless turned off. The bucket is the one ` + "`conductor storage`" + ` configures.
+
+Usage:
+  conductor db status [--json]                    last archived segment, base backups, failures
+  conductor db backups [--json]                   base backups and the archived WAL range
+  conductor db base-backup [--dsn DSN]            stream a base backup now (then prune)
+  conductor db restore --data-dir DIR [--target-time 2026-10-07T12:00:00Z]
+  conductor db prune [--keep N]
+  conductor db archiving --data-dir DIR --write   point Postgres's archive_command here
+
+Postgres runs these itself (set up by ` + "`db archiving --write`" + `):
+  archive_command = 'conductor db archive-wal %p %f'
+  restore_command = 'conductor db fetch-wal %f %p'
+
+Example:
+  conductor db archiving --data-dir ~/pgdata --write && pg_ctl -D ~/pgdata restart
+  conductor db base-backup
+  conductor db restore --data-dir ~/pgdata-restored     # on the replacement machine
+
+See docs/STORAGE.md.
+`},
 	{name: "serve", group: "Sessions and machines",
 		summary: "start local vLLM for OpenCode (GLM-5.3 / Qwen 3.8)"},
 
