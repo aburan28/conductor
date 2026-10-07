@@ -70,18 +70,30 @@ public struct ConductorBinaries: Equatable, Sendable {
     }
 
     /// The part of `environment` a launchd agent gets: the PATH, HOME, the CLI's own
-    /// settings (`CONDUCTOR_*`), and the AWS variables `storage.json`'s `profile` and
-    /// `environment` methods read. Not the app's whole environment.
+    /// settings (`CONDUCTOR_*`), and the AWS variables `storage.json`'s `profile` method
+    /// reads. Not the app's whole environment, and never a secret: a plist is a plain file
+    /// any process of this user can read, so a variable named like a key, token, secret or
+    /// password stays out of it (`CONDUCTOR_CHECKPOINT_KEY` included: the CLI falls back to
+    /// the Keychain item dev.conductor.seal/default for the seal passphrase).
     public func agentEnvironment(base: [String: String], home: URL) -> [String: String] {
         let full = environment(base: base, home: home)
         var env: [String: String] = [:]
-        for (key, value) in full {
+        for (key, value) in full where !Self.isSecretName(key) {
             if key == "PATH" || key == "HOME" || key == "USER" || key == "LANG"
                 || key.hasPrefix("CONDUCTOR_") || key.hasPrefix("AWS_") {
                 env[key] = value
             }
         }
         return env
+    }
+
+    /// A variable whose name says it holds a secret. One that names a file holding one is a
+    /// path, not a secret.
+    public static func isSecretName(_ key: String) -> Bool {
+        let k = key.uppercased()
+        if k.hasSuffix("_FILE") { return false }
+        if k == "AWS_ACCESS_KEY_ID" { return true }
+        return ["KEY", "TOKEN", "SECRET", "PASSWORD"].contains { k.contains($0) }
     }
 }
 
@@ -101,12 +113,18 @@ public enum ConductorCommands {
         ["db", "archiving", "--data-dir", dataDir.path, "--write"]
     }
 
-    public static func dbBaseBackup(dsn: String) -> [String] {
-        ["db", "base-backup", "--dsn", dsn]
+    /// `conductor db base-backup`, with the bundled Postgres's tools (`pg_basebackup`) named
+    /// explicitly rather than found on a PATH. It prunes to `keep_base_backups` afterwards.
+    public static func dbBaseBackup(dsn: String, pgBin: URL?) -> [String] {
+        var args = ["db", "base-backup", "--dsn", dsn]
+        if let pgBin { args += ["--pg-bin", pgBin.path] }
+        return args
     }
 
     public static let dbBackups = ["db", "backups", "--json"]
     public static let dbStatus = ["db", "status", "--json"]
+    /// Without the network: only what this machine recorded. Cheap enough to poll.
+    public static let dbStatusLocal = ["db", "status", "--json", "--local"]
 
     public static func dbRestore(dataDir: URL, backup: String = "latest") -> [String] {
         ["db", "restore", "--data-dir", dataDir.path, "--backup", backup]

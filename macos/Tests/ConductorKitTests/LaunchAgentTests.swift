@@ -56,15 +56,19 @@ final class LaunchAgentTests: XCTestCase {
     }
 
     func testBaseBackupAgentRunsOnASchedule() throws {
-        let agent = LaunchAgents.baseBackup(conductor: URL(fileURLWithPath: "/A/bin/conductor"), dsn: setup.dsn, hours: 6,
-                                            paths: paths, environment: [:])
+        let agent = LaunchAgents.baseBackup(conductor: URL(fileURLWithPath: "/A/bin/conductor"), dsn: setup.maintenanceDSN,
+                                            pgBin: setup.binDirectory, hours: 6, paths: paths, environment: [:])
         let plist = try roundTrip(agent)
         XCTAssertEqual(plist["Label"] as? String, "dev.conductor.db-backup")
-        XCTAssertEqual(plist["ProgramArguments"] as? [String], ["/A/bin/conductor", "db", "base-backup", "--dsn", setup.dsn])
+        XCTAssertEqual(plist["ProgramArguments"] as? [String], [
+            "/A/bin/conductor", "db", "base-backup", "--dsn", setup.maintenanceDSN,
+            "--pg-bin", "/Applications/Conductor.app/Contents/Resources/postgres/bin",
+        ])
+        XCTAssertTrue(setup.maintenanceDSN.contains("dbname='postgres'"))
         XCTAssertEqual(plist["StartInterval"] as? Int, 6 * 3600)
         XCTAssertEqual(plist["RunAtLoad"] as? Bool, false)
         XCTAssertNil(plist["KeepAlive"])
-        XCTAssertEqual(LaunchAgents.baseBackup(conductor: URL(fileURLWithPath: "/c"), dsn: "", hours: 0, paths: paths,
+        XCTAssertEqual(LaunchAgents.baseBackup(conductor: URL(fileURLWithPath: "/c"), dsn: "", pgBin: nil, hours: 0, paths: paths,
                                                environment: [:]).startInterval, 3600, "at least hourly")
     }
 

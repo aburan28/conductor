@@ -98,6 +98,8 @@ final class IntegrationTests: XCTestCase {
         XCTAssertTrue(PostgresSetup.isAlreadyExists(created), created.stderrText)
         let again = try await runner.run(CommandSpec(setup.executable("createdb"), setup.createDatabaseArguments))
         XCTAssertTrue(PostgresSetup.isAlreadyExists(again), "a second start tolerates the database: \(again.stderrText)")
+        let recovery = try await runner.run(CommandSpec(setup.executable("psql"), setup.inRecoveryArguments))
+        XCTAssertEqual(recovery.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines), "f", recovery.stderrText)
 
         guard let bin = env["CONDUCTOR_IT_BIN"], !bin.isEmpty else { return }
         let conductord = URL(fileURLWithPath: bin).appendingPathComponent("conductord")

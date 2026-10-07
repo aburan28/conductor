@@ -58,6 +58,9 @@ final class PostgresTests: XCTestCase {
         let s = PostgresSetup(paths: AppPaths(home: home, uid: 501), binDirectory: URL(fileURLWithPath: "/b"))
         XCTAssertEqual(s.dsn, "host='/Users/ada/Library/Application Support/Conductor/run' port=5432 user='conductor' dbname='conductor' sslmode=disable")
         XCTAssertFalse(s.dsn.contains("password"))
+        XCTAssertEqual(s.maintenanceDSN, "host='/Users/ada/Library/Application Support/Conductor/run' port=5432 user='conductor' dbname='postgres' sslmode=disable")
+        XCTAssertEqual(s.inRecoveryArguments, ["-h", "/Users/ada/Library/Application Support/Conductor/run", "-p", "5432",
+                                               "-U", "conductor", "-d", "postgres", "-X", "-A", "-t", "-c", "select pg_is_in_recovery()"])
     }
 
     func testIncludeIsAddedOnce() throws {

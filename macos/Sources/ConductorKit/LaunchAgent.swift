@@ -140,13 +140,14 @@ public enum LaunchAgents {
         )
     }
 
-    /// `conductor db base-backup` every `hours` hours (docs/STORAGE.md). Not run at load: the
-    /// supervisor takes the first base backup itself once archiving is on.
-    public static func baseBackup(conductor: URL, dsn: String, hours: Int, paths: AppPaths,
+    /// `conductor db base-backup` every `hours` hours (docs/STORAGE.md), with the bundled
+    /// Postgres's tools. Not run at load: the supervisor takes the first base backup itself
+    /// once archiving is on.
+    public static func baseBackup(conductor: URL, dsn: String, pgBin: URL?, hours: Int, paths: AppPaths,
                                   environment: [String: String]) -> LaunchAgent {
         LaunchAgent(
             label: backupLabel,
-            programArguments: [conductor.path] + ConductorCommands.dbBaseBackup(dsn: dsn),
+            programArguments: [conductor.path] + ConductorCommands.dbBaseBackup(dsn: dsn, pgBin: pgBin),
             environment: environment,
             workingDirectory: paths.home.path,
             runAtLoad: false,

@@ -10,7 +10,9 @@ import Glibc
 final class FakeMac: @unchecked Sendable {
     private let lock = NSLock()
     private(set) var loaded = Set<String>()
-    var backupsJSON = "[]"
+    var backupsJSON = #"{"backups":[],"error":"no cluster in the bucket"}"#
+    var recoveringPolls = 0
+    var recoveryPollsAfterRestore = 3
     var archivingLine = "archive_mode = 'on'\narchive_command = 'conductor db archive-wal %p %f'\n"
     let dataDir: URL
     lazy var runner = RecordingRunner { [unowned self] spec in self.respond(spec) }
@@ -47,6 +49,13 @@ final class FakeMac: @unchecked Sendable {
             return CommandResult(status: 0)
         case "pg_isready":
             return CommandResult(status: isLoaded(LaunchAgents.postgresLabel) ? 0 : 2)
+        case "psql":
+            // pg_is_in_recovery(): true for the first `recoveringPolls` asks after a restore.
+            lock.lock()
+            let recovering = recoveringPolls > 0
+            if recovering { recoveringPolls -= 1 }
+            lock.unlock()
+            return CommandResult(status: 0, stdout: Data((recovering ? "t\n" : "f\n").utf8))
         case "createdb":
             return CommandResult(status: 1, stderr: Data("database \"conductor\" already exists".utf8))
         case "conductor":
@@ -61,6 +70,10 @@ final class FakeMac: @unchecked Sendable {
             if args.starts(with: ["db", "restore"]) {
                 try? FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
                 try? "17\n".write(to: dataDir.appendingPathComponent("PG_VERSION"), atomically: true, encoding: .utf8)
+                try? "".write(to: dataDir.appendingPathComponent("recovery.signal"), atomically: true, encoding: .utf8)
+                lock.lock()
+                recoveringPolls = recoveryPollsAfterRestore
+                lock.unlock()
             }
             if args.starts(with: ["db", "backups"]) {
                 return CommandResult(status: 0, stdout: Data(backupsJSON.utf8))
@@ -88,7 +101,7 @@ final class SupervisorTests: XCTestCase {
 
     private var uid: UInt32 { UInt32(getuid()) }
 
-    private func supervisor(storage: AppSettings = AppSettings(), externalDSN: String? = nil, portFree: Bool = true,
+    private func supervisor(storage: AppSettings = AppSettings(), externalDSN: String? = nil, portFree: Bool = true, recoveryTimeout: Double = 60,
                             foreignDaemon: Bool = false) -> Supervisor {
         let paths = AppPaths(home: home, uid: uid)
         let res = URL(fileURLWithPath: "/Applications/Conductor.app/Contents/Resources")
@@ -100,7 +113,8 @@ final class SupervisorTests: XCTestCase {
                                       baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": home.path], externalDSN: externalDSN)
         let fake = self.fake!
         let probes = SupervisorProbes(daemonHealthy: { _ in foreignDaemon || fake.isLoaded(LaunchAgents.daemonLabel) },
-                                      portFree: { _ in portFree }, sleep: { _ in }, postgresTimeout: 1, daemonTimeout: 1)
+                                      portFree: { _ in portFree }, sleep: { _ in }, postgresTimeout: 1, daemonTimeout: 1,
+                                      recoveryTimeout: recoveryTimeout)
         return Supervisor(config: config, runner: fake.runner, probes: probes)
     }
 
@@ -144,6 +158,9 @@ final class SupervisorTests: XCTestCase {
         // The plists on disk are the ones the builders make.
         let backupPlist = try PropertyListSerialization.propertyList(from: Data(contentsOf: URL(fileURLWithPath: plist("dev.conductor.db-backup"))), format: nil) as? [String: Any]
         XCTAssertEqual(backupPlist?["StartInterval"] as? Int, 12 * 3600)
+        let backupArgs = try XCTUnwrap(backupPlist?["ProgramArguments"] as? [String])
+        XCTAssertEqual(Array(backupArgs.suffix(2)), ["--pg-bin", "/Applications/Conductor.app/Contents/Resources/postgres/bin"])
+        XCTAssertTrue(backupArgs.contains { $0.contains("dbname='postgres'") }, "\(backupArgs)")
         let daemonPlist = try PropertyListSerialization.propertyList(from: Data(contentsOf: URL(fileURLWithPath: plist("dev.conductor.daemon"))), format: nil) as? [String: Any]
         let args = try XCTUnwrap(daemonPlist?["ProgramArguments"] as? [String])
         XCTAssertEqual(Array(args.prefix(3)), ["/Applications/Conductor.app/Contents/Resources/bin/conductord", "--addr", "127.0.0.1:8080"])
@@ -200,6 +217,25 @@ final class SupervisorTests: XCTestCase {
         let restore = try XCTUnwrap(t.firstIndex(of: "conductor db restore --data-dir \(fake.dataDir.path) --backup latest"))
         let archiving = try XCTUnwrap(t.firstIndex { $0.hasPrefix("conductor db archiving") })
         XCTAssertLessThan(restore, archiving)
+        // Read-only until the archived WAL is replayed: conductord waits for promotion.
+        let polls = t.indices.filter { t[$0].hasPrefix("psql ") && t[$0].hasSuffix("select pg_is_in_recovery()") }
+        XCTAssertEqual(polls.count, 4, "three answers of t, then f")
+        let createdb = try XCTUnwrap(t.firstIndex { $0.hasPrefix("createdb") })
+        let daemon = try XCTUnwrap(t.firstIndex { $0.hasPrefix("launchctl bootstrap") && $0.hasSuffix("dev.conductor.daemon.plist") })
+        XCTAssertLessThan(try XCTUnwrap(polls.last), createdb)
+        XCTAssertLessThan(createdb, daemon)
+    }
+
+    func testARestoreThatNeverFinishesTimesOut() async throws {
+        fake.recoveryPollsAfterRestore = 1_000_000
+        do {
+            try await supervisor(recoveryTimeout: 3).ensureRunning(storage: try storage(database: true), restoreFromBucket: true)
+            XCTFail("expected a timeout")
+        } catch let e as SupervisorError {
+            guard case .timeout(let why) = e else { return XCTFail("\(e)") }
+            XCTAssertTrue(why.contains("still replaying"), why)
+        }
+        XCTAssertFalse(fake.runner.transcript.contains { $0.contains("dev.conductor.daemon.plist") && $0.contains("bootstrap") })
     }
 
     func testAPortSomeoneElseHoldsIsRefused() async throws {

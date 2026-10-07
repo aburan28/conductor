@@ -83,7 +83,14 @@ public struct PostgresSetup: Equatable, Sendable {
     /// What conductord, `conductor db base-backup` and `conductord bootstrap` connect with: a
     /// libpq keyword/value string, which pgx reads too. The socket folder can contain spaces
     /// ("Application Support"), so every value is quoted.
-    public var dsn: String {
+    public var dsn: String { dsn(database: database) }
+
+    /// The same socket, the `postgres` maintenance database: what `conductor db
+    /// base-backup` connects with (pg_basebackup takes a replication connection, which no
+    /// application database is needed for).
+    public var maintenanceDSN: String { dsn(database: "postgres") }
+
+    func dsn(database: String) -> String {
         [
             "host=\(Self.conninfoQuote(socketDirectory.path))",
             "port=\(port)",
@@ -91,6 +98,19 @@ public struct PostgresSetup: Equatable, Sendable {
             "dbname=\(Self.conninfoQuote(database))",
             "sslmode=disable",
         ].joined(separator: " ")
+    }
+
+    /// `psql … -c "select pg_is_in_recovery()"`: prints `t` while a restored cluster is still
+    /// replaying archived WAL (read-only), `f` once it has promoted itself.
+    public var inRecoveryArguments: [String] {
+        ["-h", socketDirectory.path, "-p", String(port), "-U", user, "-d", "postgres",
+         "-X", "-A", "-t", "-c", "select pg_is_in_recovery()"]
+    }
+
+    /// `recovery.signal` in the data directory: `conductor db restore` wrote it, and Postgres
+    /// has not finished the recovery it asks for.
+    public func isRecovering(fileManager: FileManager = .default) -> Bool {
+        fileManager.fileExists(atPath: dataDirectory.appendingPathComponent("recovery.signal").path)
     }
 
     // MARK: - configuration

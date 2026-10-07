@@ -1,12 +1,11 @@
 import Foundation
 
-// The database half of docs/STORAGE.md as the app reads it. `conductor db status --json` and
-// `conductor db backups --json` are being written at the same time as this app, and the
-// contract names their commands but not their output, so both are read leniently: as any
-// JSON, picking out the fields under the names they are most likely to have, and showing
-// whatever else is there as it is. Nothing here fails because a field is missing or new.
+// The database half of docs/STORAGE.md as the app reads it: `conductor db status --json`
+// and `conductor db backups --json` ("JSON for the app"). Both are read as any JSON and
+// picked apart field by field: every field may be missing ("empty fields are omitted"), and
+// fields this app does not know are shown as they are rather than failing the decode.
 
-/// `conductor db status --json`, for the Database durability section.
+/// `conductor db status --json [--local]`, for the Database durability section.
 public struct DatabaseStatus: Equatable, Sendable {
     public struct Row: Equatable, Identifiable, Sendable {
         public var label: String
@@ -19,70 +18,149 @@ public struct DatabaseStatus: Equatable, Sendable {
         }
     }
 
-    /// The rows to show, the well-known fields first in a fixed order, then the rest.
-    public var rows: [Row]
-    /// A problem the status itself reports (a failing archive), if any field says so.
-    public var problem: String?
+    /// What this machine recorded about archiving (`archive`); present offline (`--local`).
+    public struct Archive: Equatable, Sendable {
+        public var archived: Int?
+        public var lastWAL: String?
+        public var lastAt: String?
+        public var lastError: String?
+        public var lastErrorWAL: String?
+        public var lastErrorAt: String?
+        public var lastBaseBackup: String?
+        public var lastBaseBackupAt: String?
+        public var lastBaseBackupError: String?
+    }
 
-    /// Field spellings tried for each well-known row, in order.
-    static let known: [(label: String, keys: [String])] = [
-        ("Archiving", ["archiving", "archive_mode", "archive_wal"]),
-        ("Last archived segment", ["last_archived_segment", "last_archived_wal", "last_archived"]),
-        ("Archived at", ["last_archived_at", "last_archived_time"]),
-        ("Last base backup", ["last_base_backup", "latest_base_backup", "last_backup"]),
-        ("Base backup taken", ["last_base_backup_at", "last_backup_at"]),
-        ("Lag", ["lag_seconds", "lag", "archive_lag_seconds"]),
-        ("Failed archive attempts", ["failed_count", "archive_failures"]),
-        ("Last failure", ["last_failed_wal", "last_failed_at"]),
-        ("Cluster", ["system_identifier", "system_id"]),
-        ("Location", ["location", "bucket"]),
+    /// What the bucket holds (`base_backups`); absent with `--local`.
+    public struct BaseBackups: Equatable, Sendable {
+        public var count: Int?
+        public var latestID: String?
+        public var latestAt: String?
+    }
+
+    /// The WAL in the bucket (`wal`).
+    public struct WAL: Equatable, Sendable {
+        public var segments: Int?
+        public var bytes: Int?
+    }
+
+    public var configured: Bool?
+    public var enabled: Bool?
+    public var archiving: Bool?
+    public var location: String?
+    public var sealed: Bool?
+    public var systemID: String?
+    public var archive: Archive?
+    public var lagSeconds: Double?
+    public var failing: Bool?
+    public var baseBackups: BaseBackups?
+    public var wal: WAL?
+    public var error: String?
+
+    /// Every field this app does not read, as label and value, so a newer CLI's additions
+    /// still show.
+    public var extra: [Row] = []
+
+    static let knownKeys: Set<String> = [
+        "configured", "enabled", "archiving", "location", "sealed", "system_id", "archive",
+        "lag_seconds", "failing", "base_backups", "wal", "error",
     ]
 
     public static func decode(_ data: Data) -> DatabaseStatus? {
-        guard let value = try? JSONValue.decode(data), case .object(let object) = value else { return nil }
-        var rows: [Row] = []
-        var used = Set<String>()
-        for (label, keys) in known {
-            for key in keys {
-                guard let v = object[key], v != .null else { continue }
-                used.insert(key)
-                rows.append(Row(label, render(v, key: key)))
-                break
+        guard let v = try? JSONValue.decode(data), case .object(let o) = v else { return nil }
+        func str(_ x: JSONValue?, _ k: String) -> String? {
+            guard let s = x?[k]?.stringValue, !s.isEmpty else { return nil }
+            return s
+        }
+        var s = DatabaseStatus()
+        s.configured = v["configured"]?.boolValue
+        s.enabled = v["enabled"]?.boolValue
+        s.archiving = v["archiving"]?.boolValue
+        s.location = str(v, "location")
+        s.sealed = v["sealed"]?.boolValue
+        s.systemID = str(v, "system_id")
+        if let a = v["archive"], a.objectValue != nil {
+            s.archive = Archive(archived: a["archived"]?.intValue, lastWAL: str(a, "last_wal"), lastAt: str(a, "last_at"),
+                                lastError: str(a, "last_error"), lastErrorWAL: str(a, "last_error_wal"),
+                                lastErrorAt: str(a, "last_error_at"), lastBaseBackup: str(a, "last_base_backup"),
+                                lastBaseBackupAt: str(a, "last_base_backup_at"),
+                                lastBaseBackupError: str(a, "last_base_backup_error"))
+        }
+        s.lagSeconds = v["lag_seconds"]?.doubleValue
+        s.failing = v["failing"]?.boolValue
+        if let b = v["base_backups"], b.objectValue != nil {
+            s.baseBackups = BaseBackups(count: b["count"]?.intValue, latestID: str(b, "latest_id"), latestAt: str(b, "latest_at"))
+        }
+        if let w = v["wal"], w.objectValue != nil {
+            s.wal = WAL(segments: w["segments"]?.intValue, bytes: w["bytes"]?.intValue)
+        }
+        s.error = str(v, "error")
+        for key in o.keys.sorted() where !knownKeys.contains(key) {
+            guard let value = o[key], value != .null else { continue }
+            switch value {
+            case .object, .array: continue
+            default: s.extra.append(Row(humanize(key), value.displayText))
             }
         }
-        for key in object.keys.sorted() where !used.contains(key) {
-            guard let v = object[key], v != .null else { continue }
-            if key == "error" || key == "problem" { continue }
-            switch v {
-            case .object, .array: continue // nested detail belongs to the CLI's own output
-            default: rows.append(Row(humanize(key), v.displayText))
-            }
-        }
-        var problem: String?
-        for key in ["error", "problem", "last_error"] {
-            if let s = object[key]?.stringValue, !s.isEmpty { problem = s; break }
-        }
-        return DatabaseStatus(rows: rows, problem: problem)
+        return s
     }
 
-    static func render(_ v: JSONValue, key: String) -> String {
-        switch v {
-        case .number(let n) where key.hasSuffix("seconds") || key == "lag":
-            return formatSeconds(n)
-        case .object(let o):
-            // A base backup described as an object: its id and when it was taken.
-            let id = JSONValue.object(o).first("id", "name", "label")?.displayText
-            let at = JSONValue.object(o).first("taken_at", "created_at", "finished_at", "time", "timestamp")?.displayText
-            return [id, at].compactMap { $0 }.joined(separator: ", ").ifEmpty(v.displayText)
-        default:
-            return v.displayText
+    /// The rows the pane shows, in a fixed order, then anything new.
+    public var rows: [Row] {
+        var out: [Row] = []
+        if let archiving { out.append(Row("Archiving", archiving ? "on" : "off")) }
+        if let location { out.append(Row("Location", location)) }
+        if let sealed { out.append(Row("Sealed", sealed ? "yes" : "no")) }
+        if let a = archive {
+            if let w = a.lastWAL { out.append(Row("Last archived segment", w)) }
+            if let at = a.lastAt { out.append(Row("Archived at", at)) }
+            if let n = a.archived { out.append(Row("Segments archived", String(n))) }
         }
+        if let lag = lagSeconds { out.append(Row("Lag", Self.formatSeconds(lag))) }
+        let lastID = baseBackups?.latestID ?? archive?.lastBaseBackup
+        let lastAt = baseBackups?.latestAt ?? archive?.lastBaseBackupAt
+        if lastID != nil || lastAt != nil {
+            out.append(Row("Last base backup", [lastID, lastAt].compactMap { $0 }.joined(separator: ", ")))
+        }
+        if let n = baseBackups?.count { out.append(Row("Base backups in the bucket", String(n))) }
+        if let w = wal, let n = w.segments {
+            var text = "\(n) segment" + (n == 1 ? "" : "s")
+            if let b = w.bytes { text += ", " + Self.formatBytes(b) }
+            out.append(Row("WAL in the bucket", text))
+        }
+        if let id = systemID { out.append(Row("Cluster", id)) }
+        return out + extra
+    }
+
+    /// What is wrong, in a sentence, when anything is.
+    public var problem: String? {
+        if let error { return error }
+        if let e = archive?.lastError {
+            var text = "Archiving failed"
+            if let w = archive?.lastErrorWAL { text += " for \(w)" }
+            if let at = archive?.lastErrorAt { text += " at \(at)" }
+            return text + ": " + e
+        }
+        if let e = archive?.lastBaseBackupError { return "The last base backup failed: " + e }
+        if failing == true { return "Archiving is failing." }
+        return nil
     }
 
     static func formatSeconds(_ s: Double) -> String {
         if s < 120 { return "\(Int(s.rounded())) s" }
         if s < 7200 { return "\(Int((s / 60).rounded())) min" }
         return String(format: "%.1f h", s / 3600)
+    }
+
+    static func formatBytes(_ b: Int) -> String {
+        let units = ["bytes", "KB", "MB", "GB", "TB"]
+        var value = Double(b)
+        var unit = 0
+        while value >= 1024 && unit < units.count - 1 {
+            value /= 1024
+            unit += 1
+        }
+        return unit == 0 ? "\(b) bytes" : String(format: "%.1f ", value) + units[unit]
     }
 
     static func humanize(_ key: String) -> String {
@@ -92,8 +170,8 @@ public struct DatabaseStatus: Equatable, Sendable {
     }
 }
 
-/// `conductor db backups --json`: the base backups in the bucket. Accepts a bare array or an
-/// object holding one under `backups` (or `base_backups`).
+/// `conductor db backups --json`: `{"system_id", "location", "backups": [...], "wal", "error"}`.
+/// A bare array is accepted too.
 public struct BaseBackupList: Equatable, Sendable {
     public struct Backup: Equatable, Identifiable, Sendable {
         public var id: String
@@ -102,11 +180,18 @@ public struct BaseBackupList: Equatable, Sendable {
     }
 
     public var backups: [Backup]
+    /// Why the list is empty, when the CLI says ("no cluster in the bucket").
+    public var error: String?
+
+    public init(backups: [Backup], error: String? = nil) {
+        self.backups = backups
+        self.error = error
+    }
 
     public var isEmpty: Bool { backups.isEmpty }
     public var count: Int { backups.count }
 
-    /// The newest, by the time each names (ISO 8601 sorts as text), else the last listed.
+    /// The newest, by the time each names (RFC 3339 sorts as text), else the last listed.
     public var latest: Backup? {
         let dated = backups.filter { $0.takenAt != nil }
         if !dated.isEmpty { return dated.max { ($0.takenAt ?? "") < ($1.takenAt ?? "") } }
@@ -116,11 +201,18 @@ public struct BaseBackupList: Equatable, Sendable {
     public static func decode(_ data: Data) -> BaseBackupList? {
         guard let value = try? JSONValue.decode(data) else { return nil }
         let items: [JSONValue]
+        var error: String?
         switch value {
         case .array(let a): items = a
         case .object:
-            guard let a = value.first("backups", "base_backups")?.arrayValue else { return nil }
-            items = a
+            error = value["error"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 }
+            if let a = value.first("backups", "base_backups")?.arrayValue {
+                items = a
+            } else if value["backups"] == .null || error != nil {
+                items = []
+            } else {
+                return nil
+            }
         default: return nil
         }
         var out: [Backup] = []
@@ -129,15 +221,15 @@ public struct BaseBackupList: Equatable, Sendable {
             case .string(let s):
                 out.append(Backup(id: s, takenAt: nil, bytes: nil))
             case .object:
-                let taken = item.first("taken_at", "created_at", "started_at", "finished_at", "time", "timestamp")?.stringValue
-                let id = item.first("id", "name", "label", "timestamp")?.displayText ?? taken ?? "backup \(i + 1)"
-                let bytes = item.first("bytes", "size", "size_bytes")?.intValue
+                let taken = item.first("finished_at", "started_at", "taken_at", "created_at")?.stringValue
+                let id = item.first("id", "name")?.displayText ?? taken ?? "backup \(i + 1)"
+                let bytes = item.first("size", "bytes", "stored_size")?.intValue
                 out.append(Backup(id: id, takenAt: taken, bytes: bytes))
             default:
                 continue
             }
         }
-        return BaseBackupList(backups: out)
+        return BaseBackupList(backups: out, error: error)
     }
 }
 
@@ -148,8 +240,4 @@ public enum RestoreOffer {
         guard !clusterExists, let storage, storage.databaseToBucket, let backups else { return false }
         return !backups.isEmpty
     }
-}
-
-extension String {
-    func ifEmpty(_ other: @autoclosure () -> String) -> String { isEmpty ? other() : self }
 }

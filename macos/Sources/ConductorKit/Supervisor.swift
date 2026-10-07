@@ -117,16 +117,19 @@ public struct SupervisorProbes: Sendable {
     public var sleep: @Sendable (Double) async -> Void
     public var postgresTimeout: Double
     public var daemonTimeout: Double
+    /// How long a restored cluster may take to replay the bucket's WAL.
+    public var recoveryTimeout: Double
 
     public init(daemonHealthy: @escaping @Sendable (String) async -> Bool,
                 portFree: @escaping @Sendable (Int) -> Bool = { PortProbe.isFree($0) },
                 sleep: @escaping @Sendable (Double) async -> Void = { s in try? await Task.sleep(nanoseconds: UInt64(s * 1_000_000_000)) },
-                postgresTimeout: Double = 60, daemonTimeout: Double = 90) {
+                postgresTimeout: Double = 60, daemonTimeout: Double = 90, recoveryTimeout: Double = 3600) {
         self.daemonHealthy = daemonHealthy
         self.portFree = portFree
         self.sleep = sleep
         self.postgresTimeout = postgresTimeout
         self.daemonTimeout = daemonTimeout
+        self.recoveryTimeout = recoveryTimeout
     }
 
     public static let live = SupervisorProbes(daemonHealthy: { endpoint in
@@ -340,6 +343,9 @@ public actor Supervisor {
             try? await launchctl.kickstart(label: agent.label)
         }
         try await waitForPostgres()
+        // A cluster `conductor db restore` rebuilt accepts only reads until it has replayed the
+        // archived WAL and promoted itself; conductord must not start against it before then.
+        try await waitForRecovery()
         let created = try await runner.run(CommandSpec(pg.executable("createdb"), pg.createDatabaseArguments,
                                                        environment: config.commandEnvironment))
         guard PostgresSetup.isAlreadyExists(created) else {
@@ -373,6 +379,22 @@ public actor Supervisor {
             waited += step
         }
         throw SupervisorError.timeout("The database did not start within \(Int(probes.postgresTimeout)) seconds. Its log is \(config.paths.logFile("postgres.log").path).")
+    }
+
+    /// Polls `select pg_is_in_recovery()` until it says `f`. A cluster that was never
+    /// restored answers `f` at once.
+    public func waitForRecovery() async throws {
+        guard let pg = config.postgres else { return }
+        let step = 1.0
+        var waited = 0.0
+        while waited < probes.recoveryTimeout {
+            let r = try await runner.run(CommandSpec(pg.executable("psql"), pg.inRecoveryArguments,
+                                                     environment: config.commandEnvironment))
+            if r.succeeded && r.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines) == "f" { return }
+            await probes.sleep(step)
+            waited += step
+        }
+        throw SupervisorError.timeout("The restored database was still replaying the bucket's WAL after \(Int(probes.recoveryTimeout / 60)) minutes. Its log is \(config.paths.logFile("postgres.log").path); start Conductor again to keep waiting.")
     }
 
     // MARK: - conductord
@@ -416,12 +438,13 @@ public actor Supervisor {
     /// base backup yet, it is run once now: WAL alone restores nothing.
     public func configureBackups(storage: StorageShow?) async throws {
         let label = LaunchAgents.backupLabel
-        guard let storage, storage.databaseToBucket, let dsn = config.dsn, config.postgres != nil else {
+        guard let storage, storage.databaseToBucket, let pg = config.postgres else {
             try? await launchctl.bootout(label: label)
             try? fm.removeItem(at: config.paths.launchAgentPlist(label))
             return
         }
-        let agent = LaunchAgents.baseBackup(conductor: config.binaries.conductor, dsn: dsn,
+        let agent = LaunchAgents.baseBackup(conductor: config.binaries.conductor, dsn: pg.maintenanceDSN,
+                                            pgBin: pg.binDirectory,
                                             hours: storage.settings.database.baseBackupEveryHours,
                                             paths: config.paths, environment: config.agentEnvironment)
         let changed = try writePlist(agent)

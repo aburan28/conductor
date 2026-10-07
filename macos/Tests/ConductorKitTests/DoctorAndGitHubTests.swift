@@ -77,6 +77,9 @@ final class DoctorAndGitHubTests: XCTestCase {
         XCTAssertEqual(ConductorCommands.dbArchiving(dataDir: URL(fileURLWithPath: "/d")), ["db", "archiving", "--data-dir", "/d", "--write"])
         XCTAssertEqual(ConductorCommands.dbRestore(dataDir: URL(fileURLWithPath: "/d")), ["db", "restore", "--data-dir", "/d", "--backup", "latest"])
         XCTAssertEqual(ConductorCommands.dbStatus, ["db", "status", "--json"])
+        XCTAssertEqual(ConductorCommands.dbStatusLocal, ["db", "status", "--json", "--local"])
+        XCTAssertEqual(ConductorCommands.dbBaseBackup(dsn: "d", pgBin: URL(fileURLWithPath: "/pg/bin")),
+                       ["db", "base-backup", "--dsn", "d", "--pg-bin", "/pg/bin"])
         XCTAssertEqual(ConductorCommands.dbBackups, ["db", "backups", "--json"])
         XCTAssertEqual(ConductorCommands.storageTest, ["storage", "test", "--json"])
     }
@@ -106,5 +109,11 @@ final class DoctorAndGitHubTests: XCTestCase {
         XCTAssertEqual(agent["CONDUCTOR_STATE_DIR"], "/s")
         XCTAssertEqual(agent["AWS_PROFILE"], "dev")
         XCTAssertNotNil(agent["PATH"])
+
+        let secrets = found!.agentEnvironment(base: ["CONDUCTOR_CHECKPOINT_KEY": "pass", "CONDUCTOR_TOKEN": "cdt", "AWS_SECRET_ACCESS_KEY": "s",
+                                                     "AWS_ACCESS_KEY_ID": "AKIA", "AWS_SESSION_TOKEN": "t", "CONDUCTOR_SECRET_KEY_FILE": "/k",
+                                                     "AWS_CONFIG_FILE": "/c", "CONDUCTOR_DB_PASSWORD": "pw"],
+                                              home: URL(fileURLWithPath: "/Users/ada"))
+        XCTAssertEqual(Set(secrets.keys), ["PATH", "HOME", "CONDUCTOR_SECRET_KEY_FILE", "AWS_CONFIG_FILE"], "no secret lands in a plist")
     }
 }
