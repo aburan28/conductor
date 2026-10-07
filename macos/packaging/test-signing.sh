@@ -70,6 +70,17 @@ expect "notarytool: the submission id" 0 "6a5b0d6c-1a1e-4d52-9a3c-3d1fd3a0f9a2"
 SNIPPET="printf '%s' 'Error: HTTP status code: 401' | notary_accepted || echo rejected"
 expect "notarytool: no JSON is a failure" 0 "rejected"
 
+# A plutil without -extract (Swift's Linux toolchain has one) prints its usage to stdout and
+# fails; the sed fallback must answer alone.
+FAKE="$(mktemp -d)"
+printf '#!/bin/sh\necho "unrecognized option: -extract"\nexit 1\n' > "$FAKE/plutil"
+chmod +x "$FAKE/plutil"
+SNIPPET="printf '%s' '$ACCEPTED' | notary_accepted && echo accepted"
+expect "notarytool: a failing plutil falls back" 0 "accepted" PATH="$FAKE:$PATH"
+SNIPPET="v=\$(printf '%s' '$INVALID' | json_field id); [ \"\$v\" = 6a5b0d6c-1a1e-4d52-9a3c-3d1fd3a0f9a2 ] && echo exact"
+expect "notarytool: a failing plutil adds nothing" 0 "exact" PATH="$FAKE:$PATH"
+rm -rf "$FAKE"
+
 for f in "$HERE"/*.sh "$HERE"/../build.sh "$HERE"/../fetch-postgres.sh; do
     if bash -n "$f"; then echo "ok   bash -n $(basename "$f")"; else echo "FAIL bash -n $f"; FAILED=1; fi
 done

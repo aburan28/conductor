@@ -67,12 +67,16 @@ notary_args() {
 }
 
 # json_field FIELD reads a top-level string field from notarytool's --output-format json on
-# stdin. plutil reads JSON on a Mac; the sed fallback is for testing this on Linux.
+# stdin. plutil reads JSON on a Mac; the sed fallback is for testing this on Linux. plutil's
+# output is used only when it succeeds: the plutil in Swift's Linux toolchain has no -extract
+# and prints its usage to stdout before failing, which must not reach the caller.
 json_field() {
-    local input
+    local input value
     input="$(cat)"
-    if command -v plutil >/dev/null 2>&1; then
-        printf '%s' "$input" | plutil -extract "$1" raw -o - - 2>/dev/null && return 0
+    if command -v plutil >/dev/null 2>&1 &&
+        value="$(printf '%s' "$input" | plutil -extract "$1" raw -o - - 2>/dev/null)"; then
+        printf '%s\n' "$value"
+        return 0
     fi
     printf '%s' "$input" | tr '\n' ' ' | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
 }
