@@ -126,7 +126,12 @@ const fakeHarnessEnv = "CONDUCTOR_TEST_FAKE_HARNESS"
 
 func TestMain(m *testing.M) {
 	if os.Getenv(fakeHarnessEnv) != "" {
-		select {}
+		// Sleep rather than select{}: with nothing else to run, the runtime reports a bare
+		// select{} as a deadlock and exits, which it does on macOS and in any build without
+		// cgo. A pending timer is not a deadlock, so this idles until it is killed.
+		for {
+			time.Sleep(time.Hour)
+		}
 	}
 	// No test in this package may scan the real process table: the scan finds the
 	// developer's own agent sessions, and pause would freeze them. Every test works from
