@@ -13,7 +13,10 @@ on:
       - "internal/**"
       - "go.mod"
       - ".github/workflows/macos-app.yml"
+  # Pushes to main only: a pull request's branch is already built by the pull_request event,
+  # and a second macOS run per push holds one of the account's few concurrent macOS runners.
   push:
+    branches: [main]
     paths:
       - "macos/**"
       - "cmd/**"
