@@ -41,6 +41,25 @@ var commandGroups = []string{"Get started", "Coordinate", "Work", "Territory", "
 
 var commands = []command{
 	// Get started
+	{name: "leader", group: "Get started", short: true, flags: true,
+		summary: "run the control-plane leader with local Postgres, external Postgres or RDS",
+		topic: `conductor leader — run the team's control plane in the foreground
+
+The leader manages a local loopback Postgres database by default. Use --database external
+or --database rds with DATABASE_URL or a config secret reference to skip Docker entirely.
+Workers join the leader's authenticated API without receiving database credentials.
+Server config, TLS and NAT flags are forwarded to conductord. Authentication defaults to
+enhanced. --bootstrap initializes this operator's project and saves its login once.
+
+Usage:
+  conductor leader [--database local|external|rds] [--config FILE] [server flags]
+
+Example:
+  conductor leader --bootstrap --project myrepo
+  conductor leader --database rds --config leader.yaml
+
+See docs/LEADER.md for TLS, RDS, UPnP and Tailscale deployment examples.
+`},
 	{name: "up", group: "Get started", short: true, flags: true,
 		summary: "start Postgres (when none is reachable), the control plane, and log in",
 		topic: `conductor up — one command from nothing to a running, logged-in control plane

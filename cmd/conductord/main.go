@@ -38,6 +38,7 @@ import (
 	"github.com/aburan28/conductor/internal/db"
 	"github.com/aburan28/conductor/internal/domain"
 	"github.com/aburan28/conductor/internal/githubapp"
+	"github.com/aburan28/conductor/internal/nat"
 	"github.com/aburan28/conductor/internal/notify"
 	"github.com/aburan28/conductor/internal/peer"
 	"github.com/aburan28/conductor/internal/scheduler"
@@ -76,6 +77,8 @@ func main() {
 // serveConfig is everything serve reads from its flags and environment, validated.
 type serveConfig struct {
 	addr, dsn         string
+	databaseMode      string
+	nat               nat.Options
 	tick, detect      time.Duration
 	tickTimeout       time.Duration
 	outageAfter       time.Duration
@@ -153,6 +156,16 @@ func parseServeConfigMode(args []string, output io.Writer, checkOnly bool) (*ser
 			"its features, branding and policy sections lock those settings for every organization")
 	fs.StringVar(&c.addr, "addr", envOr("CONDUCTOR_ADDR", "127.0.0.1:8080"), "listen address")
 	fs.StringVar(&c.dsn, "dsn", envOr("DATABASE_URL", ""), "PostgreSQL connection string")
+	fs.StringVar(&c.databaseMode, "database", envOr("CONDUCTOR_DATABASE_MODE", "external"),
+		"database mode: local, external, or rds (RDS requires verified TLS and a CA bundle)")
+	fs.StringVar(&c.nat.Mode, "nat-mode", envOr("CONDUCTOR_NAT_MODE", "off"),
+		"API connectivity: off, upnp (router mapping), or tailscale (private HTTPS with traversal and relay)")
+	fs.StringVar(&c.nat.InternalIP, "nat-internal-ip", envOr("CONDUCTOR_NAT_INTERNAL_IP", ""),
+		"LAN IPv4 address to map with UPnP (default: route to the gateway)")
+	fs.IntVar(&c.nat.ExternalPort, "nat-external-port", 0, "UPnP external TCP port (default: API listen port)")
+	fs.DurationVar(&c.nat.Lease, "nat-lease", 30*time.Minute, "UPnP mapping lease, renewed while running")
+	fs.DurationVar(&c.nat.Timeout, "nat-timeout", 5*time.Second, "timeout for one NAT discovery or control operation")
+	fs.IntVar(&c.nat.HTTPSPort, "nat-https-port", 443, "Tailscale Serve HTTPS port (must be unused)")
 	fs.DurationVar(&c.tick, "tick", 2*time.Second, "scheduler tick interval")
 	fs.DurationVar(&c.detect, "detect-every", 15*time.Second, "conflict graph recomputation interval")
 	fs.DurationVar(&c.tickTimeout, "tick-timeout", 30*time.Second, "longest one scheduler pass may run before it is cancelled")
@@ -267,6 +280,16 @@ Flags:
 		}
 		c.warnings = append(c.warnings, "no database is configured (--dsn, DATABASE_URL, or database.url_env); the server would refuse to start")
 	}
+	switch c.databaseMode {
+	case "local", "external", "rds":
+	default:
+		return nil, fmt.Errorf("--database must be local, external or rds, not %q", c.databaseMode)
+	}
+	if c.dsn != "" && c.databaseMode == "rds" {
+		if err := db.ValidateDSN(c.databaseMode, c.dsn); err != nil {
+			return nil, err
+		}
+	}
 	c.secretKeyEnv = os.Getenv(secretbox.EnvKey)
 	if c.secretKeyFile == "" {
 		var err error
@@ -341,6 +364,21 @@ Binding 127.0.0.1 needs none of these.`, c.addr)
 	case "", db.SecurityLocal, db.SecurityEnhanced:
 	default:
 		return nil, fmt.Errorf("--security-mode must be local or enhanced, not %q", c.securityMode)
+	}
+	if c.nat.Mode != "" && c.nat.Mode != "off" && c.securityMode == "" {
+		// A loopback proxy request must not activate local-owner authentication.
+		// Force bearer authentication even if the database previously selected local mode.
+		c.securityMode = db.SecurityEnhanced
+	}
+	c.nat.Addr, c.nat.TLSEnabled, c.nat.SecurityMode = c.addr, c.tlsEnabled, c.securityMode
+	if err := c.nat.Validate(); err != nil {
+		return nil, fmt.Errorf("NAT configuration: %w", err)
+	}
+	if c.nat.Mode != "" && c.nat.Mode != "off" && c.publicURL != "" {
+		u, err := url.Parse(c.publicURL)
+		if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+			return nil, errors.New("NAT public URL must be an HTTPS origin without credentials, query, fragment or path")
+		}
 	}
 	if c.shutdownTimeout <= 0 {
 		return nil, errors.New("--shutdown-timeout must be positive")
@@ -455,13 +493,32 @@ func serve(args []string) error {
 	logger.Info("database ready")
 	api.RegisterPoolMetrics(store)
 
-	scheme := "http"
+	// Bind before publishing any route. A busy port or invalid certificate must not
+	// leave a router mapping or proxy pointing at an unrelated process.
 	if cfg.tlsEnabled {
-		scheme = "https"
+		if _, err := tls.LoadX509KeyPair(cfg.tlsCert, cfg.tlsKey); err != nil {
+			return fmt.Errorf("load listener certificate: %w", err)
+		}
 	}
-	selfEndpoint := cfg.publicURL
-	if selfEndpoint == "" {
-		selfEndpoint = scheme + "://" + displayHost(cfg.addr)
+	listener, err := net.Listen("tcp", cfg.addr)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+	connectivity, err := nat.Start(life, cfg.nat, logger)
+	if err != nil {
+		return fmt.Errorf("start NAT connectivity: %w", err)
+	}
+	defer connectivity.Close()
+	// Revoke public routes immediately on shutdown, before draining long requests.
+	goBackground("NAT cleanup", func(ctx context.Context) error {
+		<-ctx.Done()
+		return connectivity.Close()
+	})
+
+	selfEndpoint := cfg.clientEndpoint(connectivity.Status().Endpoint)
+	if err := api.ValidateSSOOptions(cfg.sso); err != nil {
+		return err
 	}
 
 	// Mesh identity and, when peers are configured, the link keeper that dials them.
@@ -643,12 +700,13 @@ func serve(args []string) error {
 	}
 	logger.Info("conductor listening",
 		"addr", cfg.addr, "tls", cfg.tlsEnabled, "behind_proxy", cfg.behindProxy,
+		"nat", cfg.nat.Mode,
 		"mesh", cfg.meshOn,
 		"dashboard", selfEndpoint+"/", "mcp", selfEndpoint+"/mcp")
 
-	listen := httpServer.ListenAndServe
+	listen := func() error { return httpServer.Serve(listener) }
 	if cfg.tlsEnabled {
-		listen = func() error { return httpServer.ListenAndServeTLS(cfg.tlsCert, cfg.tlsKey) }
+		listen = func() error { return httpServer.ServeTLS(listener, cfg.tlsCert, cfg.tlsKey) }
 	}
 	// Background work started by requests (webhook checks) is awaited with the rest.
 	background.Add(1)
@@ -658,6 +716,24 @@ func serve(args []string) error {
 		server.Wait()
 	}()
 	return runServer(life, endLife, httpServer, listen, &background, cfg.shutdownTimeout, logger)
+}
+
+// clientEndpoint keeps callbacks and the advertised API on the same route, including
+// when Tailscale discovers its DNS name after configuration has been parsed.
+func (c *serveConfig) clientEndpoint(discovered string) string {
+	endpoint := c.publicURL
+	if endpoint == "" {
+		endpoint = discovered
+	}
+	if endpoint == "" {
+		scheme := "http"
+		if c.tlsEnabled {
+			scheme = "https"
+		}
+		endpoint = scheme + "://" + displayHost(c.addr)
+	}
+	c.sso.PublicURL = endpoint
+	return endpoint
 }
 
 // runServer serves until ctx ends or the listener fails, then shuts down in order:

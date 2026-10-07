@@ -72,6 +72,10 @@ whatever is already up. In a clone of this repository, `make up` and `make down`
 `conductor doctor` checks everything at once: the control plane and its version, the
 database, `conductord`, git, Docker, and which coding tools are installed and connected.
 
+For a shared leader with local Postgres or Amazon RDS, and workers connecting through
+UPnP or Tailscale, see [leader deployment](docs/LEADER.md). `conductor leader` starts the
+leader here even when its advertised URL is remote; workers need only API credentials.
+
 ### Getting help
 
 ```bash

@@ -32,7 +32,9 @@ import (
 // flagEnv names the environment variable each flag falls back to, where it has one.
 var flagEnv = map[string]string{
 	"config": "CONDUCTOR_CONFIG", "addr": "CONDUCTOR_ADDR", "dsn": "DATABASE_URL",
-	"tls-cert": "CONDUCTOR_TLS_CERT", "tls-key": "CONDUCTOR_TLS_KEY", "public-url": "CONDUCTOR_PUBLIC_URL",
+	"database": "CONDUCTOR_DATABASE_MODE", "nat-mode": "CONDUCTOR_NAT_MODE",
+	"nat-internal-ip": "CONDUCTOR_NAT_INTERNAL_IP",
+	"tls-cert":        "CONDUCTOR_TLS_CERT", "tls-key": "CONDUCTOR_TLS_KEY", "public-url": "CONDUCTOR_PUBLIC_URL",
 	"peer-ca": "CONDUCTOR_PEER_CA", "peer-cert": "CONDUCTOR_PEER_CERT", "peer-key": "CONDUCTOR_PEER_KEY",
 	"peer-discover-dns": "CONDUCTOR_PEER_DISCOVER_DNS", "peer-dns-server": "CONDUCTOR_PEER_DNS_SERVER",
 	"security-mode": "CONDUCTOR_SECURITY_MODE", "github-api": "CONDUCTOR_GITHUB_API", "github-web": "CONDUCTOR_GITHUB_WEB",
