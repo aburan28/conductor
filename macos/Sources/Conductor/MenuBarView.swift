@@ -23,6 +23,11 @@ struct MenuBarView: View {
             } else {
                 sections
             }
+            if let problem = model.databaseProblem {
+                Label(problem, systemImage: "externaldrive.badge.exclamationmark")
+                    .font(.callout).foregroundStyle(.orange).lineLimit(3)
+                    .help("Database archiving to the storage bucket (Settings → Storage)")
+            }
             Divider()
             actions
         }

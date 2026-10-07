@@ -10,10 +10,12 @@ struct SettingsView: View {
         TabView {
             GeneralSettings()
                 .tabItem { Label("General", systemImage: "gearshape") }
+            StorageSettingsView()
+                .tabItem { Label("Storage", systemImage: "externaldrive.connected.to.line.below") }
             UpdatesSettings(updates: updates)
                 .tabItem { Label("Updates", systemImage: "arrow.down.circle") }
         }
-        .frame(width: 620, height: 560)
+        .frame(width: 640, height: 640)
     }
 }
 

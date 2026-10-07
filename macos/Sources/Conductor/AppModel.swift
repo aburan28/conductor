@@ -39,6 +39,8 @@ final class AppModel: ObservableObject {
     @Published var offers: [Assignment] = []
     @Published var pullRequests: [PullRequestChecks.Row] = []
     @Published var dot: StatusDot = .down
+    /// Archiving to the bucket is failing, from `conductor db status --json --local`.
+    @Published var databaseProblem: String?
     @Published var storage: StorageShow?
     /// Base backups found in the bucket on a first run: the onboarding offers a restore.
     @Published var restoreOffer: BaseBackupList?
@@ -175,6 +177,23 @@ final class AppModel: ObservableObject {
         await startServices(restore: false)
     }
 
+    /// Saved storage settings reach the running system: archiving written (or taken out)
+    /// before Postgres restarts, which happens only when what it reads changed, and the
+    /// base-backup agent installed or removed.
+    func applyStorage(_ show: StorageShow) async {
+        storage = show
+        guard let supervisor, !settings.isAttached, supervisor.config.postgres != nil else { return }
+        do {
+            try await supervisor.ensureRunning(storage: show) { [weak self] p in
+                Task { @MainActor in self?.phase = p }
+            }
+            phase = .running
+        } catch {
+            problem = String(describing: error)
+        }
+        await connect()
+    }
+
     func stopServices() async {
         stopStreaming()
         await supervisor?.stop()
@@ -260,7 +279,7 @@ final class AppModel: ObservableObject {
 
     func refresh() async {
         guard let project, signedIn else {
-            dot = StatusDot.compute(daemonUp: daemonUp, status: nil, offers: [])
+            dot = StatusDot.compute(daemonUp: daemonUp, status: nil, offers: [], databaseFailing: databaseProblem != nil)
             return
         }
         do {
@@ -282,7 +301,7 @@ final class AppModel: ObservableObject {
         } catch {
             daemonUp = await api.isHealthy()
         }
-        dot = StatusDot.compute(daemonUp: daemonUp, status: status, offers: offers)
+        dot = StatusDot.compute(daemonUp: daemonUp, status: status, offers: offers, databaseFailing: databaseProblem != nil)
     }
 
     /// Collapses a burst of events into one refresh.
@@ -341,7 +360,7 @@ final class AppModel: ObservableObject {
         case .waiting:
             Task {
                 daemonUp = await api.isHealthy()
-                dot = StatusDot.compute(daemonUp: daemonUp, status: status, offers: offers)
+                dot = StatusDot.compute(daemonUp: daemonUp, status: status, offers: offers, databaseFailing: databaseProblem != nil)
             }
         default:
             break
@@ -384,6 +403,20 @@ final class AppModel: ObservableObject {
             await refresh()
         }
         if ticks % 2 == 0 { await loadCheckpoints() }
+        await checkDatabase()
+    }
+
+    /// When the database goes to the bucket: `conductor db status --json --local`, which
+    /// reads only what this Mac recorded and needs no network, so it is cheap to poll.
+    private func checkDatabase() async {
+        guard storage?.databaseToBucket == true, !settings.isAttached,
+              let r = try? await runConductor(ConductorCommands.dbStatusLocal),
+              let status = DatabaseStatus.decode(r.stdout) else {
+            databaseProblem = nil
+            return
+        }
+        databaseProblem = status.problem
+        dot = StatusDot.compute(daemonUp: daemonUp, status: self.status, offers: offers, databaseFailing: databaseProblem != nil)
     }
 
     // MARK: - checkpoints

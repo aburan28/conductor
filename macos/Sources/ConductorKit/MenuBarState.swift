@@ -7,10 +7,14 @@ public enum StatusDot: String, Equatable, Sendable {
     case attention
     case down
 
-    public static func compute(daemonUp: Bool, status: StatusSummary?, offers: [Assignment]) -> StatusDot {
+    /// `databaseFailing`: `conductor db status --json --local` reports archiving to the
+    /// bucket failing, which needs the person as much as a conflict does.
+    public static func compute(daemonUp: Bool, status: StatusSummary?, offers: [Assignment],
+                               databaseFailing: Bool = false) -> StatusDot {
         guard daemonUp else { return .down }
         if !(status?.openConflicts.isEmpty ?? true) { return .attention }
         if offers.contains(where: \.isOffered) { return .attention }
+        if databaseFailing { return .attention }
         return .clear
     }
 

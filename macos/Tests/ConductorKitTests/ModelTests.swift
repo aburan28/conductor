@@ -70,6 +70,8 @@ final class ModelTests: XCTestCase {
         let offer = try JSONDecoder().decode(Assignment.self, from: Data(#"{"id":"a1","task_id":"t9","task_ref":"T-9","project_id":"p","session_id":"s1","requirement":{},"state":"offered","created_at":"2026-10-07T10:00:00Z","expires_at":"2026-10-07T10:15:00Z"}"#.utf8))
         XCTAssertEqual(StatusDot.compute(daemonUp: true, status: calm, offers: [offer]), .attention)
         XCTAssertEqual(StatusDot.compute(daemonUp: true, status: nil, offers: []), .clear)
+        XCTAssertEqual(StatusDot.compute(daemonUp: true, status: calm, offers: [], databaseFailing: true), .attention)
+        XCTAssertEqual(StatusDot.compute(daemonUp: false, status: calm, offers: [], databaseFailing: true), .down)
     }
 
     func testEventReactions() {
