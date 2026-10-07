@@ -241,12 +241,29 @@ func TestParseOpenCode(t *testing.T) {
 	}
 }
 
+// withoutRepoEnv drops the variables that point git at a repository (GIT_DIR and friends).
+// A git hook sets them, so a test run from one would otherwise commit into the repository
+// being pushed rather than its own temporary one.
+func withoutRepoEnv(env []string) []string {
+	var out []string
+	for _, kv := range env {
+		k, _, _ := strings.Cut(kv, "=")
+		switch k {
+		case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+			"GIT_COMMON_DIR", "GIT_PREFIX", "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM":
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
 // git runs git in a test repository, failing the test on error.
 func gitT(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+	cmd.Env = append(withoutRepoEnv(os.Environ()), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, out)

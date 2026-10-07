@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -19,6 +20,13 @@ func TestObservedPathsListsTheWorkingTreeDiff(t *testing.T) {
 	git := func(args ...string) {
 		t.Helper()
 		cmd := exec.Command("git", append([]string{"-C", dir, "-c", "user.email=t@example.com", "-c", "user.name=t"}, args...)...)
+		// A git hook (the pre-push check) sets GIT_DIR and friends; inherited, they would
+		// point this git at the repository being pushed instead of dir.
+		for _, kv := range os.Environ() {
+			if k, _, _ := strings.Cut(kv, "="); !strings.HasPrefix(k, "GIT_") || k == "GIT_CONFIG_NOSYSTEM" {
+				cmd.Env = append(cmd.Env, kv)
+			}
+		}
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
 		}
