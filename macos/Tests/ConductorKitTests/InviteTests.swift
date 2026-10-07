@@ -88,5 +88,10 @@ final class InviteTests: XCTestCase {
         let local = InviteReachability.decide(publicURL: nil, tailscaleName: nil, tailscaleServing: false)
         XCTAssertEqual(local, .localOnly)
         XCTAssertNil(local.endpoint)
+        XCTAssertFalse(local.offersTailscale)
+        XCTAssertTrue(InviteReachability.tailscaleAvailable(name: "m").offersTailscale)
+        XCTAssertFalse(serving.offersTailscale)
+        XCTAssertTrue(SupervisorPhase.failed("x").isFailed)
+        XCTAssertFalse(SupervisorPhase.running.isFailed)
     }
 }

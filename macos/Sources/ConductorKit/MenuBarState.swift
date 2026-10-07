@@ -33,7 +33,7 @@ public enum EventReaction: Equatable, Sendable {
     case ignore
 
     /// Event types that change what the popover shows.
-    static let refreshPrefixes = ["task.", "conflict.", "scope.", "lease.", "session.", "presence.", "attempt.stalled"]
+    static let refreshPrefixes = ["task.", "conflict.", "scope.", "lease.", "session.", "presence.", "attempt.stalled", "github."]
 
     public static func classify(_ e: DomainEvent) -> EventReaction {
         if e.type == "quota.exhausted" {

@@ -50,6 +50,11 @@ public enum SupervisorPhase: Equatable, Sendable {
     case stopped
     case failed(String)
 
+    public var isFailed: Bool {
+        if case .failed = self { return true }
+        return false
+    }
+
     public var label: String {
         switch self {
         case .idle: return "Not started"
@@ -146,7 +151,7 @@ public struct SupervisorProbes: Sendable {
 /// restarts only what changed, and starts only what is not running, so opening the app over
 /// agents launchd already started at login disturbs nothing.
 public actor Supervisor {
-    public let config: SupervisorConfig
+    public nonisolated let config: SupervisorConfig
     private let runner: CommandRunning
     private let launchctl: Launchctl
     private let probes: SupervisorProbes

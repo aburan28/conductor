@@ -71,6 +71,12 @@ public enum InviteReachability: Equatable, Sendable {
         return .localOnly
     }
 
+    /// Tailscale is running and the person can choose to share over it.
+    public var offersTailscale: Bool {
+        if case .tailscaleAvailable = self { return true }
+        return false
+    }
+
     /// The endpoint to put in the link, when there is one someone else can use.
     public var endpoint: String? {
         switch self {

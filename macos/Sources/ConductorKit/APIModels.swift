@@ -134,6 +134,15 @@ public struct TaskSummary: Codable, Equatable, Identifiable, Sendable {
     public var status: String?
     public var owner: String?
     public var title: String?
+    public var branch: String?
+    public var pullRequestURL: String?
+    public var pullRequestState: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, ref, status, owner, title, branch
+        case pullRequestURL = "pull_request_url"
+        case pullRequestState = "pull_request_state"
+    }
 }
 
 /// `GET /v1/projects/{p}/status`: `coord.StatusSummary`.
