@@ -1,0 +1,20 @@
+#!/bin/sh
+# Runs as root once Conductor.app is in /Applications. Links the commands inside it into
+# /usr/local/bin, so `conductor` in a terminal and the coding tools' MCP configurations
+# (which run conductor-mcp beside conductor) use the same binaries the app runs, and an
+# update of the app updates them too.
+#
+# Links, not a payload in usr/local/bin: Installer applies the owner and mode recorded in a
+# package to every directory the payload names, including existing ones, so a payload with
+# usr/local/bin in it would reset that directory (which belongs to the user on an Intel Mac
+# with Homebrew). `mkdir -p` and `ln` change nothing about a directory that exists.
+set -eu
+TARGET="${3:-/}"
+[ "$TARGET" = "/" ] && TARGET=""
+BIN_DIR="$TARGET/usr/local/bin"
+mkdir -p "$BIN_DIR"
+for cmd in conductor conductord conductor-mcp; do
+    # Where the binary is once this volume is booted, not where it sits while installing.
+    ln -sfn "/Applications/Conductor.app/Contents/Resources/bin/$cmd" "$BIN_DIR/$cmd"
+done
+exit 0

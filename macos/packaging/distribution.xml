@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The installer's script. build-pkg.sh fills in each placeholder (a name between two
+  at-signs) and hands the result to productbuild.
+
+  One package: Conductor.app, installed to /Applications, whose postinstall links the
+  conductor commands inside it into /usr/local/bin, so the CLI and the coding tools' MCP
+  configurations run the very binaries the app runs.
+
+  hostArchitectures says the package holds native code for both: without it Installer
+  assumes Intel and offers Rosetta on Apple silicon.
+-->
+<installer-gui-script minSpecVersion="2">
+    <title>Conductor @VERSION@</title>
+    <welcome file="welcome.html" mime-type="text/html"/>
+    <license file="LICENSE.txt" mime-type="text/plain"/>
+    <options customize="never" require-scripts="false" hostArchitectures="@HOST_ARCHS@"/>
+    <!-- Conductor.app sets LSMinimumSystemVersion 13.0. -->
+    <allowed-os-versions>
+        <os-version min="13.0"/>
+    </allowed-os-versions>
+    <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+    <choices-outline>
+        <line choice="default"/>
+    </choices-outline>
+    <choice id="default" title="Conductor">
+        <pkg-ref id="@IDENTIFIER@"/>
+    </choice>
+    <pkg-ref id="@IDENTIFIER@" version="@VERSION@" onConclusion="none">conductor-app.pkg</pkg-ref>
+</installer-gui-script>
