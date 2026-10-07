@@ -107,6 +107,23 @@ BOB_EXIT=$?
 set -e
 [[ $BOB_EXIT -eq 3 ]] || fail "expected exit 3 (blocked), got $BOB_EXIT"
 
+step "3b. Bob's Codex patch into Alice's files is stopped before it applies"
+# Codex edits through apply_patch, whose file paths live only in the patch text. One held
+# file blocks the whole patch (exit 2, holder on stderr); a patch touching only free files
+# goes through.
+codex_patch() {
+  printf '{"session_id":"codex-1","turn_id":"t1","cwd":"%s","hook_event_name":"PreToolUse","tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\\n*** Update File: README.md\\n+x\\n*** Update File: %s\\n+y\\n*** End Patch\\n"}}' "$WORK/repo" "$1"
+}
+set +e
+codex_patch internal/router/router.go | bob hook pre-tool --harness codex 2>"$WORK/codex-hook.err"
+HOOK_EXIT=$?
+set -e
+[[ $HOOK_EXIT -eq 2 ]] || fail "expected the Codex patch to be blocked (exit 2), got $HOOK_EXIT"
+grep -q "alice" "$WORK/codex-hook.err" || fail "block message does not name the holder: $(cat "$WORK/codex-hook.err")"
+codex_patch internal/api/api.go | bob hook pre-tool --harness codex >/dev/null 2>&1 \
+  || fail "a Codex patch touching only free files was blocked"
+note "held file in a patch blocks it and names alice; a patch on free files goes through"
+
 step "4. Alice files sensitive work as private"
 alice task create --title "Rotate the leaked production key" \
   --objective "Credentials were exposed" --visibility private --scope dir:internal/api

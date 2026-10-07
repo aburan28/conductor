@@ -248,6 +248,25 @@ var codexTool = Tool{
 			content = setTOMLTable(existing, codexTable, body)
 		}
 		r.Ops = append(r.Ops, planWrite(path, []byte(content), 0o644, "MCP server (Codex has one config, user-level)"))
+
+		// Hooks: the enforcement half, in the repository's .codex/hooks.json unless --global,
+		// so the file is committed and every clone checks before it edits.
+		if o.Hooks {
+			hooksPath := filepath.Join(o.Root, ".codex", "hooks.json")
+			if o.Global {
+				hooksPath = filepath.Join(codexHome(o), "hooks.json")
+			}
+			op, err := planJSON(hooksPath, func(m map[string]any) { mergeCodexHooks(m, o.Remove) },
+				"PreToolUse (apply_patch) / SessionStart / SessionEnd hooks")
+			if err != nil {
+				return r, err
+			}
+			r.Ops = append(r.Ops, op)
+			if !o.Global && !o.Remove {
+				r.Warnings = append(r.Warnings, "Codex runs a project's .codex/hooks.json only once the project is trusted: "+
+					"accept the trust prompt when Codex opens this repository")
+			}
+		}
 		if o.transport() == TransportHTTP && !o.Remove {
 			r.Warnings = append(r.Warnings, "export CONDUCTOR_TOKEN before launching Codex; bearer_token_env_var names it")
 		}
@@ -255,7 +274,13 @@ var codexTool = Tool{
 		return r, nil
 	},
 	Status: func(o Options) Status {
-		st := Status{Tool: "codex", Title: "Codex", Fix: "conductor integrate codex"}
+		st := Status{Tool: "codex", Title: "Codex", HooksSupported: true, Fix: "conductor integrate codex"}
+		for _, p := range []string{filepath.Join(o.Root, ".codex", "hooks.json"), filepath.Join(codexHome(o), "hooks.json")} {
+			if m, err := readJSONObject(p); err == nil && codexHooksInstalled(m) {
+				st.Hooks = true
+				break
+			}
+		}
 		st.Detected, _ = detectCodex(o)
 		path := filepath.Join(codexHome(o), "config.toml")
 		if content := readTextFile(path); hasTOMLTable(content, codexTable) {
