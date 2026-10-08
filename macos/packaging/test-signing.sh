@@ -81,6 +81,43 @@ SNIPPET="v=\$(printf '%s' '$INVALID' | json_field id); [ \"\$v\" = 6a5b0d6c-1a1e
 expect "notarytool: a failing plutil adds nothing" 0 "exact" PATH="$FAKE:$PATH"
 rm -rf "$FAKE"
 
+# Each of these must refuse, and say why, before doing anything else. They run here without a
+# Mac: the checks come before the Darwin-only ones.
+refuses() {
+    local name="$1" want="$2" got status
+    shift 2
+    got="$(env -i PATH="$PATH" "$@" 2>&1)"
+    status=$?
+    if [ "$status" -ne 0 ] && printf '%s' "$got" | grep -qF -- "$want"; then
+        echo "ok   $name"
+    else
+        echo "FAIL $name: status $status, output: $got"
+        FAILED=1
+    fi
+}
+
+SCRATCH="$(mktemp -d)"
+mkdir -p "$SCRATCH/Conductor.app/Contents/MacOS"
+printf '#!/bin/sh\n' > "$SCRATCH/Conductor.app/Contents/MacOS/Conductor"
+chmod +x "$SCRATCH/Conductor.app/Contents/MacOS/Conductor"
+refuses "build-dmg: an app that bundles no PostgreSQL is refused" "bundles no PostgreSQL" \
+    "$HERE/build-dmg.sh" --app "$SCRATCH/Conductor.app" --version 1.0.0
+refuses "build-pkg: an app that bundles no PostgreSQL is refused" "bundles no PostgreSQL" \
+    "$HERE/build-pkg.sh" --app "$SCRATCH/Conductor.app" --version 1.0.0
+
+FOREIGN="$SCRATCH/documents"
+mkdir -p "$FOREIGN" && : > "$FOREIGN/keep.txt"
+refuses "fetch-postgres: a directory it did not make is refused before the download" "refusing to replace" \
+    "$HERE/../fetch-postgres.sh" --out "$FOREIGN"
+if [ -f "$FOREIGN/keep.txt" ]; then echo "ok   fetch-postgres: the refused directory is left as it was"
+else echo "FAIL fetch-postgres deleted a directory it did not make"; FAILED=1; fi
+
+NOTE_FILE="$SCRATCH/Conductor.dmg"
+: > "$NOTE_FILE"
+refuses "notarize: no credentials is an error, not a skip" "no notary credentials" \
+    "$HERE/notarize.sh" "$NOTE_FILE"
+rm -rf "$SCRATCH"
+
 for f in "$HERE"/*.sh "$HERE"/../build.sh "$HERE"/../fetch-postgres.sh; do
     if bash -n "$f"; then echo "ok   bash -n $(basename "$f")"; else echo "FAIL bash -n $f"; FAILED=1; fi
 done

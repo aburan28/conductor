@@ -29,6 +29,8 @@ while [ $# -gt 0 ]; do
     esac
 done
 [ -n "$APP" ] && [ -x "$APP/Contents/MacOS/Conductor" ] || signing_die "--app must name a built Conductor.app (macos/build.sh)"
+# The image says the app runs a private PostgreSQL, so an app built with --no-postgres is refused.
+[ -x "$APP/Contents/Resources/postgres/bin/postgres" ] || signing_die "--app bundles no PostgreSQL; build it with macos/build.sh and without --no-postgres"
 [ -n "$VERSION" ] || signing_die "--version is required"
 [ "$(uname -s)" = "Darwin" ] || signing_die "hdiutil, pkgbuild and codesign exist only on macOS"
 

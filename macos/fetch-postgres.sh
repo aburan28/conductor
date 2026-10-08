@@ -40,6 +40,12 @@ if [ -x "$OUT/bin/postgres" ] && [ "$(cat "$OUT/VERSION" 2>/dev/null | head -1)"
     exit 0
 fi
 
+# OUT is replaced below, so it must be empty or one this script made (it carries the VERSION
+# marker). Anything else, such as ~/Documents, is refused here, before the 437 MB download.
+if [ -e "$OUT" ] && [ -n "$(ls -A "$OUT" 2>/dev/null)" ] && [ ! -f "$OUT/VERSION" ]; then
+    die "refusing to replace $OUT: it is not empty and was not made by this script (no VERSION marker). Give an empty or new --out."
+fi
+
 sha256() {
     if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1; else sha256sum "$1" | cut -d' ' -f1; fi
 }
@@ -83,19 +89,23 @@ done | LC_ALL=C sort -k1,1 -k2,2nr | {
 }
 
 chmod -R u+w "$WORK/unpacked/pgsql"
-rm -rf "$OUT"
-mkdir -p "$(dirname "$OUT")"
-mv "$WORK/unpacked/pgsql" "$OUT"
-printf '%s %s\n%s\n' "$PG_VERSION" "$PG_SHA256" "$PG_URL" >"$OUT/VERSION"
+STAGED="$WORK/unpacked/pgsql"
 
+# The checks run on the staged tree, before OUT is touched. A check that fails leaves OUT as
+# it was, and no VERSION marker that would make the next run skip the checks.
 if [ "$(uname -s)" = "Darwin" ]; then
-    ARCHS="$(lipo -archs "$OUT/bin/postgres")"
+    ARCHS="$(lipo -archs "$STAGED/bin/postgres")"
     case " $ARCHS " in
         *" arm64 "*" x86_64 "*|*" x86_64 "*" arm64 "*) ;;
         *) die "bin/postgres holds only '$ARCHS'; the app needs arm64 and x86_64" ;;
     esac
-    "$OUT/bin/postgres" --version
+    "$STAGED/bin/postgres" --version
 else
     echo "fetch-postgres: not on macOS, so the architectures and postgres --version are not checked"
 fi
+
+rm -rf "$OUT"
+mkdir -p "$(dirname "$OUT")"
+mv "$STAGED" "$OUT"
+printf '%s %s\n%s\n' "$PG_VERSION" "$PG_SHA256" "$PG_URL" >"$OUT/VERSION"
 echo "fetch-postgres: PostgreSQL $PG_VERSION in $OUT ($(du -sh "$OUT" | cut -f1))"

@@ -6,8 +6,8 @@
 # Credentials, one of (see signing.sh):
 #   NOTARY_PROFILE                              a profile saved by `xcrun notarytool store-credentials`
 #   NOTARY_KEY + NOTARY_KEY_ID + NOTARY_ISSUER  an App Store Connect API key
-# With none set, notarization is skipped and the script says so. A partial API key, or a
-# profile and a key at once, is refused.
+# With none set, the script refuses: a file that was not notarized must not be published as if
+# it were. A partial API key, or a profile and a key at once, is refused too.
 #
 # `notarytool submit --wait` exits 0 once Apple has answered, whatever the answer was. The
 # status in its JSON is read here, so a rejected file stops the release with Apple's log
@@ -21,10 +21,7 @@ FILE="${1:-}"
 [ -n "$FILE" ] && [ -e "$FILE" ] || signing_die "usage: $0 FILE (a .pkg, .dmg or .zip)"
 
 MODE="$(notary_mode)" || exit 1
-if [ "$MODE" = none ]; then
-    echo "notarize: skipped for $FILE: set NOTARY_PROFILE, or NOTARY_KEY, NOTARY_KEY_ID and NOTARY_ISSUER"
-    exit 0
-fi
+[ "$MODE" != none ] || signing_die "no notary credentials for $FILE: set NOTARY_PROFILE, or NOTARY_KEY, NOTARY_KEY_ID and NOTARY_ISSUER"
 [ "$(uname -s)" = "Darwin" ] || signing_die "notarytool exists only on macOS"
 
 ARGS=()

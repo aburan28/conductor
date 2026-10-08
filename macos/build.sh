@@ -122,7 +122,10 @@ done
 
 if [ "$NO_POSTGRES" -eq 0 ]; then
     [ -n "$PG_DIR" ] || PG_DIR="$OUT/postgres"
-    [ -x "$PG_DIR/bin/postgres" ] || "$HERE/fetch-postgres.sh" --out "$PG_DIR"
+    # fetch-postgres.sh returns at once when DIR holds the pinned build, and otherwise fills an
+    # empty DIR or replaces one it made. So only what it keeps is bundled: a directory such as
+    # an installed PostgreSQL, with its data and tools, is refused there, not copied.
+    "$HERE/fetch-postgres.sh" --out "$PG_DIR"
     ditto "$PG_DIR" "$APP/Contents/Resources/postgres"
 else
     echo "build: no PostgreSQL bundled (--no-postgres); the app will ask for a database to attach to"
