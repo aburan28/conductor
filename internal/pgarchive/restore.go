@@ -51,17 +51,9 @@ func (a *Archiver) Restore(ctx context.Context, opts RestoreOptions) (Manifest, 
 	if len(backups) == 0 {
 		return Manifest{}, fmt.Errorf("cluster %s has no base backup in the bucket", a.systemID)
 	}
-	m := backups[len(backups)-1]
-	if opts.Backup != "" && opts.Backup != "latest" {
-		found := false
-		for _, b := range backups {
-			if b.ID == opts.Backup {
-				m, found = b, true
-			}
-		}
-		if !found {
-			return Manifest{}, fmt.Errorf("no base backup %q (have %s)", opts.Backup, idsOf(backups))
-		}
+	m, err := chooseBackup(backups, opts.Backup)
+	if err != nil {
+		return Manifest{}, err
 	}
 	if opts.TargetTime != "" {
 		t, _ := time.Parse(time.RFC3339, opts.TargetTime)

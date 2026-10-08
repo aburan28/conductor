@@ -269,8 +269,55 @@ func (a *Archiver) Backups(ctx context.Context) ([]Manifest, error) {
 		}
 		out = append(out, m)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	sort.Slice(out, func(i, j int) bool { return lessBackup(out[i], out[j]) })
 	return out, nil
+}
+
+// lessBackup orders base backups oldest first by timeline, then by start LSN. The ID is a
+// wall-clock stamp and the clock can step backwards, so it breaks only exact ties; the log
+// position says which backup is older. Timeline comes first because LSNs on different
+// timelines are not comparable: a backup on a newer timeline is the live lineage.
+func lessBackup(a, b Manifest) bool {
+	if a.Timeline != b.Timeline {
+		return a.Timeline < b.Timeline
+	}
+	la, _ := lsnValue(a.StartLSN)
+	lb, _ := lsnValue(b.StartLSN)
+	if la != lb {
+		return la < lb
+	}
+	return a.ID < b.ID
+}
+
+// lsnValue is a log sequence number ("X/Y", hex) as an integer. ok is false when it does not parse.
+func lsnValue(lsn string) (uint64, bool) {
+	hi, lo, found := strings.Cut(lsn, "/")
+	if !found {
+		return 0, false
+	}
+	h, err1 := strconv.ParseUint(hi, 16, 32)
+	l, err2 := strconv.ParseUint(lo, 16, 32)
+	if err1 != nil || err2 != nil {
+		return 0, false
+	}
+	return h<<32 | l, true
+}
+
+// chooseBackup picks the base backup to restore from backups (oldest first, as Backups returns
+// them): the newest when id is "" or "latest", else the one with that ID.
+func chooseBackup(backups []Manifest, id string) (Manifest, error) {
+	if len(backups) == 0 {
+		return Manifest{}, errors.New("no base backup")
+	}
+	if id == "" || id == "latest" {
+		return backups[len(backups)-1], nil
+	}
+	for _, b := range backups {
+		if b.ID == id {
+			return b, nil
+		}
+	}
+	return Manifest{}, fmt.Errorf("no base backup %q (have %s)", id, idsOf(backups))
 }
 
 // WALSummary describes the archived WAL.
@@ -331,6 +378,17 @@ func (a *Archiver) Prune(ctx context.Context, keep int) (PruneResult, error) {
 	cut := 0
 	if len(backups) > keep {
 		cut = len(backups) - keep
+	}
+	if newest := backups[len(backups)-1]; cut > 0 {
+		// The older backups may be the only usable base. Keep them while the newest has no
+		// archive: a manifest without its base.tar is not a backup to prune down to.
+		ok, err := a.s3.Exists(ctx, a.baseTarKey(newest.ID, newest.Sealed))
+		if err != nil {
+			return res, err
+		}
+		if !ok {
+			return res, fmt.Errorf("refusing to prune: base backup %s has no archive in the bucket", newest.ID)
+		}
 	}
 	for _, m := range backups[cut:] {
 		res.Kept = append(res.Kept, m.ID)
