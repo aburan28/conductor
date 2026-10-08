@@ -379,7 +379,8 @@ func parseJoinLink(s string) (client.Credentials, error) {
 	var creds client.Credentials
 	u, err := url.Parse(s)
 	if err != nil {
-		return creds, fmt.Errorf("not a valid link: %w", err)
+		// url.Parse's error quotes the whole input, token included, so it is not wrapped here.
+		return creds, errors.New("not a valid invite link")
 	}
 	if u.Scheme != "" && u.Host != "" {
 		creds.Endpoint = u.Scheme + "://" + u.Host

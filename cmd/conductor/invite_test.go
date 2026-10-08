@@ -209,3 +209,21 @@ func TestParseTailscaleStatus(t *testing.T) {
 		t.Error("listenPort")
 	}
 }
+
+// A malformed link can still carry a live token. url.Parse's error quotes the whole input,
+// token included, so parseJoinLink's error must not echo any of it.
+func TestParseJoinLinkErrorDoesNotEchoTheToken(t *testing.T) {
+	bad := "https://c.team/#token=cdt_SECRETVALUE%zz&project=p"
+	_, err := parseJoinLink(bad)
+	if err == nil {
+		t.Fatal("expected an error for a malformed link")
+	}
+	for _, leak := range []string{"cdt_", "SECRETVALUE", "c.team", "%zz"} {
+		if strings.Contains(err.Error(), leak) {
+			t.Fatalf("error echoes the input (%q): %v", leak, err)
+		}
+	}
+	if err.Error() != "not a valid invite link" {
+		t.Errorf("error = %q; want the fixed message", err.Error())
+	}
+}
