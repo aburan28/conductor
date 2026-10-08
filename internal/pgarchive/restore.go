@@ -98,11 +98,11 @@ func (a *Archiver) Restore(ctx context.Context, opts RestoreOptions) (Manifest, 
 	}
 
 	conf := fmt.Sprintf("\n# Added by `conductor db restore` from base backup %s (%s).\n", m.ID, time.Now().UTC().Format(time.RFC3339))
-	conf += "restore_command = " + pgQuote(opts.RestoreCommand) + "\n"
+	conf += "restore_command = " + ConfQuote(opts.RestoreCommand) + "\n"
 	if opts.TargetTime != "" {
 		// Postgres's recovery_target_time rejects ISO 8601's "T…Z" form; give it its own.
 		t, _ := time.Parse(time.RFC3339, opts.TargetTime)
-		conf += "recovery_target_time = " + pgQuote(t.UTC().Format("2006-01-02 15:04:05.999999")+"+00") + "\n"
+		conf += "recovery_target_time = " + ConfQuote(t.UTC().Format("2006-01-02 15:04:05.999999")+"+00") + "\n"
 		conf += "recovery_target_action = 'promote'\n"
 	}
 	f, err := os.OpenFile(filepath.Join(opts.DataDir, "postgresql.auto.conf"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
@@ -130,8 +130,12 @@ func idsOf(ms []Manifest) string {
 	return strings.Join(ids, ", ")
 }
 
-// pgQuote quotes a value for postgresql.conf.
-func pgQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+// ConfQuote quotes s as a postgresql.conf string value. In that syntax a backslash escapes the
+// character after it, so backslashes are doubled as well as quotes. Without that, a value
+// holding a backslash before a quote, as a shell-quoted path can, reads back wrong or not at all.
+func ConfQuote(s string) string {
+	return "'" + strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), "'", "''") + "'"
+}
 
 func emptyDir(dir string) error {
 	if dir == "" {

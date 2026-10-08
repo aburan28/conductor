@@ -204,15 +204,13 @@ func dbArchiving(args []string) error {
 		return emit(map[string]any{"archiving": d.archive, "settings": m, "written": *write})
 	}
 	for _, kv := range settings {
-		fmt.Printf("%s = %s\n", kv[0], pgConfQuote(kv[1]))
+		fmt.Printf("%s = %s\n", kv[0], pgarchive.ConfQuote(kv[1]))
 	}
 	if *write {
 		fmt.Fprintf(os.Stderr, "Wrote %s. Restart Postgres if archive_mode changed.\n", filepath.Join(*dataDir, "postgresql.auto.conf"))
 	}
 	return nil
 }
-
-func pgConfQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
 
 // writeAutoConf replaces the managed keys in postgresql.auto.conf (which Postgres itself
 // rewrites with ALTER SYSTEM, one `key = 'value'` per line) and appends them under a marker.
@@ -241,7 +239,7 @@ func writeAutoConf(path string, settings [][2]string) error {
 	}
 	keep = append(keep, autoConfMarker)
 	for _, kv := range settings {
-		keep = append(keep, kv[0]+" = "+pgConfQuote(kv[1]))
+		keep = append(keep, kv[0]+" = "+pgarchive.ConfQuote(kv[1]))
 	}
 	return os.WriteFile(path, []byte(strings.Join(keep, "\n")+"\n"), 0o600)
 }
