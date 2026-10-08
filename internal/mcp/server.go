@@ -257,7 +257,11 @@ func (s *Server) handle(ctx context.Context, req rpcRequest) *rpcResponse {
 		return nil // acknowledged by producing no response
 
 	case "tools/list":
-		return result(req, map[string]any{"tools": toolDefinitions()})
+		tools := toolDefinitions()
+		if s.local {
+			tools = append(tools, memoryToolDefinitions()...)
+		}
+		return result(req, map[string]any{"tools": tools})
 
 	case "tools/call":
 		var params struct {

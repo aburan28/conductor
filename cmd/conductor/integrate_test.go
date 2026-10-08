@@ -61,6 +61,8 @@ func TestWrapMCPArgsClaude(t *testing.T) {
 
 func TestWrapMCPArgsCodexAndMissingBinary(t *testing.T) {
 	t.Chdir(t.TempDir())
+	// The wrapper must be tested without this developer machine's Codex MCP config.
+	t.Setenv("CODEX_HOME", t.TempDir())
 	restore := lookPath
 	defer func() { lookPath = restore }()
 

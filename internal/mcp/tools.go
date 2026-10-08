@@ -236,6 +236,12 @@ func toolDefinitions() []map[string]any {
 }
 
 func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage) (any, error) {
+	if name == "memory_search" || name == "memory_timeline" || name == "memory_get" || name == "memory_remember" {
+		if !s.local {
+			return nil, errors.New("private memory tools require the local stdio gateway")
+		}
+		return s.callMemory(ctx, name, raw)
+	}
 	if s.project == "" {
 		return nil, errors.New("no project configured: set CONDUCTOR_PROJECT or pass --project")
 	}

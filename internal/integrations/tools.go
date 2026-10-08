@@ -257,7 +257,7 @@ var codexTool = Tool{
 				hooksPath = filepath.Join(codexHome(o), "hooks.json")
 			}
 			op, err := planJSON(hooksPath, func(m map[string]any) { mergeCodexHooks(m, o.Remove) },
-				"PreToolUse (apply_patch) / SessionStart / SessionEnd hooks")
+				"PreToolUse coordination, checkpoints, and private memory hooks")
 			if err != nil {
 				return r, err
 			}
@@ -270,7 +270,7 @@ var codexTool = Tool{
 		if o.transport() == TransportHTTP && !o.Remove {
 			r.Warnings = append(r.Warnings, "export CONDUCTOR_TOKEN before launching Codex; bearer_token_env_var names it")
 		}
-		r.Next = "Restart Codex; `codex mcp list` should show conductor."
+		r.Next = "Restart Codex; `codex mcp list` should show conductor. Trust this repository, then review the Conductor hooks with `/hooks` before expecting memory capture or recall."
 		return r, nil
 	},
 	Status: func(o Options) Status {

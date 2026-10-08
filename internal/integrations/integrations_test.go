@@ -60,7 +60,7 @@ func TestClaudeProjectPlanWritesMCPAndHooksAndIsIdempotent(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	userHook := `{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"my-linter"}]}]},"model":"opus"}`
+	userHook := `{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"my-linter"}]}],"PostToolUse":[{"hooks":[{"type":"command","command":"conductor hook custom"}]}]},"model":"opus"}`
 	if err := os.WriteFile(settingsPath, []byte(userHook), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestClaudeProjectPlanWritesMCPAndHooksAndIsIdempotent(t *testing.T) {
 		t.Fatalf("hooks not installed: %v", settings)
 	}
 	body, _ := os.ReadFile(settingsPath)
-	if !strings.Contains(string(body), "my-linter") {
+	if !strings.Contains(string(body), "my-linter") || !strings.Contains(string(body), "conductor hook custom") {
 		t.Fatalf("user hook lost:\n%s", body)
 	}
 	if !strings.Contains(string(body), "Edit|Write|MultiEdit|NotebookEdit") {
@@ -117,7 +117,7 @@ func TestClaudeProjectPlanWritesMCPAndHooksAndIsIdempotent(t *testing.T) {
 		t.Fatal("hooks not removed")
 	}
 	body, _ = os.ReadFile(settingsPath)
-	if !strings.Contains(string(body), "my-linter") {
+	if !strings.Contains(string(body), "my-linter") || !strings.Contains(string(body), "conductor hook custom") {
 		t.Fatalf("user hook lost on removal:\n%s", body)
 	}
 }
@@ -135,6 +135,40 @@ func TestClaudeGlobalUsesTheCLI(t *testing.T) {
 	// No token may appear anywhere in a plan's commands.
 	if strings.Contains(res.Commands[0], o.Token) {
 		t.Fatalf("token leaked into command: %s", res.Commands[0])
+	}
+}
+
+func TestCheckpointAndMemoryStopHooksCoexist(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		merge func(map[string]any, bool)
+		want  []string
+	}{
+		{"claude", mergeClaudeHooks, []string{HookCommand + " checkpoint", HookCommand + " memory-observe --harness claude"}},
+		{"codex", mergeCodexHooks, []string{HookCommand + " checkpoint --harness codex", HookCommand + " memory-observe --harness codex"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			settings := map[string]any{"hooks": map[string]any{"Stop": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": "my-stop"}}}}}}
+			for i := 0; i < 2; i++ { // repeated integration must remain idempotent
+				tc.merge(settings, false)
+			}
+			count := map[string]int{}
+			for _, group := range toSlice(settings["hooks"].(map[string]any)["Stop"]) {
+				for _, handler := range toSlice(group.(map[string]any)["hooks"]) {
+					count[hookCommand(handler)]++
+				}
+			}
+			for _, command := range append(tc.want, "my-stop") {
+				if count[command] != 1 {
+					t.Fatalf("Stop command %q appears %d times: %v", command, count[command], count)
+				}
+			}
+			tc.merge(settings, true)
+			groups := toSlice(settings["hooks"].(map[string]any)["Stop"])
+			if len(groups) != 1 || hookCommand(toSlice(groups[0].(map[string]any)["hooks"])[0]) != "my-stop" {
+				t.Fatalf("removal changed user Stop hook: %v", groups)
+			}
+		})
 	}
 }
 
@@ -173,6 +207,13 @@ func TestCodexTOMLPreservesEverythingElse(t *testing.T) {
 	if err := os.WriteFile(path, []byte(seed), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	hooksPath := filepath.Join(o.Root, ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(hooksPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hooksPath, []byte(`{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"my-policy"}]}]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	res, err := codexTool.Plan(o)
 	if err != nil {
@@ -187,11 +228,17 @@ func TestCodexTOMLPreservesEverythingElse(t *testing.T) {
 			t.Fatalf("missing %q in:\n%s", want, text)
 		}
 	}
+	hooks := readJSON(t, hooksPath)
+	if !codexHooksInstalled(hooks) || !strings.Contains(readTextFile(hooksPath), "my-policy") {
+		t.Fatalf("Codex hooks missing or user hook lost: %v", hooks)
+	}
 
 	// Idempotent.
 	res2, _ := codexTool.Plan(o)
-	if res2.Ops[0].Action != "unchanged" {
-		t.Fatalf("not idempotent: %s", res2.Ops[0].Action)
+	for _, op := range res2.Ops {
+		if op.Action != "unchanged" {
+			t.Fatalf("not idempotent: %s %s", op.Action, op.Path)
+		}
 	}
 
 	// HTTP swaps the table body for url + env-var token reference.
@@ -211,6 +258,10 @@ func TestCodexTOMLPreservesEverythingElse(t *testing.T) {
 	body, _ = os.ReadFile(path)
 	if strings.Contains(string(body), "conductor") || !strings.Contains(string(body), "[mcp_servers.github]") {
 		t.Fatalf("removal wrong:\n%s", body)
+	}
+	hooks = readJSON(t, hooksPath)
+	if codexHooksInstalled(hooks) || !strings.Contains(readTextFile(hooksPath), "my-policy") {
+		t.Fatalf("Codex hooks removal lost user settings: %v", hooks)
 	}
 }
 
@@ -244,7 +295,7 @@ func TestCodexProjectHooksAreWrittenMergedAndRemoved(t *testing.T) {
 	// SessionEnd is capped at three seconds by Codex.
 	for _, g := range toSlice(m["hooks"].(map[string]any)["SessionEnd"]) {
 		for _, hd := range toSlice(g.(map[string]any)["hooks"]) {
-			if isConductorHook(hd) && hd.(map[string]any)["timeout"].(float64) > 3 {
+			if isManagedHook(hd) && hd.(map[string]any)["timeout"].(float64) > 3 {
 				t.Fatalf("SessionEnd timeout over Codex's cap: %v", hd)
 			}
 		}

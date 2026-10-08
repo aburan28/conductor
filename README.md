@@ -287,6 +287,9 @@ the parse boundary before it can reach the store. Three tests assert this mechan
 `TestNoTranscriptFieldsInSharedTypes`, `TestNoTranscriptColumnsInSchema`, and
 `TestEventTypeHasNoContentField`.
 
+Optional personal memory has a separate Redis connection in the local CLI/MCP process. It
+does not add content columns to the team database or publish observations as task events.
+
 ---
 
 ## Setting up, in detail
@@ -1217,6 +1220,56 @@ func verify(secret string, h http.Header, body []byte) bool {
 The body is `{"id", "type", "project", "occurred_at", "subject", "private", "text", "url",
 "data"}`: `text` is a one-line summary, `data` the event's payload as a project member sees
 it, and `url` a dashboard link when conductord has a public `--public-url`.
+
+---
+
+### Private memory and Redis
+
+Conductor can retain compact observations from coding sessions in a Redis store you control.
+This feature is **off until configured**. The local `conductor` process encrypts every record
+with AES-GCM before sending it to Redis and HMACs project and search-index keys. The shared
+Conductor API, Postgres database, event stream, S3 resume backup, and HTTP MCP endpoint never
+receive memory content. Keep `~/.conductor/memory.key` (mode 0600) to read the records again;
+for a second machine, copy that key and `memory.json` securely or provide the same base64 key
+through `CONDUCTOR_MEMORY_KEY` and the same `CONDUCTOR_MEMORY_NAMESPACE`. Automatic
+project scoping uses the local Git common directory, so registered worktrees share notes
+without trusting a repository's `project.yaml` ID. Set `CONDUCTOR_MEMORY_PROJECT` to a
+user-chosen stable name on each machine if you want the same project scope across machines.
+
+```bash
+# Redis on this machine. Start Redis separately with your preferred persistence settings.
+conductor memory configure --local
+conductor memory status
+
+# ElastiCache/Valkey or another TLS Redis. Pipe the URL from your secret manager to stdin.
+conductor memory configure --url-stdin --cluster   # cluster-mode configuration endpoint
+# Omit --cluster for a primary endpoint in cluster mode disabled.
+
+conductor integrate claude      # refresh capture and recall hooks
+conductor integrate codex       # adds project .codex/hooks.json; review/trust with /hooks
+conductor integrate opencode    # refreshes the local plugin
+
+conductor memory search 'index calculus'
+conductor memory timeline <observation-id>
+conductor memory show <observation-id>
+conductor memory forget <observation-id>
+conductor memory disable        # stops capture; keeps existing records and key
+```
+
+Use `redis://127.0.0.1:6379/0` for the local server. A remote address must use `rediss://`;
+TLS certificate verification stays on. For ElastiCache, the client must be able to reach the
+cache inside its VPC or through your network path, and a cluster-mode configuration endpoint
+needs `--cluster`. `CONDUCTOR_MEMORY_REDIS_URL` can override the saved URL at runtime for
+credential rotation. Redis persistence or ElastiCache snapshots remain your responsibility.
+
+Claude Code and Codex hooks capture bounded tool actions and the assistant's final turn
+summary, then inject a small project-scoped selection of earlier summaries and explicit notes
+at session start and on new prompts. OpenCode captures tool actions and injects recent context
+through its plugin. Retrieved observations are quoted as untrusted historical data. Hook capture
+skips sensitive file paths and arbitrary shell commands, never retains raw tool input or
+output, and fails open if Redis is unavailable. `conductor memory remember` accepts a note on
+stdin for explicit decisions. The local stdio MCP gateway exposes `memory_search`,
+`memory_timeline`, `memory_get`, and `memory_remember`; the HTTP MCP gateway does not.
 
 ---
 

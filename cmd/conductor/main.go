@@ -133,6 +133,8 @@ func runCommand(ctx context.Context, name string, args []string) error {
 		return cmdCapabilities(ctx, args)
 	case "sessions":
 		return cmdSessions(ctx, args)
+	case "memory":
+		return cmdMemory(ctx, args)
 	case "backup":
 		return cmdBackup(ctx, args)
 	case "checkpoint":
