@@ -668,6 +668,22 @@ Usage:
 Example:
   conductor publish --funnel
 `},
+	{name: "wif", group: "Team and access", subs: []string{"exec"},
+		summary: "launch Claude Code with provider-issued OIDC workload credentials",
+		topic: `conductor wif — authenticate Claude Code with workload federation
+
+Usage:
+  conductor wif exec --provider gcp|aws|file [--aws-region REGION] \
+    [--identity-token-file PATH] \
+    --rule-id fdrl_... --organization-id UUID --service-account-id svac_... \
+    [--workspace-id wrkspc_...] -- conductor wrap claude
+
+Register the Google, AWS, or file issuer and exact workload identity in Claude
+Console. The runner must have that provider identity. See docs/ANTHROPIC_WIF.md.
+
+Example:
+  conductor wif exec --provider gcp --rule-id fdrl_... --organization-id UUID --service-account-id svac_... -- claude
+`},
 	{name: "github", group: "Team and access", subs: []string{"setup", "install", "link", "status", "check", "issues"},
 		nested:  map[string][]string{"issues": {"enable", "disable", "status", "sync"}},
 		summary: "create the GitHub App, link a repo, sync its issues into tasks"},
