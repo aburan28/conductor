@@ -491,3 +491,29 @@ func TestListStopsOnARepeatedToken(t *testing.T) {
 		t.Fatalf("a repeating listing returned %v; want an error", keys)
 	}
 }
+
+// WAL is archived with PutIfAbsent. It must carry a deadline sized to the segment, like Put: a
+// 16 MiB segment on a 4 Mbit/s link takes about 34 s, so a fixed 30 s bound would cut it short.
+func TestPutIfAbsentDeadlineCoversAWALSegment(t *testing.T) {
+	c := New(S3Config{Bucket: "b", Region: "us-east-1", AccessKey: "AK", SecretKey: "SK",
+		Endpoint: "http://127.0.0.1:1", PathStyle: true, Insecure: true})
+	tr := &deadlineTransport{}
+	c.http.Transport = tr
+
+	start := time.Now()
+	if err := c.PutIfAbsent(context.Background(), "wal/000000010000000000000029", make([]byte, 16<<20), "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+	if !tr.set {
+		t.Fatal("a WAL upload carried no deadline")
+	}
+	transfer := time.Duration(float64(16<<20*8) / 4e6 * float64(time.Second)) // 16 MiB at 4 Mbit/s
+	got := tr.deadline.Sub(start)
+	if got <= transfer {
+		t.Fatalf("a 16 MiB segment's upload has a deadline %v away; the transfer alone takes %v", got, transfer)
+	}
+	const want = 30*time.Second + 64*time.Second // 16 MiB at 256 KiB/s, plus the floor
+	if got < want-5*time.Second || got > want+5*time.Second {
+		t.Fatalf("the deadline is %v away; want about %v", got, want)
+	}
+}

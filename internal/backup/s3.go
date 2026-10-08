@@ -531,6 +531,9 @@ func (s *S3) Exists(ctx context.Context, key string) (bool, error) {
 // MinIO and R2 honour), returning ErrExists otherwise. A store that ignores the condition
 // overwrites, so callers that must not overwrite check Exists first as well.
 func (s *S3) PutIfAbsent(ctx context.Context, key string, body []byte, contentType string) error {
+	// Sized to the body, as Put is: a WAL segment uploaded on a slow link must not outlive its deadline.
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout(int64(len(body))))
+	defer cancel()
 	req, err := s.newRequest(ctx, http.MethodPut, key, body)
 	if err != nil {
 		return err
