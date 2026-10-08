@@ -83,16 +83,33 @@ const (
 	dayLayout   = "20060102"
 )
 
-// New builds a client. It does not validate credentials; the first request will.
+// requestFloor is the time every request gets: the handshake, signing and the first byte.
+const requestFloor = 30 * time.Second
+
+// minTransferRate is the slowest link a body is assumed to cross, 256 KiB/s. A transfer that
+// takes longer than its size at this rate is treated as stalled.
+const minTransferRate = 256 << 10
+
+// requestTimeout bounds one request: requestFloor, plus the time bodyBytes take at
+// minTransferRate. The client used to carry one fixed 30 s timeout, which also bounded the
+// body, so a large checkpoint on a slow link failed partway through.
+func requestTimeout(bodyBytes int64) time.Duration {
+	return requestFloor + time.Duration(float64(bodyBytes)*float64(time.Second)/minTransferRate)
+}
+
+// New builds a client. It does not validate credentials; the first request will. The client
+// has no timeout of its own: each request carries a deadline sized to its body (requestTimeout).
 func New(cfg S3Config) *S3 {
 	if cfg.Region == "" {
 		cfg.Region = "us-east-1"
 	}
-	return &S3{cfg: cfg, http: &http.Client{Timeout: 30 * time.Second}, now: func() time.Time { return time.Now().UTC() }}
+	return &S3{cfg: cfg, http: &http.Client{}, now: func() time.Time { return time.Now().UTC() }}
 }
 
 // Put stores body at key with the given content type.
 func (s *S3) Put(ctx context.Context, key string, body []byte, contentType string) error {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout(int64(len(body))))
+	defer cancel()
 	req, err := s.newRequest(ctx, http.MethodPut, key, body)
 	if err != nil {
 		return err
@@ -118,6 +135,10 @@ const maxObjectBytes = 128 << 20
 
 // Get fetches key. A missing key returns ErrNotFound; an object over maxObjectBytes is an error.
 func (s *S3) Get(ctx context.Context, key string) ([]byte, error) {
+	// The size is unknown until the response arrives, so the deadline allows the largest object.
+	// The cancel stays deferred until the body has been read.
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout(maxObjectBytes))
+	defer cancel()
 	req, err := s.newRequest(ctx, http.MethodGet, key, nil)
 	if err != nil {
 		return nil, err
@@ -157,6 +178,8 @@ func objectTooLarge(key string) error {
 // List returns the keys under a prefix (up to 1000, which is far more sessions than a machine
 // holds). It is used to enumerate snapshots.
 func (s *S3) List(ctx context.Context, prefix string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout(0))
+	defer cancel()
 	q := url.Values{}
 	q.Set("list-type", "2")
 	q.Set("prefix", prefix)
@@ -190,6 +213,8 @@ func (s *S3) List(ctx context.Context, prefix string) ([]string, error) {
 
 // Delete removes key. Deleting a key that does not exist succeeds, as it does in S3.
 func (s *S3) Delete(ctx context.Context, key string) error {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout(0))
+	defer cancel()
 	req, err := s.newRequest(ctx, http.MethodDelete, key, nil)
 	if err != nil {
 		return err

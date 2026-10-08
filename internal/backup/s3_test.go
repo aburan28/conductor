@@ -366,3 +366,94 @@ func TestGetRefusesAnObjectOverTheCap(t *testing.T) {
 		}
 	}
 }
+
+// deadlineTransport records the deadline each request carries and answers 200 with a small body.
+type deadlineTransport struct {
+	deadline time.Time
+	set      bool
+}
+
+func (d *deadlineTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	d.deadline, d.set = r.Context().Deadline()
+	return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{},
+		Body: io.NopCloser(strings.NewReader("ok")), Request: r}, nil
+}
+
+// The client used to carry a fixed 30 s Timeout, which bounds a whole exchange, body included,
+// so a large checkpoint on a slow link failed. Each request now carries its own deadline: a floor
+// of 30 s plus its size at the slowest rate assumed, 256 KiB/s.
+func TestRequestDeadlineScalesWithTheBody(t *testing.T) {
+	c := New(S3Config{Bucket: "b", Region: "us-east-1", AccessKey: "AK", SecretKey: "SK",
+		Endpoint: "http://127.0.0.1:1", PathStyle: true, Insecure: true})
+	if c.http.Timeout != 0 {
+		t.Fatalf("the client's own timeout is %v; it bounds whole transfers", c.http.Timeout)
+	}
+	tr := &deadlineTransport{}
+	c.http.Transport = tr
+	ctx := context.Background()
+
+	start := time.Now()
+	if err := c.Put(ctx, "k", make([]byte, 64<<20), "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+	if !tr.set {
+		t.Fatal("an upload carried no deadline")
+	}
+	const wantPut = 30*time.Second + 256*time.Second // 64 MiB at 256 KiB/s, plus the floor
+	if got := tr.deadline.Sub(start); got < wantPut-5*time.Second || got > wantPut+5*time.Second {
+		t.Fatalf("a 64 MiB upload has a deadline %v away; want about %v", got, wantPut)
+	}
+
+	// A download's size is not known until it arrives, so it is allowed the largest object.
+	start = time.Now()
+	if _, err := c.Get(ctx, "k"); err != nil {
+		t.Fatal(err)
+	}
+	if !tr.set {
+		t.Fatal("a download carried no deadline")
+	}
+	const wantGet = 30*time.Second + 512*time.Second // 128 MiB at 256 KiB/s, plus the floor
+	if got := tr.deadline.Sub(start); got < wantGet-5*time.Second || got > wantGet+5*time.Second {
+		t.Fatalf("a download has a deadline %v away; want about %v", got, wantGet)
+	}
+}
+
+// slowBody streams its bytes in small pieces with a pause between them, like a slow link, and
+// fails if the request's context ends before it is read to the end.
+type slowBody struct {
+	ctx  context.Context
+	left int
+}
+
+func (b *slowBody) Read(p []byte) (int, error) {
+	if err := b.ctx.Err(); err != nil {
+		return 0, err
+	}
+	if b.left == 0 {
+		return 0, io.EOF
+	}
+	time.Sleep(20 * time.Millisecond)
+	n := min(len(p), 4096, b.left)
+	clear(p[:n])
+	b.left -= n
+	return n, nil
+}
+
+// The response body of a GET is read after the call has its headers, so the request's deadline
+// must stay live until the body is read. A slow body must arrive whole.
+func TestSlowDownloadArrivesWhole(t *testing.T) {
+	c := New(S3Config{Bucket: "b", Region: "us-east-1", AccessKey: "AK", SecretKey: "SK",
+		Endpoint: "http://127.0.0.1:1", PathStyle: true, Insecure: true})
+	c.http.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{},
+			Body: io.NopCloser(&slowBody{ctx: r.Context(), left: 64 << 10}), Request: r}, nil
+	})
+	body, err := c.Get(context.Background(), "k")
+	if err != nil || len(body) != 64<<10 {
+		t.Fatalf("slow download = %d bytes, %v; want all 65536", len(body), err)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
