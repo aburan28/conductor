@@ -17,6 +17,7 @@ struct MenuBarView: View {
                 Text(model.phase == .running || model.phase == .idle ? "The control plane is not running." : model.phase.label)
                     .foregroundStyle(.secondary)
                 Button("Start Conductor") { Task { await model.restartServices() } }
+                    .disabled(model.restoreOffer != nil || model.starting)
             } else if !model.signedIn {
                 Text("Not signed in.").foregroundStyle(.secondary)
                 Button("Open Conductor") { showWindow(WindowID.dashboard, openWindow: openWindow) }

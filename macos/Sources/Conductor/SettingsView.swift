@@ -140,7 +140,6 @@ struct GeneralSettings: View {
             model.problem = "The port must be a number from 1 to 65535."
             return
         }
-        draft.daemonPort = p
         if draft.usesExternalDatabase {
             let dsn = databaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !dsn.isEmpty else {
@@ -165,7 +164,14 @@ struct GeneralSettings: View {
         } catch {
             // Not fatal: the agents still start at login; only the menu bar item waits.
         }
-        model.settings = draft
+        // Only the fields this form edits are written back. The draft was copied when the form
+        // appeared, so assigning it whole would revert anything changed since (onboarding,
+        // repositories, the project, the skip flags).
+        model.settings.daemonPort = p
+        model.settings.startAtLogin = draft.startAtLogin
+        model.settings.publicURL = draft.publicURL
+        model.settings.attachEndpoint = draft.attachEndpoint
+        model.settings.usesExternalDatabase = draft.usesExternalDatabase
         model.saveSettings()
         await model.restartServices()
     }

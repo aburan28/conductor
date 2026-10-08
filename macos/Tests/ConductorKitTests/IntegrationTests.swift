@@ -197,8 +197,9 @@ final class IntegrationTests: XCTestCase {
         XCTAssertEqual(try InviteLink.parse(appLink).get().webLink, link)
         let otherHome = root.appendingPathComponent("Rachel", isDirectory: true)
         try fm.createDirectory(at: otherHome, withIntermediateDirectories: true)
-        let joined = try await runner.run(CommandSpec(conductor, ConductorCommands.join(link: link),
-                                                      environment: ["HOME": otherHome.path, "PATH": "/usr/bin:/bin"]))
+        let joined = try await runner.run(CommandSpec(conductor, ConductorCommands.join,
+                                                      environment: ["HOME": otherHome.path, "PATH": "/usr/bin:/bin"],
+                                                      stdin: ConductorCommands.joinInput(link: link)))
         XCTAssertEqual(joined.status, 0, joined.stderrText)
         let result = try JSONDecoder().decode(JoinResult.self, from: joined.stdout)
         XCTAssertEqual(result.handle, "rachel")

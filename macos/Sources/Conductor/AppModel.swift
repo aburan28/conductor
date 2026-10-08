@@ -44,6 +44,9 @@ final class AppModel: ObservableObject {
     @Published var storage: StorageShow?
     /// Base backups found in the bucket on a first run: the onboarding offers a restore.
     @Published var restoreOffer: BaseBackupList?
+    /// True from the start of a start until it ends. A second start would run a second
+    /// Supervisor against the same agents and database.
+    @Published private(set) var starting = false
     @Published var doctor: DoctorReport?
     @Published var github: GitHubStatus?
     @Published var checkpointGroups: [CheckpointGroup] = []
@@ -110,16 +113,9 @@ final class AppModel: ObservableObject {
         }
         supervisor = makeSupervisor(binaries)
         storage = await loadStorage()
-        // A first run on a Mac whose bucket already holds this person's database: offer to
-        // restore it rather than start empty. The onboarding asks; nothing starts until then.
-        if let pg = supervisor?.config.postgres, !pg.isInitialized(), storage?.databaseToBucket == true {
-            let r = try? await runConductor(ConductorCommands.dbBackups)
-            let backups = r.flatMap { BaseBackupList.decode($0.stdout) }
-            if RestoreOffer.shouldOffer(clusterExists: false, storage: storage, backups: backups) {
-                restoreOffer = backups
-                return
-            }
-        }
+        // A first run on a Mac whose bucket may hold this person's database: offer the restore,
+        // or refuse to create an empty one, before anything starts.
+        guard await bucketAllowsNewCluster() else { return }
         await startServices(restore: false)
     }
 
@@ -134,8 +130,16 @@ final class AppModel: ObservableObject {
     }
 
     /// Starts (or restarts) the database and the daemon. `restore` is the answer to
-    /// "Restore from bucket".
+    /// "Restore from bucket". A start already running is not joined by a second one.
     func startServices(restore: Bool) async {
+        guard !starting else { return }
+        starting = true
+        defer { starting = false }
+        await bringUp(restore: restore)
+    }
+
+    /// The start itself. The caller holds `starting`.
+    private func bringUp(restore: Bool) async {
         guard let binaries else { return }
         restoreOffer = nil
         if supervisor == nil { supervisor = makeSupervisor(binaries) }
@@ -163,8 +167,18 @@ final class AppModel: ObservableObject {
     }
 
     /// Applies changed Settings (port, start at login, storage): rewrites the agents and
-    /// restarts what changed.
+    /// restarts what changed. Refused while a start is running or a restore is on offer.
     func restartServices() async {
+        guard !starting else {
+            problem = "Conductor is already starting. Try again when it has finished."
+            return
+        }
+        guard restoreOffer == nil else {
+            problem = Self.answerOfferFirst
+            return
+        }
+        starting = true
+        defer { starting = false }
         stopStreaming()
         token = try? secrets.read(service: KeychainNames.tokenService, account: settings.endpoint)
         if settings.isAttached {
@@ -175,7 +189,40 @@ final class AppModel: ObservableObject {
         guard let binaries else { return }
         supervisor = makeSupervisor(binaries)
         storage = await loadStorage()
-        await startServices(restore: false)
+        guard await bucketAllowsNewCluster() else { return }
+        await bringUp(restore: false)
+    }
+
+    private static let answerOfferFirst = "Answer the restore offer first: choose Restore from Bucket or Start Empty in the onboarding."
+
+    /// The check before any start that may create a database cluster; launch and restart both
+    /// make it. While the database goes to a bucket, a new cluster is created only when the
+    /// bucket's listing succeeded and is empty: a listing that failed or did not decode may be
+    /// hiding the backups a restore needs. When the bucket holds backups, the restore is
+    /// offered instead. Returns whether the start may go on.
+    private func bucketAllowsNewCluster() async -> Bool {
+        guard let pg = supervisor?.config.postgres, !pg.isInitialized(), storage?.databaseToBucket == true else {
+            return true
+        }
+        let listing = await listBackups()
+        if RestoreOffer.shouldOffer(clusterExists: false, storage: storage, backups: listing) {
+            restoreOffer = listing
+            return false
+        }
+        guard listing?.isEmpty == true else {
+            let why = "Conductor could not read this storage bucket's backups, so it will not create a new database over them. Check Settings → Storage, then try again."
+            phase = .failed(why)
+            problem = why
+            return false
+        }
+        return true
+    }
+
+    /// `conductor db backups --json`: nil unless the listing succeeded and decodes. A failed
+    /// command or an unreadable body is not an empty bucket.
+    private func listBackups() async -> BaseBackupList? {
+        guard let r = try? await runConductor(ConductorCommands.dbBackups), r.succeeded else { return nil }
+        return BaseBackupList.decode(r.stdout)
     }
 
     /// Saved storage settings reach the running system: archiving written (or taken out)
@@ -183,6 +230,12 @@ final class AppModel: ObservableObject {
     /// base-backup agent installed or removed.
     func applyStorage(_ show: StorageShow) async {
         storage = show
+        // Refused while a restore is on offer: a database started now would leave the bucket's
+        // backups unrestored, and the restore that follows would find a cluster already there.
+        guard restoreOffer == nil else {
+            problem = Self.answerOfferFirst
+            return
+        }
         guard let supervisor, !settings.isAttached, supervisor.config.postgres != nil else { return }
         do {
             try await supervisor.ensureRunning(storage: show) { [weak self] p in
@@ -481,11 +534,11 @@ final class AppModel: ObservableObject {
 
     /// Runs a command for a button: a spinner while it runs, the error if it fails.
     @discardableResult
-    func perform(_ what: String, _ args: [String], cwd: URL? = nil) async -> CommandResult? {
+    func perform(_ what: String, _ args: [String], cwd: URL? = nil, stdin: Data? = nil) async -> CommandResult? {
         busy = what
         defer { busy = nil }
         do {
-            let r = try await runConductor(args, cwd: cwd)
+            let r = try await runConductor(args, stdin: stdin, cwd: cwd)
             if !r.succeeded { problem = r.failureMessage("conductor \(args.first ?? "")") }
             return r
         } catch {
@@ -603,9 +656,12 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Joins with `conductor join`, then connects every coding tool on this Mac.
+    /// Joins with `conductor join`, then connects every coding tool on this Mac. The link goes
+    /// on standard input: it is a bearer token, and arguments are visible to other users.
     func join(_ j: InviteLink.Join) async {
-        guard let r = await perform("Joining \(j.endpoint)…", ConductorCommands.join(link: j.webLink)), r.succeeded else { return }
+        guard let r = await perform("Joining \(j.endpoint)…", ConductorCommands.join,
+                                    stdin: ConductorCommands.joinInput(link: j.webLink)),
+              r.succeeded else { return }
         await connectTools()
         pendingJoin = nil
         sheet = nil

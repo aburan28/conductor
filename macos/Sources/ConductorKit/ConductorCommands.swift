@@ -148,9 +148,12 @@ public enum ConductorCommands {
     public static let integrateAll = ["integrate", "all", "--global"]
     public static func integrate(_ tool: String) -> [String] { ["integrate", tool, "--global"] }
 
-    /// `conductor join <link>`. `--json` returns before the CLI's own "connect your tools?"
-    /// question, so the app connects them afterwards with `integrateAll`.
-    public static func join(link: String) -> [String] { ["join", link, "--json", "--no-integrate"] }
+    /// `conductor join -`: the link is read from standard input, never from the command line.
+    /// The link carries a bearer token, and any local user can read a process's arguments with
+    /// `ps`. `joinInput` is what goes on standard input. `--json` returns before the CLI's own
+    /// "connect your tools?" question, so the app connects them afterwards with `integrateAll`.
+    public static let join = ["join", "-", "--json", "--no-integrate"]
+    public static func joinInput(link: String) -> Data { Data((link + "\n").utf8) }
 
     public static let pause = ["pause", "--json"]
     public static let resume = ["resume", "--json"]

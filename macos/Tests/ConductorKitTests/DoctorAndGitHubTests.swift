@@ -72,7 +72,10 @@ final class DoctorAndGitHubTests: XCTestCase {
         XCTAssertEqual(ConductorCommands.initRepository(URL(fileURLWithPath: "/r")), ["init", "--dir", "/r"])
         XCTAssertEqual(ConductorCommands.bootstrap(repository: URL(fileURLWithPath: "/r"), endpoint: "http://127.0.0.1:8080"),
                        ["bootstrap", "--repo", "/r", "--endpoint", "http://127.0.0.1:8080"])
-        XCTAssertEqual(ConductorCommands.join(link: "https://a/#token=t"), ["join", "https://a/#token=t", "--json", "--no-integrate"])
+        // The link is a bearer token: it goes on standard input, never in the arguments.
+        XCTAssertEqual(ConductorCommands.join, ["join", "-", "--json", "--no-integrate"])
+        XCTAssertEqual(ConductorCommands.joinInput(link: "https://a/#token=t"), Data("https://a/#token=t\n".utf8))
+        XCTAssertFalse(ConductorCommands.join.contains { $0.contains("token") })
         XCTAssertEqual(ConductorCommands.checkpointList, ["checkpoint", "list", "--json"])
         XCTAssertEqual(ConductorCommands.dbArchiving(dataDir: URL(fileURLWithPath: "/d")), ["db", "archiving", "--data-dir", "/d", "--write"])
         XCTAssertEqual(ConductorCommands.dbRestore(dataDir: URL(fileURLWithPath: "/d")), ["db", "restore", "--data-dir", "/d", "--backup", "latest"])
