@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/aburan28/conductor/internal/awscreds"
+	"github.com/aburan28/conductor/internal/backup"
 	"github.com/aburan28/conductor/internal/backup/s3fake"
 )
 
@@ -226,8 +227,8 @@ func TestOpenStoreHonoursUses(t *testing.T) {
 
 func TestSealPassphrase(t *testing.T) {
 	env := testAWSEnv(map[string]string{"CONDUCTOR_CHECKPOINT_KEY": "pass"})
-	if SealPassphrase(context.Background(), env) != "pass" {
-		t.Error("env passphrase ignored")
+	if got, err := SealPassphrase(context.Background(), env); err != nil || got != "pass" {
+		t.Errorf("env passphrase = %q, %v", got, err)
 	}
 	env = testAWSEnv(nil)
 	env.GOOS = "darwin"
@@ -237,7 +238,66 @@ func TestSealPassphrase(t *testing.T) {
 		}
 		return nil, errors.New("exit status 44")
 	}
-	if got := SealPassphrase(context.Background(), env); got != "from-keychain" {
-		t.Errorf("keychain passphrase = %q", got)
+	if got, err := SealPassphrase(context.Background(), env); err != nil || got != "from-keychain" {
+		t.Errorf("keychain passphrase = %q, %v", got, err)
+	}
+}
+
+// A Keychain read that fails for any reason other than "not found" must reach the caller. It
+// must not become an empty passphrase, which the backup code reads as "no seal configured" and
+// uploads in the clear. Off macOS, and with no item, there is no seal configured.
+func TestSealPassphraseKeychainErrors(t *testing.T) {
+	ctx := context.Background()
+	keychain := func(out []byte, err error) awscreds.Env {
+		env := testAWSEnv(nil)
+		env.GOOS = "darwin"
+		env.Command = func(context.Context, []byte, string, ...string) ([]byte, error) { return out, err }
+		return env
+	}
+	if pass, err := SealPassphrase(ctx, keychain(nil, errors.New("exit status 128: User interaction is not allowed."))); err == nil || pass != "" {
+		t.Fatalf("a failed Keychain read = %q, %v; want an error and no passphrase", pass, err)
+	}
+	if pass, err := SealPassphrase(ctx, keychain([]byte("\n"), nil)); err == nil || pass != "" {
+		t.Fatalf("an empty Keychain item = %q, %v; want an error", pass, err)
+	}
+	if pass, err := SealPassphrase(ctx, keychain(nil, errors.New("exit status 44: could not be found"))); err != nil || pass != "" {
+		t.Fatalf("a missing Keychain item = %q, %v; want no seal and no error", pass, err)
+	}
+	if pass, err := SealPassphrase(ctx, testAWSEnv(nil)); err != nil || pass != "" {
+		t.Fatalf("off macOS = %q, %v; want no seal and no error", pass, err)
+	}
+}
+
+// The CONDUCTOR_BACKUP_S3_ACCESS_KEY path must sign with the same secret and session token as
+// internal/backup's FromEnv: the AWS_* values when the CONDUCTOR_BACKUP_S3_* ones are unset,
+// and the explicit values when they are set.
+func TestAccessKeyVariablesFallBackToAWSSecretAndToken(t *testing.T) {
+	vars := map[string]string{
+		"CONDUCTOR_BACKUP_S3_BUCKET": "b", "CONDUCTOR_BACKUP_S3_ACCESS_KEY": "AKID",
+		"AWS_SECRET_ACCESS_KEY": "awssecret", "AWS_SESSION_TOKEN": "awstok",
+	}
+	sign := func() backup.Credentials {
+		t.Helper()
+		r, err := Resolve(envOf(vars))
+		if err != nil {
+			t.Fatal(err)
+		}
+		src, err := r.Credentials(testAWSEnv(vars))
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, err := src.Retrieve(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	if c := sign(); c.AccessKey != "AKID" || c.SecretKey != "awssecret" || c.SessionToken != "awstok" {
+		t.Fatalf("AWS_* fallback: %+v", c)
+	}
+	vars["CONDUCTOR_BACKUP_S3_SECRET_KEY"] = "explicit"
+	vars["CONDUCTOR_BACKUP_S3_SESSION_TOKEN"] = "explicit-token"
+	if c := sign(); c.SecretKey != "explicit" || c.SessionToken != "explicit-token" {
+		t.Fatalf("explicit variables must win: %+v", c)
 	}
 }

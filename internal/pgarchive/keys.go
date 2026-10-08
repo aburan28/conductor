@@ -125,7 +125,11 @@ func (a *Archiver) dataKey(ctx context.Context, create bool) (*DataKey, error) {
 	}
 	pass := ""
 	if a.cfg.Passphrase != nil {
-		pass = a.cfg.Passphrase(ctx)
+		p, err := a.cfg.Passphrase(ctx)
+		if err != nil {
+			return nil, err
+		}
+		pass = p
 	}
 	if pass == "" {
 		return nil, ErrNoPassphrase

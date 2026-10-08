@@ -84,16 +84,33 @@ const (
 	dayLayout   = "20060102"
 )
 
-// New builds a client. It does not validate credentials; the first request will.
+// requestFloor is the time every request gets: the handshake, signing and the first byte.
+const requestFloor = 30 * time.Second
+
+// minTransferRate is the slowest link a body is assumed to cross, 256 KiB/s. A transfer that
+// takes longer than its size at this rate is treated as stalled.
+const minTransferRate = 256 << 10
+
+// requestTimeout bounds one request: requestFloor, plus the time bodyBytes take at
+// minTransferRate. The client used to carry one fixed 30 s timeout, which also bounded the
+// body, so a large checkpoint on a slow link failed partway through.
+func requestTimeout(bodyBytes int64) time.Duration {
+	return requestFloor + time.Duration(float64(bodyBytes)*float64(time.Second)/minTransferRate)
+}
+
+// New builds a client. It does not validate credentials; the first request will. The client
+// has no timeout of its own: each request carries a deadline sized to its body (requestTimeout).
 func New(cfg S3Config) *S3 {
 	if cfg.Region == "" {
 		cfg.Region = "us-east-1"
 	}
-	return &S3{cfg: cfg, http: &http.Client{Timeout: 30 * time.Second}, now: func() time.Time { return time.Now().UTC() }}
+	return &S3{cfg: cfg, http: &http.Client{}, now: func() time.Time { return time.Now().UTC() }}
 }
 
 // Put stores body at key with the given content type.
 func (s *S3) Put(ctx context.Context, key string, body []byte, contentType string) error {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout(int64(len(body))))
+	defer cancel()
 	req, err := s.newRequest(ctx, http.MethodPut, key, body)
 	if err != nil {
 		return err
@@ -112,8 +129,17 @@ func (s *S3) Put(ctx context.Context, key string, body []byte, contentType strin
 	return nil
 }
 
-// Get fetches key. A missing key returns ErrNotFound.
+// maxObjectBytes is the largest object Get returns: 128 MiB, which holds a 64 MiB WAL segment
+// with the seal's overhead. A larger object is an error. It is never returned cut short, because
+// a truncated checkpoint or segment would look valid until it failed to open.
+const maxObjectBytes = 128 << 20
+
+// Get fetches key. A missing key returns ErrNotFound; an object over maxObjectBytes is an error.
 func (s *S3) Get(ctx context.Context, key string) ([]byte, error) {
+	// The size is unknown until the response arrives, so the deadline allows the largest object.
+	// The cancel stays deferred until the body has been read.
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout(maxObjectBytes))
+	defer cancel()
 	req, err := s.newRequest(ctx, http.MethodGet, key, nil)
 	if err != nil {
 		return nil, err
@@ -123,51 +149,103 @@ func (s *S3) Get(ctx context.Context, key string) ([]byte, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, ErrNotFound
-	}
 	if resp.StatusCode/100 != 2 {
-		return nil, s3Error("GET", key, resp)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+		// Only a missing key is "nothing there". A 404 for anything else, such as a misspelled
+		// bucket (NoSuchBucket), is an error: read as "nothing to restore", it would exit 0.
+		if resp.StatusCode == http.StatusNotFound && s3ErrorCode(body) == "NoSuchKey" {
+			return nil, ErrNotFound
+		}
+		return nil, s3ErrorFrom("GET", key, resp, body)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	if resp.ContentLength > maxObjectBytes {
+		return nil, objectTooLarge(key)
+	}
+	// One byte past the cap tells a body that is exactly the cap from one that is larger.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxObjectBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxObjectBytes {
+		return nil, objectTooLarge(key)
+	}
+	return body, nil
 }
 
-// List returns the keys under a prefix (up to 1000, which is far more sessions than a machine
-// holds). It is used to enumerate snapshots.
+func objectTooLarge(key string) error {
+	return fmt.Errorf("backup: S3 GET %s: the object is larger than %d MiB and was not read", key, maxObjectBytes>>20)
+}
+
+// List returns every key under a prefix, sorted. S3 answers a page at a time (1000 keys at most),
+// so the listing is followed through its continuation tokens until it is not truncated.
 func (s *S3) List(ctx context.Context, prefix string) ([]string, error) {
-	q := url.Values{}
-	q.Set("list-type", "2")
-	q.Set("prefix", prefix)
-	req, err := s.newRequest(ctx, http.MethodGet, "?"+q.Encode(), nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := s.do(req, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		return nil, s3Error("LIST", prefix, resp)
-	}
-	var parsed struct {
-		Contents []struct {
-			Key string `xml:"Key"`
-		} `xml:"Contents"`
-	}
-	if err := xml.NewDecoder(resp.Body).Decode(&parsed); err != nil {
-		return nil, err
-	}
-	keys := make([]string, 0, len(parsed.Contents))
-	for _, c := range parsed.Contents {
-		keys = append(keys, c.Key)
+	var keys []string
+	token := ""
+	used := map[string]bool{}
+	for {
+		used[token] = true
+		page, err := s.listPage(ctx, prefix, token)
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range page.Contents {
+			keys = append(keys, c.Key)
+		}
+		if !page.IsTruncated {
+			break
+		}
+		// A truncated page must name the next one. A token seen before would loop forever.
+		if page.NextContinuationToken == "" || used[page.NextContinuationToken] {
+			return nil, fmt.Errorf("backup: S3 LIST %s: the listing is truncated but names no new next page", prefix)
+		}
+		token = page.NextContinuationToken
 	}
 	sort.Strings(keys)
 	return keys, nil
 }
 
+// listPage is one page of a ListObjectsV2 response.
+type listPage struct {
+	IsTruncated           bool   `xml:"IsTruncated"`
+	NextContinuationToken string `xml:"NextContinuationToken"`
+	Contents              []struct {
+		Key string `xml:"Key"`
+	} `xml:"Contents"`
+}
+
+// listPage fetches the page that follows token (the first page when token is "").
+func (s *S3) listPage(ctx context.Context, prefix, token string) (listPage, error) {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout(0))
+	defer cancel()
+	q := url.Values{}
+	q.Set("list-type", "2")
+	q.Set("prefix", prefix)
+	if token != "" {
+		q.Set("continuation-token", token)
+	}
+	req, err := s.newRequest(ctx, http.MethodGet, "?"+q.Encode(), nil)
+	if err != nil {
+		return listPage{}, err
+	}
+	resp, err := s.do(req, nil)
+	if err != nil {
+		return listPage{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return listPage{}, s3Error("LIST", prefix, resp)
+	}
+	var page listPage
+	if err := xml.NewDecoder(resp.Body).Decode(&page); err != nil {
+		return listPage{}, err
+	}
+	return page, nil
+}
+
 // Delete removes key. Deleting a key that does not exist succeeds, as it does in S3.
 func (s *S3) Delete(ctx context.Context, key string) error {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout(0))
+	defer cancel()
 	req, err := s.newRequest(ctx, http.MethodDelete, key, nil)
 	if err != nil {
 		return err
@@ -415,6 +493,10 @@ func hmacSHA256(key []byte, data string) []byte {
 
 func s3Error(op, key string, resp *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+	return s3ErrorFrom(op, key, resp, body)
+}
+
+func s3ErrorFrom(op, key string, resp *http.Response, body []byte) error {
 	msg := strings.TrimSpace(string(body))
 	if len(msg) > 300 {
 		msg = msg[:300]
@@ -724,4 +806,15 @@ func (s *S3) doStreaming(req *http.Request, body []byte) (*http.Response, error)
 	client := *s.http
 	client.Timeout = 0
 	return client.Do(req)
+}
+
+// s3ErrorCode is the <Code> of an S3 XML error body, or "" when there is none.
+func s3ErrorCode(body []byte) string {
+	var e struct {
+		Code string `xml:"Code"`
+	}
+	if xml.Unmarshal(body, &e) != nil {
+		return ""
+	}
+	return e.Code
 }

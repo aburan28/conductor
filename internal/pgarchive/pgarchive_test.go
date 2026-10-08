@@ -144,7 +144,7 @@ func fakeArchiver(t *testing.T, seal bool) (*Archiver, *s3fake.Server, string) {
 		AccessKey: "AKID", SecretKey: "SECRET"})
 	state := t.TempDir()
 	cfg := Config{S3: client, Prefix: "team", Seal: seal, StateDir: state,
-		Passphrase: func(context.Context) string { return "correct horse" }}
+		Passphrase: func(context.Context) (string, error) { return "correct horse", nil }}
 	return New(cfg, "7001"), fake, state
 }
 
@@ -221,7 +221,7 @@ func TestSealedArchiveNeedsTheRightPassphrase(t *testing.T) {
 	}
 	_ = os.RemoveAll(filepath.Join(state, "db-keys"))
 	b := New(Config{S3: a.cfg.S3, Prefix: "team", Seal: true, StateDir: state,
-		Passphrase: func(context.Context) string { return "wrong" }}, "7001")
+		Passphrase: func(context.Context) (string, error) { return "wrong", nil }}, "7001")
 	err := b.FetchWAL(ctx, "000000010000000000000001", filepath.Join(t.TempDir(), "x"))
 	if err == nil || !strings.Contains(err.Error(), "passphrase does not open") {
 		t.Fatalf("wrong passphrase: %v", err)

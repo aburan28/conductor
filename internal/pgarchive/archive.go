@@ -33,8 +33,10 @@ type Config struct {
 	S3     *backup.S3
 	Prefix string
 	// Seal encrypts objects before upload. Objects already in the bucket are read either way.
-	Seal       bool
-	Passphrase func(ctx context.Context) string
+	Seal bool
+	// Passphrase reads the seal passphrase. An error (a Keychain that cannot be read, say) is
+	// returned as is; an empty passphrase with no error means none is configured.
+	Passphrase func(ctx context.Context) (string, error)
 	// StateDir holds the key cache and the archive status (the CLI's state directory).
 	StateDir string
 	// Location describes the bucket for messages ("s3://bucket/prefix").

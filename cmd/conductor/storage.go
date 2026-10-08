@@ -131,8 +131,9 @@ func storageShow(ctx context.Context, args []string) error {
 		if !d.Seal {
 			seal = "not sealed"
 		}
-		fmt.Printf("Database    WAL archive %s (at least every %ds), base backup every %dh, keep %d, %s\n",
+		fmt.Printf("Database    configured: WAL archive %s (at least every %ds), base backup every %dh, keep %d, %s\n",
 			onOff(d.ArchiveWAL), d.ArchiveTimeoutSeconds, d.BaseBackupEveryHours, d.KeepBaseBackups, seal)
+		fmt.Println("            archiving is not available in this build, so the database is not sent to the bucket yet")
 	}
 	fmt.Printf("From        %s\n", from)
 	return nil
@@ -328,6 +329,12 @@ Settings are merged into the existing file. See docs/STORAGE.md.
 func applyStaticSecret(ctx context.Context, env awscreds.Env, a *storage.Auth, from, store string, stdin io.Reader) error {
 	if a.AccessKeyID == "" {
 		return errors.New("--auth static needs --access-key-id")
+	}
+	// Without --secret-from nothing is moved, so asking for the Keychain would only be
+	// recorded in the file while the secret stayed where it was. Refuse rather than say "Saved".
+	if from == "" && store == storage.SecretKeychain {
+		return errors.New("--secret-store keychain needs --secret-from: stdin stores the secret in the Keychain, " +
+			"keychain uses the item already there; without either, the secret is not moved")
 	}
 	if store == "" {
 		store = a.Secret

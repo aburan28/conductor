@@ -196,3 +196,43 @@ func TestStorageSetRejectsSpaceSeparatedBool(t *testing.T) {
 		t.Fatal("a half-parsed command still wrote settings")
 	}
 }
+
+// --secret-store keychain with no --secret-from used to keep a plaintext secret already in
+// storage.json and still print "Saved". It is refused, and the error names both flags.
+func TestStorageSecretStoreKeychainNeedsSecretFrom(t *testing.T) {
+	isolateStorage(t)
+	ctx := context.Background()
+	if _, err := captureStdout(t, func() error {
+		return storageSet(ctx, []string{"--bucket", "b1", "--auth", "static", "--access-key-id", "AKIDPLAIN",
+			"--secret-from", "stdin", "--secret-store", "file"}, strings.NewReader("plainsecret\n"))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err := storageSet(ctx, []string{"--secret-store", "keychain"}, strings.NewReader(""))
+	if err == nil || !strings.Contains(err.Error(), "--secret-store") || !strings.Contains(err.Error(), "--secret-from") {
+		t.Fatalf("--secret-store keychain without --secret-from = %v; want an error naming both flags", err)
+	}
+	s, ok, err := storage.Load(os.Getenv)
+	if err != nil || !ok || s.Auth.Secret != storage.SecretFile || s.Auth.SecretAccessKey != "plainsecret" {
+		t.Fatalf("settings changed by the refused command: %+v, %v", s.Auth, err)
+	}
+}
+
+// Database backups can be configured, but this build has no archiver. `storage show` must say
+// so rather than describe a WAL archive that is not running.
+func TestStorageShowSaysDatabaseArchivingIsUnavailable(t *testing.T) {
+	isolateStorage(t)
+	ctx := context.Background()
+	if _, err := captureStdout(t, func() error {
+		return storageSet(ctx, []string{"--bucket", "b1", "--database=true"}, strings.NewReader(""))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := captureStdout(t, func() error { return storageShow(ctx, nil) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "configured") || !strings.Contains(out, "archiving is not available in this build") {
+		t.Fatalf("storage show does not say database archiving is unavailable:\n%s", out)
+	}
+}

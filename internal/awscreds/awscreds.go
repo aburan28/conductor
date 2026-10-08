@@ -142,8 +142,10 @@ func (c *Cached) Retrieve(ctx context.Context) (backup.Credentials, error) {
 }
 
 // Chain tries each provider in order and returns the first that yields credentials. An
-// error that says a source is simply absent (errNotConfigured) moves on; any other error
-// is remembered and reported if nothing succeeds, so a broken source is not silent.
+// error that says a source is simply absent (errNotConfigured) moves on. Any other error
+// ends the chain and is returned: a source that exists but fails (an expired web identity
+// token, say) must not be replaced by a later source such as the instance role, because
+// that signs requests as a different principal.
 type Chain []Provider
 
 // errNotConfigured marks a source that does not apply here (no variable, no file, no IMDS).
@@ -155,18 +157,14 @@ func notConfigured(format string, a ...any) error {
 
 // Retrieve tries each source.
 func (ch Chain) Retrieve(ctx context.Context) (backup.Credentials, error) {
-	var problems []string
 	for _, p := range ch {
 		creds, err := p.Retrieve(ctx)
 		if err == nil {
 			return creds, nil
 		}
 		if !errors.Is(err, errNotConfigured) {
-			problems = append(problems, err.Error())
+			return backup.Credentials{}, err
 		}
-	}
-	if len(problems) > 0 {
-		return backup.Credentials{}, errors.New(strings.Join(problems, "; "))
 	}
 	return backup.Credentials{}, errors.New("no AWS credentials found in the environment, a web identity token, " +
 		"ECS container credentials, or the EC2 instance role")

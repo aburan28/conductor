@@ -90,7 +90,7 @@ func (d dbStorage) config() (pgarchive.Config, error) {
 		S3:         backup.New(s3cfg),
 		Prefix:     d.resolved.Prefix(),
 		Seal:       d.resolved.Settings.Database.SealOn(),
-		Passphrase: func(ctx context.Context) string { return storage.SealPassphrase(ctx, env) },
+		Passphrase: func(ctx context.Context) (string, error) { return storage.SealPassphrase(ctx, env) },
 		StateDir:   state,
 		Location:   d.location(),
 	}, nil

@@ -61,9 +61,18 @@ type awsFiles struct {
 }
 
 func loadAWSFiles(env Env) (awsFiles, error) {
-	home, _ := env.HomeDir()
-	cfgPath := firstNonEmpty(env.Getenv("AWS_CONFIG_FILE"), filepath.Join(home, ".aws", "config"))
-	credPath := firstNonEmpty(env.Getenv("AWS_SHARED_CREDENTIALS_FILE"), filepath.Join(home, ".aws", "credentials"))
+	cfgPath := env.Getenv("AWS_CONFIG_FILE")
+	credPath := env.Getenv("AWS_SHARED_CREDENTIALS_FILE")
+	// HOME is only needed for a file that is not named. Without it, a relative ~/.aws path
+	// would be read from the working directory, so the error is returned instead.
+	if cfgPath == "" || credPath == "" {
+		home, err := env.HomeDir()
+		if err != nil {
+			return awsFiles{}, fmt.Errorf("finding ~/.aws (set AWS_CONFIG_FILE and AWS_SHARED_CREDENTIALS_FILE to avoid it): %w", err)
+		}
+		cfgPath = firstNonEmpty(cfgPath, filepath.Join(home, ".aws", "config"))
+		credPath = firstNonEmpty(credPath, filepath.Join(home, ".aws", "credentials"))
+	}
 	var f awsFiles
 	if b, err := env.ReadFile(cfgPath); err == nil {
 		f.config = parseINI(b)
