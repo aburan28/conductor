@@ -457,3 +457,37 @@ func TestSlowDownloadArrivesWhole(t *testing.T) {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// A listing of more than one page (the server returns 1000 keys at most) is followed to its end.
+// List used to read the first page and ignore IsTruncated.
+func TestListFollowsEveryPage(t *testing.T) {
+	fake := s3fake.New("conductor-test")
+	defer fake.Close()
+	const n = 1005
+	for i := 0; i < n; i++ {
+		fake.Put(fmt.Sprintf("sessions/snap-%05d.json", i), []byte("x"))
+	}
+	fake.Put("other/ignored.json", []byte("x"))
+	u, _ := url.Parse(fake.URL)
+	c := New(S3Config{Bucket: "conductor-test", Region: "us-east-1", AccessKey: "AK", SecretKey: "SK",
+		Endpoint: "http://" + u.Host, PathStyle: true, Insecure: true})
+	keys, err := c.List(context.Background(), "sessions/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != n || keys[0] != "sessions/snap-00000.json" || keys[n-1] != fmt.Sprintf("sessions/snap-%05d.json", n-1) {
+		t.Fatalf("List returned %d keys (first %q, last %q); want all %d", len(keys), keys[0], keys[len(keys)-1], n)
+	}
+}
+
+// A server that keeps answering with the same continuation token must not make List loop.
+func TestListStopsOnARepeatedToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `<ListBucketResult><IsTruncated>true</IsTruncated>`+
+			`<NextContinuationToken>same</NextContinuationToken><Contents><Key>a</Key></Contents></ListBucketResult>`)
+	}))
+	defer srv.Close()
+	if keys, err := testClient(srv).List(context.Background(), ""); err == nil {
+		t.Fatalf("a repeating listing returned %v; want an error", keys)
+	}
+}

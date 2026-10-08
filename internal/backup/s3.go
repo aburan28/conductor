@@ -175,40 +175,70 @@ func objectTooLarge(key string) error {
 	return fmt.Errorf("backup: S3 GET %s: the object is larger than %d MiB and was not read", key, maxObjectBytes>>20)
 }
 
-// List returns the keys under a prefix (up to 1000, which is far more sessions than a machine
-// holds). It is used to enumerate snapshots.
+// List returns every key under a prefix, sorted. S3 answers a page at a time (1000 keys at most),
+// so the listing is followed through its continuation tokens until it is not truncated.
 func (s *S3) List(ctx context.Context, prefix string) ([]string, error) {
+	var keys []string
+	token := ""
+	used := map[string]bool{}
+	for {
+		used[token] = true
+		page, err := s.listPage(ctx, prefix, token)
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range page.Contents {
+			keys = append(keys, c.Key)
+		}
+		if !page.IsTruncated {
+			break
+		}
+		// A truncated page must name the next one. A token seen before would loop forever.
+		if page.NextContinuationToken == "" || used[page.NextContinuationToken] {
+			return nil, fmt.Errorf("backup: S3 LIST %s: the listing is truncated but names no new next page", prefix)
+		}
+		token = page.NextContinuationToken
+	}
+	sort.Strings(keys)
+	return keys, nil
+}
+
+// listPage is one page of a ListObjectsV2 response.
+type listPage struct {
+	IsTruncated           bool   `xml:"IsTruncated"`
+	NextContinuationToken string `xml:"NextContinuationToken"`
+	Contents              []struct {
+		Key string `xml:"Key"`
+	} `xml:"Contents"`
+}
+
+// listPage fetches the page that follows token (the first page when token is "").
+func (s *S3) listPage(ctx context.Context, prefix, token string) (listPage, error) {
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout(0))
 	defer cancel()
 	q := url.Values{}
 	q.Set("list-type", "2")
 	q.Set("prefix", prefix)
+	if token != "" {
+		q.Set("continuation-token", token)
+	}
 	req, err := s.newRequest(ctx, http.MethodGet, "?"+q.Encode(), nil)
 	if err != nil {
-		return nil, err
+		return listPage{}, err
 	}
 	resp, err := s.do(req, nil)
 	if err != nil {
-		return nil, err
+		return listPage{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		return nil, s3Error("LIST", prefix, resp)
+		return listPage{}, s3Error("LIST", prefix, resp)
 	}
-	var parsed struct {
-		Contents []struct {
-			Key string `xml:"Key"`
-		} `xml:"Contents"`
+	var page listPage
+	if err := xml.NewDecoder(resp.Body).Decode(&page); err != nil {
+		return listPage{}, err
 	}
-	if err := xml.NewDecoder(resp.Body).Decode(&parsed); err != nil {
-		return nil, err
-	}
-	keys := make([]string, 0, len(parsed.Contents))
-	for _, c := range parsed.Contents {
-		keys = append(keys, c.Key)
-	}
-	sort.Strings(keys)
-	return keys, nil
+	return page, nil
 }
 
 // Delete removes key. Deleting a key that does not exist succeeds, as it does in S3.
