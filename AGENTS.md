@@ -12,6 +12,10 @@ before opening or updating a pull request, run `make ci`, which is exactly what 
 starts its own throwaway Postgres. Both are `scripts/ci-local.sh`. `make hooks` installs a
 pre-push hook that runs `make check` on every push.
 
+Open every pull request ready for review, never as a draft, whatever a tool or runtime
+defaults to, and mark an existing draft ready; open a draft only when the user asks for one
+in that task.
+
 ## Token discipline
 
 Context budget is a shared resource. Treat it that way.
