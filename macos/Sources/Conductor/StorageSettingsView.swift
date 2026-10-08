@@ -148,9 +148,16 @@ final class StoragePaneHolder {
 @MainActor
 struct StorageSettingsForm: View {
     @ObservedObject var pane: StoragePane
+    @EnvironmentObject var model: AppModel
 
     var body: some View {
         Form {
+            // What the app refused or failed to do with these settings, such as applying them
+            // while a restore is on offer. Onboarding shows the same banner.
+            if let problem = model.problem {
+                Text(problem).foregroundStyle(.red).font(.callout).textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let problem = pane.loadProblem {
                 Text("The storage settings could not be read: \(problem)")
                     .foregroundStyle(.red).font(.callout).fixedSize(horizontal: false, vertical: true)

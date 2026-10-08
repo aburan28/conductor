@@ -241,3 +241,57 @@ public enum RestoreOffer {
         return !backups.isEmpty
     }
 }
+
+/// What `conductor storage show --json` told a start about storage. Nothing configured is a
+/// successful read with `configured: false`. A failed command, or output that does not decode,
+/// is unreadable: that says nothing about whether a bucket holds the database.
+public enum StorageReading: Equatable, Sendable {
+    case read(StorageShow)
+    case unreadable(String)
+
+    public static func from(_ result: CommandResult?) -> StorageReading {
+        guard let result else { return .unreadable("the conductor command did not run") }
+        guard result.succeeded else { return .unreadable(result.failureMessage("conductor storage show")) }
+        guard let show = try? StorageShow.decode(result.stdout) else {
+            return .unreadable("conductor storage show printed output that is not storage settings")
+        }
+        return .read(show)
+    }
+
+    /// The settings, when they were read.
+    public var show: StorageShow? {
+        if case .read(let show) = self { return show }
+        return nil
+    }
+}
+
+/// The one decision before a new database cluster is created (`initdb`). Launch, restart and
+/// applying storage all ask it. A cluster is refused while this Mac's storage cannot be read,
+/// and while the database goes to a bucket whose backups cannot be listed: either could hide
+/// the database a restore needs.
+public enum NewClusterGate {
+    public enum Verdict: Equatable, Sendable {
+        case create
+        case offerRestore(BaseBackupList)
+        case refuse(String)
+    }
+
+    /// `backups` is the bucket's listing, consulted only when storage sends the database to a
+    /// bucket. nil there means the listing failed.
+    public static func verdict(clusterExists: Bool, storage: StorageReading, backups: BaseBackupList?) -> Verdict {
+        guard !clusterExists else { return .create }
+        switch storage {
+        case .unreadable(let why):
+            return .refuse("Conductor could not read the storage settings (\(why)), so it will not create a new database. Check Settings → Storage, then try again.")
+        case .read(let show):
+            guard show.databaseToBucket else { return .create }
+            guard let backups else {
+                return .refuse("Conductor could not list the backups in the storage bucket, so it will not create a new database over them. Check Settings → Storage, then try again.")
+            }
+            if RestoreOffer.shouldOffer(clusterExists: false, storage: show, backups: backups) {
+                return .offerRestore(backups)
+            }
+            return .create
+        }
+    }
+}

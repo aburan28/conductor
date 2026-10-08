@@ -109,6 +109,42 @@ final class DatabaseBackupTests: XCTestCase {
         XCTAssertFalse(RestoreOffer.shouldOffer(clusterExists: false, storage: off, backups: some))
     }
 
+    func testStorageThatCannotBeReadIsNotNothingConfigured() throws {
+        XCTAssertEqual(StorageReading.from(nil), .unreadable("the conductor command did not run"))
+        guard case .unreadable(let why) = StorageReading.from(CommandResult(status: 1, stderr: Data("no keychain".utf8))) else {
+            return XCTFail("a failed command is unreadable")
+        }
+        XCTAssertEqual(why, "no keychain")
+        guard case .unreadable = StorageReading.from(CommandResult(status: 0, stdout: Data("not json".utf8))) else {
+            return XCTFail("output that does not decode is unreadable")
+        }
+        // Nothing configured is a successful read, not a failure.
+        let none = StorageReading.from(CommandResult(status: 0, stdout: Data(#"{"configured":false,"source":"none"}"#.utf8)))
+        XCTAssertFalse(try XCTUnwrap(none.show).databaseToBucket)
+    }
+
+    func testNewClusterGate() throws {
+        let bucket = try StorageShow.decode(Data(#"{"configured":true,"source":"file","s3":{"bucket":"b"},"uses":{"database":true}}"#.utf8))
+        let none = try StorageShow.decode(Data(#"{"configured":false,"source":"none"}"#.utf8))
+        let some = BaseBackupList(backups: [.init(id: "a", takenAt: nil, bytes: nil)])
+        let empty = BaseBackupList(backups: [])
+        // A cluster that exists is never created again.
+        XCTAssertEqual(NewClusterGate.verdict(clusterExists: true, storage: .unreadable("x"), backups: nil), .create)
+        // Nothing configured, or storage that does not go to a bucket: create.
+        XCTAssertEqual(NewClusterGate.verdict(clusterExists: false, storage: .read(none), backups: nil), .create)
+        // A bucket with an empty listing: create. With backups: offer the restore.
+        XCTAssertEqual(NewClusterGate.verdict(clusterExists: false, storage: .read(bucket), backups: empty), .create)
+        XCTAssertEqual(NewClusterGate.verdict(clusterExists: false, storage: .read(bucket), backups: some), .offerRestore(some))
+        // Storage that cannot be read, or a bucket whose listing failed: refuse.
+        XCTAssertTrue(isRefusal(NewClusterGate.verdict(clusterExists: false, storage: .unreadable("no keychain"), backups: nil)))
+        XCTAssertTrue(isRefusal(NewClusterGate.verdict(clusterExists: false, storage: .read(bucket), backups: nil)))
+    }
+
+    private func isRefusal(_ verdict: NewClusterGate.Verdict) -> Bool {
+        if case .refuse = verdict { return true }
+        return false
+    }
+
     func testJSONValueRoundTripsWholeNumbers() throws {
         let v = try JSONValue.decode(Data(#"{"a":24,"b":1.5,"c":[true,null,"x"]}"#.utf8))
         let again = try JSONValue.decode(try JSONEncoder().encode(v))
