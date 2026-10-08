@@ -169,7 +169,11 @@ func (f *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 		if r.Method == http.MethodGet {
+			// Write without the lock: a client streaming a large object must not stall every
+			// other request, as it would not on a real bucket.
+			f.mu.Unlock()
 			_, _ = w.Write(body)
+			f.mu.Lock()
 		}
 	case r.Method == http.MethodDelete:
 		delete(f.objects, key)

@@ -6,14 +6,13 @@ Conductor can keep three kinds of state in one S3-compatible bucket:
 |---|---|---|
 | Session resume records (`conductor backup`) | a replaced machine reopens its sessions | when a seal passphrase is set |
 | Checkpoints (`conductor checkpoint push`) | continue a conversation on another machine | always (plaintext is refused) |
-| The control-plane database (`conductor db …`, planned: lands with the database archive pull request) | Postgres stays local and fast; the bucket makes it durable | when `database.seal` is true |
+| The control-plane database (`conductor db …`) | Postgres stays local and fast; the bucket makes it durable | when `database.seal` is true |
 
 Postgres remains the database: it runs on the machine (the macOS app bundles a private
-one). What S3 adds is durability. Once the database archive lands (planned, see "The
-database" below), Postgres will archive every write-ahead-log segment to the bucket as it
-fills (or at least every `archive_timeout`, 60 s by default) and take a base backup on a
-schedule, so a lost machine restores to within about a minute of where it stopped, on any
-other machine that can reach the bucket. This build does not archive the database yet.
+one). What S3 adds is durability. Postgres archives every write-ahead-log segment to the
+bucket as it fills (or at least every `archive_timeout`, 60 s by default) and takes a base
+backup on a schedule, so a lost machine restores to within about a minute of where it
+stopped, on any other machine that can reach the bucket.
 
 ## The settings file
 
@@ -169,41 +168,120 @@ Sealed objects are encrypted on the machine before upload with a passphrase:
 
 ## The database
 
-**Planned.** The `conductor db` commands and the `archive_command` and `restore_command`
-settings below land with the database archive pull request. In this build the `database.*`
-settings are stored and shown by `conductor storage show`, but no WAL segment is archived and
-no base backup is taken. The description that follows is the design, not the current
-behaviour.
-
-Postgres archives to the bucket through two commands it calls itself (planned):
+Postgres archives to the bucket through two commands it calls itself:
 
 ```
 archive_mode = on
-archive_command = 'conductor db archive-wal %p %f'
-restore_command = 'conductor db fetch-wal %f %p'     # only while restoring
-archive_timeout = 60
+archive_command = '/path/to/conductor db archive-wal %p %f'
+restore_command = '/path/to/conductor db fetch-wal %f %p'     # only while restoring
+archive_timeout = 60s
 ```
 
-Planned commands:
+`conductor db archiving --data-dir DIR --write` writes the archive settings into the data
+directory's `postgresql.auto.conf`, with the binary's absolute path. It prefixes
+`CONDUCTOR_STATE_DIR=…` when that variable is set, because Postgres's environment may not
+carry it. Restart Postgres when `archive_mode` changes. `conductor db restore` writes the
+`restore_command`.
+
+`wal_level` is set to `replica` only when the cluster's own value is `minimal`, the one value archiving
+cannot use. A `logical` (or `replica`) setting is left alone, so logical decoding keeps working. The
+file is replaced through a temporary file and a rename, so an interrupted write leaves the old
+file whole.
 
 ```
-conductor db archiving --data-dir DIR [--write]   # print (or append to postgresql.auto.conf) the settings above
-conductor db base-backup [--dsn DSN]              # pg_basebackup, streamed to the bucket
-conductor db backups [--json]                     # base backups and the WAL range each can replay
-conductor db status [--json]                      # last archived segment, last base backup, lag
-conductor db restore --data-dir DIR [--backup latest|ID] [--target-time RFC3339]
-conductor db prune [--keep N]                     # drop old base backups and the WAL only they need
+conductor db archiving --data-dir DIR [--write] [--json]
+conductor db archive-wal <path> <name> [--data-dir DIR]     # archive_command
+conductor db fetch-wal <name> <path> [--data-dir DIR]       # restore_command; exit 1 = not archived
+conductor db base-backup [--dsn DSN] [--pg-bin DIR] [--no-prune] [--json]
+conductor db backups [--system-id ID | --data-dir DIR] [--json]
+conductor db status [--system-id ID | --data-dir DIR] [--local] [--json]
+conductor db restore --data-dir DIR [--backup latest|ID] [--target-time RFC3339] [--system-id ID] [--json]
+conductor db prune [--keep N] [--system-id ID | --data-dir DIR] [--json]
 ```
+
+- **`base-backup`**
+  - Runs `pg_basebackup -D - -Ft -X fetch`. The archive therefore contains the WAL it needs, and a base backup restores even without the WAL archive.
+  - Streams the archive to the bucket (multipart, sealed on the way), then writes `manifest.json`.
+  - Then prunes down to `keep_base_backups`.
+  - The connection comes from `--dsn`, else `DATABASE_URL`, else the one `conductor up` saved.
+  - The tools come from `--pg-bin`, else `CONDUCTOR_PG_BIN`, else `PATH`, else the usual install locations.
+- **`restore`**
+  - Rebuilds an empty data directory from a base backup and writes `recovery.signal`.
+  - Postgres replays the archived WAL when it next starts. It stops at the end of the archive or at `--target-time`, then promotes itself to a normal, writable server.
+  - Until promotion it accepts read-only connections: wait for `pg_is_in_recovery()` to be false before using it.
+- **`prune`**
+  - Keeps the newest N base backups.
+  - Deletes the WAL that only older backups needed, comparing by log position, as `pg_archivecleanup` does.
+  - Never deletes timeline `.history` files.
+- **When archiving is off** (no bucket, `uses.database` false, or `database.archive_wal` false):
+  - `archive-wal` succeeds without uploading, so Postgres does not pile up WAL on disk.
+  - `archiving --write` sets `archive_mode = 'off'`.
+
+### Keys in the bucket
 
 Keys are namespaced by the cluster's system identifier, so two databases never share
-segments (planned layout):
+segments:
 
 ```
-<prefix>/db/<system-identifier>/wal/<segment>[.sealed]
-<prefix>/db/<system-identifier>/base/<UTC timestamp>/base.tar[.sealed]
-<prefix>/db/<system-identifier>/base/<UTC timestamp>/manifest.json
+<prefix>/db/<system-identifier>/key.json                       the sealed data key
+<prefix>/db/<system-identifier>/wal/<file>[.sealed]
+<prefix>/db/<system-identifier>/base/<backup ID>/base.tar[.sealed]
+<prefix>/db/<system-identifier>/base/<backup ID>/manifest.json
 ```
 
-`archive-wal` is idempotent. It succeeds if the bucket already holds a segment with
-identical content, and it fails if the bucket holds different content under that name.
-Postgres then keeps the segment and retries, rather than lose either copy.
+A backup ID is its UTC start time to the second, then a random suffix (`20261008T024522Z-1a2b3c4d`),
+so two runs in one second never share objects. Backups are ordered by timeline and start log
+position, not by ID.
+
+`archive-wal` is idempotent. It succeeds if the bucket already holds identical content under
+that name, and fails if the bucket holds different content. Postgres then keeps the segment
+and retries, rather than lose either copy. Uploads use `If-None-Match: *`.
+
+### Sealing the database archive
+
+Each cluster has one random 256-bit data key:
+
+- it is stored in the bucket as `key.json`, sealed with the seal passphrase (PBKDF2-SHA256 with 600,000 iterations, then AES-256-GCM);
+- it is cached on the machine in `<state>/db-keys/<system id>.key` (0600), so archiving does not repeat the key derivation for every segment.
+
+Objects are sealed in 1 MiB AES-256-GCM chunks:
+
+- each object has its own subkey and a chunk counter;
+- the final chunk is marked.
+
+A sealed object therefore cannot be truncated, reordered or altered without failing to
+open. A new machine needs only the bucket and the passphrase.
+
+### JSON for the app
+
+`db status --json`:
+
+```json
+{ "configured": true, "enabled": true, "archiving": true, "location": "s3://bucket/conductor",
+  "sealed": true, "system_id": "7693956267215457548",
+  "archive": { "system_id": "…", "archived": 1432, "last_wal": "00000001000000000000059A",
+               "last_at": "2026-10-07T12:00:01Z", "last_error": "", "last_error_wal": "",
+               "last_error_at": "", "last_base_backup": "20261007T030000Z",
+               "last_base_backup_at": "2026-10-07T03:01:12Z", "last_base_backup_error": "" },
+  "lag_seconds": 42, "failing": false,
+  "base_backups": { "count": 7, "latest_id": "20261007T030000Z", "latest_at": "2026-10-07T03:01:12Z" },
+  "wal": { "segments": 1432, "bytes": 24025956352, "first": "…", "last": "…" },
+  "error": "" }
+```
+
+- `archive` is what this machine recorded, so it is present without network access (`--local`).
+- `base_backups` and `wal` come from the bucket.
+- Empty fields are omitted.
+
+`db backups --json`:
+
+```json
+{ "system_id": "…", "location": "s3://…",
+  "backups": [ { "version": 1, "id": "20261007T030000Z", "system_id": "…", "pg_version": "17.2",
+                 "started_at": "…", "finished_at": "…", "start_lsn": "0/2000028", "end_lsn": "0/2000100",
+                 "timeline": 1, "start_wal": "000000010000000000000002", "wal_segment_size": 16777216,
+                 "size": 40606720, "stored_size": 40642123, "sealed": true, "key_id": "…" } ],
+  "wal": { "segments": 12, "bytes": 201326592, "first": "…", "last": "…" } }
+```
+
+Without a cluster in the bucket, `backups` is an empty list and `error` says why.

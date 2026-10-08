@@ -1049,6 +1049,14 @@ conductor storage set --bucket my-team-conductor --region us-east-1 --auth profi
 conductor storage test
 ```
 
+**The database, durable in the same bucket.** Postgres stays local and fast;
+`conductor db archiving --data-dir … --write` points its `archive_command` at Conductor, so
+every WAL segment reaches the bucket as it fills (at least once a minute), sealed with your
+passphrase. `conductor db base-backup` streams a base backup and prunes old ones. On another
+machine, `conductor db restore --data-dir …` rebuilds the database to the last archived
+segment, or to any moment with `--target-time`. See `conductor db status` and
+[docs/STORAGE.md](docs/STORAGE.md#the-database).
+
 Wrapped sessions stay honest with the team while paused: the sidecar keeps heartbeating as
 `waiting_for_input`, so presence shows a parked session that is not offered work, rather than
 a mystery that stopped moving. A relaunched wrap registers a fresh session with the same

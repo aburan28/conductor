@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -501,6 +502,313 @@ func s3ErrorFrom(op, key string, resp *http.Response, body []byte) error {
 		msg = msg[:300]
 	}
 	return fmt.Errorf("backup: S3 %s %s: %s: %s", op, key, resp.Status, msg)
+}
+
+// ErrExists is returned by PutIfAbsent when the key already holds an object.
+var ErrExists = errors.New("backup: key already exists")
+
+// Exists reports whether key holds an object (HEAD).
+func (s *S3) Exists(ctx context.Context, key string) (bool, error) {
+	req, err := s.newRequest(ctx, http.MethodHead, key, nil)
+	if err != nil {
+		return false, err
+	}
+	resp, err := s.do(req, nil)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	switch {
+	case resp.StatusCode == http.StatusNotFound:
+		return false, nil
+	case resp.StatusCode/100 == 2:
+		return true, nil
+	}
+	return false, s3Error("HEAD", key, resp)
+}
+
+// PutIfAbsent stores body at key only if nothing is there yet (If-None-Match: *, which S3,
+// MinIO and R2 honour), returning ErrExists otherwise. A store that ignores the condition
+// overwrites, so callers that must not overwrite check Exists first as well.
+func (s *S3) PutIfAbsent(ctx context.Context, key string, body []byte, contentType string) error {
+	// Sized to the body, as Put is: a WAL segment uploaded on a slow link must not outlive its deadline.
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout(int64(len(body))))
+	defer cancel()
+	req, err := s.newRequest(ctx, http.MethodPut, key, body)
+	if err != nil {
+		return err
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	req.Header.Set("If-None-Match", "*")
+	resp, err := s.do(req, body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	switch {
+	case resp.StatusCode == http.StatusPreconditionFailed || resp.StatusCode == http.StatusConflict:
+		return ErrExists
+	case resp.StatusCode/100 != 2:
+		return s3Error("PUT", key, resp)
+	}
+	return nil
+}
+
+// GetReader streams an object. The caller closes it. A missing key is ErrNotFound.
+func (s *S3) GetReader(ctx context.Context, key string) (io.ReadCloser, error) {
+	req, err := s.newRequest(ctx, http.MethodGet, key, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := s.doStreaming(req, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		resp.Body.Close()
+		return nil, ErrNotFound
+	}
+	if resp.StatusCode/100 != 2 {
+		defer resp.Body.Close()
+		return nil, s3Error("GET", key, resp)
+	}
+	return resp.Body, nil
+}
+
+// Object is one listing entry.
+type Object struct {
+	Key  string
+	Size int64
+}
+
+// ListAll returns every object under prefix, following continuation tokens, sorted by key.
+func (s *S3) ListAll(ctx context.Context, prefix string) ([]Object, error) {
+	var out []Object
+	token := ""
+	for page := 0; page < 100000; page++ {
+		q := url.Values{}
+		q.Set("list-type", "2")
+		q.Set("prefix", prefix)
+		if token != "" {
+			q.Set("continuation-token", token)
+		}
+		req, err := s.newRequest(ctx, http.MethodGet, "?"+q.Encode(), nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := s.do(req, nil)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode/100 != 2 {
+			defer resp.Body.Close()
+			return nil, s3Error("LIST", prefix, resp)
+		}
+		var parsed struct {
+			Contents []struct {
+				Key  string `xml:"Key"`
+				Size int64  `xml:"Size"`
+			} `xml:"Contents"`
+			IsTruncated bool   `xml:"IsTruncated"`
+			NextToken   string `xml:"NextContinuationToken"`
+		}
+		err = xml.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(&parsed)
+		resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("backup: S3 LIST %s: %w", prefix, err)
+		}
+		for _, c := range parsed.Contents {
+			out = append(out, Object{Key: c.Key, Size: c.Size})
+		}
+		if !parsed.IsTruncated || parsed.NextToken == "" {
+			sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+			return out, nil
+		}
+		token = parsed.NextToken
+	}
+	return nil, fmt.Errorf("backup: S3 LIST %s: too many pages", prefix)
+}
+
+// MinPartSize is S3's smallest allowed multipart part (except the last).
+const MinPartSize = 5 << 20
+
+// PutStream uploads everything read from r to key. Up to partSize bytes it is one PUT;
+// beyond that a multipart upload in partSize parts (at least MinPartSize), so the object
+// is never held in memory whole. A failed multipart upload is aborted. It returns the
+// number of bytes stored.
+func (s *S3) PutStream(ctx context.Context, key string, r io.Reader, partSize int, contentType string) (int64, error) {
+	if partSize < MinPartSize {
+		partSize = MinPartSize
+	}
+	first := make([]byte, partSize)
+	n, err := io.ReadFull(r, first)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return 0, err
+	}
+	if n < partSize {
+		return int64(n), s.Put(ctx, key, first[:n], contentType)
+	}
+
+	uploadID, err := s.createMultipart(ctx, key, contentType)
+	if err != nil {
+		return 0, err
+	}
+	abort := func(cause error) (int64, error) {
+		_ = s.abortMultipart(context.WithoutCancel(ctx), key, uploadID)
+		return 0, cause
+	}
+	var etags []string
+	total := int64(0)
+	buf := first[:n]
+	for part := 1; ; part++ {
+		etag, err := s.uploadPart(ctx, key, uploadID, part, buf)
+		if err != nil {
+			return abort(err)
+		}
+		etags = append(etags, etag)
+		total += int64(len(buf))
+		if part >= 10000 {
+			return abort(fmt.Errorf("backup: %s needs more than 10000 parts; raise the part size", key))
+		}
+		next := make([]byte, partSize)
+		m, err := io.ReadFull(r, next)
+		if m == 0 {
+			if err != nil && !errors.Is(err, io.EOF) {
+				return abort(err)
+			}
+			break
+		}
+		if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+			return abort(err)
+		}
+		buf = next[:m]
+	}
+	if err := s.completeMultipart(ctx, key, uploadID, etags); err != nil {
+		return abort(err)
+	}
+	return total, nil
+}
+
+func (s *S3) keyQueryRequest(ctx context.Context, method, key string, q url.Values, body []byte) (*http.Request, error) {
+	base, err := s.url(key)
+	if err != nil {
+		return nil, err
+	}
+	var rdr io.Reader
+	if body != nil {
+		rdr = bytes.NewReader(body)
+	}
+	return http.NewRequestWithContext(ctx, method, base+"?"+q.Encode(), rdr)
+}
+
+func (s *S3) createMultipart(ctx context.Context, key, contentType string) (string, error) {
+	req, err := s.keyQueryRequest(ctx, http.MethodPost, key, url.Values{"uploads": {""}}, nil)
+	if err != nil {
+		return "", err
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	resp, err := s.do(req, nil)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return "", s3Error("CreateMultipartUpload", key, resp)
+	}
+	var out struct {
+		UploadID string `xml:"UploadId"`
+	}
+	if err := xml.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil || out.UploadID == "" {
+		return "", fmt.Errorf("backup: S3 CreateMultipartUpload %s: no upload ID", key)
+	}
+	return out.UploadID, nil
+}
+
+func (s *S3) uploadPart(ctx context.Context, key, uploadID string, part int, body []byte) (string, error) {
+	q := url.Values{"partNumber": {fmt.Sprint(part)}, "uploadId": {uploadID}}
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		req, err := s.keyQueryRequest(ctx, http.MethodPut, key, q, body)
+		if err != nil {
+			return "", err
+		}
+		resp, err := s.doStreaming(req, body)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		etag := resp.Header.Get("ETag")
+		if resp.StatusCode/100 == 2 && etag != "" {
+			resp.Body.Close()
+			return etag, nil
+		}
+		lastErr = s3Error("UploadPart", key, resp)
+		resp.Body.Close()
+		if resp.StatusCode/100 == 4 {
+			break
+		}
+	}
+	return "", lastErr
+}
+
+func (s *S3) completeMultipart(ctx context.Context, key, uploadID string, etags []string) error {
+	var b strings.Builder
+	b.WriteString("<CompleteMultipartUpload>")
+	for i, e := range etags {
+		fmt.Fprintf(&b, "<Part><PartNumber>%d</PartNumber><ETag>%s</ETag></Part>", i+1, xmlEscape(e))
+	}
+	b.WriteString("</CompleteMultipartUpload>")
+	body := []byte(b.String())
+	req, err := s.keyQueryRequest(ctx, http.MethodPost, key, url.Values{"uploadId": {uploadID}}, body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/xml")
+	resp, err := s.do(req, body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	// S3 can answer 200 with an <Error> body when the completion fails late.
+	payload, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode/100 != 2 || bytes.Contains(payload, []byte("<Error>")) {
+		return fmt.Errorf("backup: S3 CompleteMultipartUpload %s: %s: %s", key, resp.Status, strings.TrimSpace(string(payload)))
+	}
+	return nil
+}
+
+func (s *S3) abortMultipart(ctx context.Context, key, uploadID string) error {
+	req, err := s.keyQueryRequest(ctx, http.MethodDelete, key, url.Values{"uploadId": {uploadID}}, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := s.do(req, nil)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
+}
+
+func xmlEscape(s string) string {
+	var b bytes.Buffer
+	_ = xml.EscapeText(&b, []byte(s))
+	return b.String()
+}
+
+// doStreaming is do without the client timeout, for transfers whose duration depends on
+// their size (a base backup download, a large part); the caller's context still bounds it.
+func (s *S3) doStreaming(req *http.Request, body []byte) (*http.Response, error) {
+	if err := s.sign(req, body); err != nil {
+		return nil, err
+	}
+	client := *s.http
+	client.Timeout = 0
+	return client.Do(req)
 }
 
 // s3ErrorCode is the <Code> of an S3 XML error body, or "" when there is none.
