@@ -455,3 +455,41 @@ func TestHomeIsNotNeededWhenBothFilesAreNamed(t *testing.T) {
 		t.Fatalf("profiles = %+v, %v; want the static profile p", ps, err)
 	}
 }
+
+// A source that exists but fails (an expired web identity token) must end the chain. The
+// instance role behind it is a different principal, and it must not be used in its place.
+func TestRealSourceErrorIsNotMaskedByALaterSource(t *testing.T) {
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `<ErrorResponse><Error><Code>ExpiredTokenException</Code><Message>token expired</Message></Error></ErrorResponse>`)
+	}))
+	defer sts.Close()
+	imds := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut:
+			fmt.Fprint(w, "imds-session")
+		case r.URL.Path == "/latest/meta-data/iam/security-credentials/":
+			fmt.Fprint(w, "app-role\n")
+		case r.URL.Path == "/latest/meta-data/iam/security-credentials/app-role":
+			fmt.Fprint(w, `{"Code":"Success","AccessKeyId":"ASIAEC2","SecretAccessKey":"ec2secret","Token":"ec2tok","Expiration":"2026-10-07T18:00:00Z"}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer imds.Close()
+	env, home := testEnv(t, nil)
+	tokenFile := filepath.Join(home, "oidc")
+	writeFile(t, tokenFile, "eyJ.expired.token\n")
+	env.STSEndpoint = sts.URL
+	env.IMDSEndpoint = imds.URL
+	env.Getenv = func(k string) string {
+		return map[string]string{"AWS_WEB_IDENTITY_TOKEN_FILE": tokenFile, "AWS_ROLE_ARN": "arn:aws:iam::3:role/ci"}[k]
+	}
+	c, err := Environment(env, "us-east-1").Retrieve(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "ExpiredTokenException") {
+		t.Fatalf("expired web identity: creds %q, err %v; want the STS error", c.AccessKey, err)
+	}
+	if c.AccessKey != "" {
+		t.Fatalf("the instance role was used after the web identity source failed: %s", c.AccessKey)
+	}
+}
