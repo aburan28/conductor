@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/aburan28/conductor/internal/awscreds"
@@ -286,18 +287,90 @@ func dbArchiveWAL(ctx context.Context, args []string) error {
 	return pgarchive.New(cfg, sysID).ArchiveWAL(ctx, path, name)
 }
 
+// fetchWALAttempts bounds how often fetch-wal tries a failure that is not "not archived".
+const fetchWALAttempts = 3
+
+// fetchWALBackoff is the pause before the first retry; each later retry waits one step longer.
+const fetchWALBackoff = 500 * time.Millisecond
+
+// fetchWALResult is what restore_command must do with one fetch-wal outcome.
+type fetchWALResult int
+
+const (
+	// fetchWALDone: the segment was written; exit 0.
+	fetchWALDone fetchWALResult = iota
+	// fetchWALNotArchived: the bucket has no such segment; exit 1, which Postgres reads as the end
+	// of the archive.
+	fetchWALNotArchived
+	// fetchWALFailed: anything else. It must not exit 1, or Postgres would take it for the end of
+	// the archive and promote, and later segments would never be replayed.
+	fetchWALFailed
+)
+
+// classifyFetchWAL maps the error from a fetch to its result. Only pgarchive.ErrNotArchived, the
+// bucket's verdict that a segment does not exist, is the normal end of recovery.
+func classifyFetchWAL(err error) fetchWALResult {
+	switch {
+	case err == nil:
+		return fetchWALDone
+	case errors.Is(err, pgarchive.ErrNotArchived):
+		return fetchWALNotArchived
+	default:
+		return fetchWALFailed
+	}
+}
+
+// runFetchWAL runs fetch and retries a fetchWALFailed result, at most attempts times in all,
+// waiting backoff, 2×backoff, … between tries. A not-archived result is final on the first try.
+// It stops early when ctx is done.
+func runFetchWAL(ctx context.Context, fetch func(context.Context) error, attempts int, backoff time.Duration) (fetchWALResult, error) {
+	for try := 1; ; try++ {
+		err := fetch(ctx)
+		res := classifyFetchWAL(err)
+		if res != fetchWALFailed || try >= attempts {
+			return res, err
+		}
+		select {
+		case <-ctx.Done():
+			return res, err
+		case <-time.After(backoff * time.Duration(try)):
+		}
+	}
+}
+
+// dbFetchWAL is restore_command. Postgres reads its exit status: 1 means the segment is not
+// archived, which ends recovery there and promotes the server. So only that case exits 1.
+// Every other failure (a bad command line, missing settings or credentials, an S3 error, a bad
+// key) is retried a few times and then ends the process with SIGKILL, which Postgres treats as a
+// fatal restore error. Recovery stops and nothing is promoted over the missing segments.
 func dbFetchWAL(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("db fetch-wal", flag.ContinueOnError)
 	dataDir := fs.String("data-dir", "", "the data directory (default: the working directory, as Postgres runs it)")
 	systemID := fs.String("system-id", "", "the cluster (default: read from the data directory)")
 	positional, err := parseFlags(fs, args)
-	if err != nil {
-		return err
+	if err == nil && len(positional) != 2 {
+		err = errors.New("usage: conductor db fetch-wal <name> <path>   (restore_command = '… %f %p')")
 	}
-	if len(positional) != 2 {
-		return errors.New("usage: conductor db fetch-wal <name> <path>   (restore_command = '… %f %p')")
+	if err != nil {
+		return failFetchWAL(err)
 	}
 	name, dest := positional[0], positional[1]
+	res, err := runFetchWAL(ctx, func(ctx context.Context) error {
+		return fetchWALOnce(ctx, name, dest, *dataDir, *systemID)
+	}, fetchWALAttempts, fetchWALBackoff)
+	switch res {
+	case fetchWALDone:
+		return nil
+	case fetchWALNotArchived:
+		// The normal end of recovery: Postgres asks for the next segment and is told there is
+		// none. Exit non-zero without noise in its log.
+		os.Exit(1)
+	}
+	return failFetchWAL(err)
+}
+
+// fetchWALOnce makes one attempt: load the settings, identify the cluster, and fetch the segment.
+func fetchWALOnce(ctx context.Context, name, dest, dataDir, systemID string) error {
 	d, err := loadDBStorage()
 	if err != nil {
 		return err
@@ -306,11 +379,11 @@ func dbFetchWAL(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	dir := *dataDir
+	dir := dataDir
 	if dir == "" {
 		dir, _ = os.Getwd()
 	}
-	sysID := *systemID
+	sysID := systemID
 	if sysID == "" {
 		if sysID, err = pgarchive.SystemIdentifier(dir); err != nil {
 			return err
@@ -321,12 +394,19 @@ func dbFetchWAL(ctx context.Context, args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
-	err = pgarchive.New(cfg, sysID).FetchWAL(ctx, name, dest)
-	if errors.Is(err, pgarchive.ErrNotArchived) {
-		// The normal end of recovery: Postgres asks for the next segment and is told there is
-		// none. Exit non-zero without noise in its log.
-		os.Exit(1)
+	return pgarchive.New(cfg, sysID).FetchWAL(ctx, name, dest)
+}
+
+// failFetchWAL reports a fetch-wal failure on stderr (Postgres logs it) and kills this process
+// with SIGKILL, so Postgres sees a fatal restore failure rather than the end of the archive.
+func failFetchWAL(err error) error {
+	fmt.Fprintf(os.Stderr, "conductor: fetch-wal failed; recovery must stop: %v\n", err)
+	if p, perr := os.FindProcess(os.Getpid()); perr == nil {
+		_ = p.Signal(syscall.SIGKILL)
 	}
+	// Only reached when the signal could not be delivered. Any status other than 0 or 1 still
+	// stops recovery rather than reading as the end of the archive.
+	os.Exit(2)
 	return err
 }
 
