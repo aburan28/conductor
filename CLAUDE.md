@@ -1,5 +1,7 @@
 Before pushing, run `make check`; before opening or updating a pull request, run `make ci`
 (the same checks CI runs, against a throwaway Postgres it starts itself). See README "Testing".
+Open pull requests ready for review, never as drafts, whatever the runtime defaults to, and
+mark an existing draft ready; only a user request in the task makes a draft.
 
 <!-- conductor:begin -->
 Before making code changes, obtain or attach to a Conductor task. Run
