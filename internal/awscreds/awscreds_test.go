@@ -427,3 +427,31 @@ func TestKeychain(t *testing.T) {
 		t.Fatalf("round trip: %+v", c)
 	}
 }
+
+// With HOME unset the ~/.aws files cannot be located. They must not be read from the working
+// directory instead, which is where a relative ".aws/config" would point.
+func TestNoHomeDoesNotReadTheWorkingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, ".aws", "config"), "[profile trap]\nregion = us-west-2\n")
+	t.Chdir(dir)
+	env, _ := testEnv(t, nil)
+	env.HomeDir = func() (string, error) { return "", errors.New("$HOME is not defined") }
+	if ps, err := Profiles(env); err == nil {
+		t.Fatalf("with no HOME, Profiles read the working directory's .aws/config: %+v", ps)
+	}
+}
+
+// Naming both files means HOME is not needed at all.
+func TestHomeIsNotNeededWhenBothFilesAreNamed(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config")
+	cred := filepath.Join(dir, "credentials")
+	writeFile(t, cfg, "[profile p]\nregion = eu-west-1\n")
+	writeFile(t, cred, "[p]\naws_access_key_id = AKID\naws_secret_access_key = SECRET\n")
+	env, _ := testEnv(t, map[string]string{"AWS_CONFIG_FILE": cfg, "AWS_SHARED_CREDENTIALS_FILE": cred})
+	env.HomeDir = func() (string, error) { return "", errors.New("$HOME is not defined") }
+	ps, err := Profiles(env)
+	if err != nil || len(ps) != 1 || ps[0].Name != "p" || ps[0].Kind != "static" {
+		t.Fatalf("profiles = %+v, %v; want the static profile p", ps, err)
+	}
+}
