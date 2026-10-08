@@ -1,0 +1,10 @@
+#!/bin/sh
+# Runs as root before the payload is written. Installing over a previous Conductor.app would
+# leave behind any file the new version no longer has, and a stray file inside a bundle
+# breaks its signature, so the old bundle goes first. The data (Application Support, the
+# launch agents, ~/.conductor) is the person's and is not touched.
+set -eu
+TARGET="${3:-/}"
+[ "$TARGET" = "/" ] && TARGET=""
+rm -rf "$TARGET/Applications/Conductor.app"
+exit 0

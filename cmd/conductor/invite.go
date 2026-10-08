@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -218,6 +219,7 @@ Paste the link a teammate gave you (from `+"`conductor invite`"+`). It saves you
 token, and project, verifies them, and tells you how to start contributing.
 
   conductor join "https://conductor.team/#project=myrepo&token=cdt_…"
+  echo "<link>" | conductor join -      # read the link from stdin, keeping the token off the command line
 
 You can also pass the three values by hand if you prefer:
 
@@ -240,7 +242,11 @@ Flags:
 		Endpoint: *endpoint, Token: *token, Project: *projectFlag,
 	}
 	if len(positional) > 0 {
-		parsed, err := parseJoinLink(positional[0])
+		link, err := joinLinkArg(positional[0], os.Stdin)
+		if err != nil {
+			return err
+		}
+		parsed, err := parseJoinLink(link)
 		if err != nil {
 			return err
 		}
@@ -347,6 +353,24 @@ func joinLink(endpoint, project, token string) string {
 	return strings.TrimRight(endpoint, "/") + "/#" + frag.Encode()
 }
 
+// joinLinkArg is the link a `conductor join` argument names. A lone "-" reads the link from
+// stdin instead, so the bearer token never has to sit in the process argument list, where any
+// local user can read it with ps. The macOS app passes the link this way.
+func joinLinkArg(arg string, stdin io.Reader) (string, error) {
+	if arg != "-" {
+		return arg, nil
+	}
+	line, err := bufio.NewReader(stdin).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", fmt.Errorf("reading the link from stdin: %w", err)
+	}
+	link := strings.TrimSpace(line)
+	if link == "" {
+		return "", errors.New("no link on standard input: pipe the link in, e.g. echo \"<link>\" | conductor join -")
+	}
+	return link, nil
+}
+
 // parseJoinLink extracts endpoint, project, and token from a join link. It accepts the
 // fragment form this tool emits, the older query form (`?token=&project=`) that
 // `conductor dashboard` used, and a bare `token&project` fragment body.
@@ -355,7 +379,8 @@ func parseJoinLink(s string) (client.Credentials, error) {
 	var creds client.Credentials
 	u, err := url.Parse(s)
 	if err != nil {
-		return creds, fmt.Errorf("not a valid link: %w", err)
+		// url.Parse's error quotes the whole input, token included, so it is not wrapped here.
+		return creds, errors.New("not a valid invite link")
 	}
 	if u.Scheme != "" && u.Host != "" {
 		creds.Endpoint = u.Scheme + "://" + u.Host

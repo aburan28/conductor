@@ -1,9 +1,56 @@
 package main
 
 import (
+	"flag"
+	"strings"
 	"testing"
 	"time"
 )
+
+// The macOS app passes the join link on standard input as `conductor join -`, so the bearer
+// token never reaches the process argument list. A lone "-" must survive flag parsing as a
+// positional argument, and the link it names must be read from stdin.
+func TestJoinReadsLinkFromStdin(t *testing.T) {
+	fs := flag.NewFlagSet("join", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "")
+	noIntegrate := fs.Bool("no-integrate", false, "")
+	positional, err := parseFlags(fs, []string{"-", "--json", "--no-integrate"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if len(positional) != 1 || positional[0] != "-" {
+		t.Fatalf("positional = %q; want [\"-\"]", positional)
+	}
+	if !*asJSON || !*noIntegrate {
+		t.Fatalf("flags after the dash not parsed: json=%v no-integrate=%v", *asJSON, *noIntegrate)
+	}
+
+	link, err := joinLinkArg("-", strings.NewReader("https://c.team/#token=cdt_x&project=p\n"))
+	if err != nil {
+		t.Fatalf("joinLinkArg(-): %v", err)
+	}
+	creds, err := parseJoinLink(link)
+	if err != nil {
+		t.Fatalf("parseJoinLink(%q): %v", link, err)
+	}
+	if creds.Endpoint != "https://c.team" || creds.Project != "p" || creds.Token != "cdt_x" {
+		t.Errorf("got endpoint=%q project=%q token=%q", creds.Endpoint, creds.Project, creds.Token)
+	}
+
+	// A link on the command line is taken as given, and stdin is not read.
+	direct, err := joinLinkArg("https://c.team/#token=cdt_y&project=p", nil)
+	if err != nil || direct != "https://c.team/#token=cdt_y&project=p" {
+		t.Errorf("joinLinkArg(link) = %q, %v; want the link unchanged", direct, err)
+	}
+
+	// Nothing on stdin is an error, not an empty link handed on to the parser.
+	if _, err := joinLinkArg("-", strings.NewReader("\n")); err == nil {
+		t.Error("joinLinkArg(-) with an empty line: expected an error")
+	}
+	if _, err := joinLinkArg("-", strings.NewReader("")); err == nil {
+		t.Error("joinLinkArg(-) with empty stdin: expected an error")
+	}
+}
 
 func TestJoinLinkRoundTrip(t *testing.T) {
 	link := joinLink("https://conductor.team", "myrepo", "cdt_abc123")
@@ -160,5 +207,23 @@ func TestParseTailscaleStatus(t *testing.T) {
 	}
 	if listenPort("http://127.0.0.1:8721") != "8721" || listenPort("http://localhost") != "8080" {
 		t.Error("listenPort")
+	}
+}
+
+// A malformed link can still carry a live token. url.Parse's error quotes the whole input,
+// token included, so parseJoinLink's error must not echo any of it.
+func TestParseJoinLinkErrorDoesNotEchoTheToken(t *testing.T) {
+	bad := "https://c.team/#token=cdt_SECRETVALUE%zz&project=p"
+	_, err := parseJoinLink(bad)
+	if err == nil {
+		t.Fatal("expected an error for a malformed link")
+	}
+	for _, leak := range []string{"cdt_", "SECRETVALUE", "c.team", "%zz"} {
+		if strings.Contains(err.Error(), leak) {
+			t.Fatalf("error echoes the input (%q): %v", leak, err)
+		}
+	}
+	if err.Error() != "not a valid invite link" {
+		t.Errorf("error = %q; want the fixed message", err.Error())
 	}
 }

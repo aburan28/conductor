@@ -1,0 +1,2 @@
+This build is signed with a Developer ID and notarized by Apple: the installer opens with a
+double-click.
