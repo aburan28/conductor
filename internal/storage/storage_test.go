@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/aburan28/conductor/internal/awscreds"
+	"github.com/aburan28/conductor/internal/backup"
 	"github.com/aburan28/conductor/internal/backup/s3fake"
 )
 
@@ -264,5 +265,39 @@ func TestSealPassphraseKeychainErrors(t *testing.T) {
 	}
 	if pass, err := SealPassphrase(ctx, testAWSEnv(nil)); err != nil || pass != "" {
 		t.Fatalf("off macOS = %q, %v; want no seal and no error", pass, err)
+	}
+}
+
+// The CONDUCTOR_BACKUP_S3_ACCESS_KEY path must sign with the same secret and session token as
+// internal/backup's FromEnv: the AWS_* values when the CONDUCTOR_BACKUP_S3_* ones are unset,
+// and the explicit values when they are set.
+func TestAccessKeyVariablesFallBackToAWSSecretAndToken(t *testing.T) {
+	vars := map[string]string{
+		"CONDUCTOR_BACKUP_S3_BUCKET": "b", "CONDUCTOR_BACKUP_S3_ACCESS_KEY": "AKID",
+		"AWS_SECRET_ACCESS_KEY": "awssecret", "AWS_SESSION_TOKEN": "awstok",
+	}
+	sign := func() backup.Credentials {
+		t.Helper()
+		r, err := Resolve(envOf(vars))
+		if err != nil {
+			t.Fatal(err)
+		}
+		src, err := r.Credentials(testAWSEnv(vars))
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, err := src.Retrieve(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	if c := sign(); c.AccessKey != "AKID" || c.SecretKey != "awssecret" || c.SessionToken != "awstok" {
+		t.Fatalf("AWS_* fallback: %+v", c)
+	}
+	vars["CONDUCTOR_BACKUP_S3_SECRET_KEY"] = "explicit"
+	vars["CONDUCTOR_BACKUP_S3_SESSION_TOKEN"] = "explicit-token"
+	if c := sign(); c.SecretKey != "explicit" || c.SessionToken != "explicit-token" {
+		t.Fatalf("explicit variables must win: %+v", c)
 	}
 }

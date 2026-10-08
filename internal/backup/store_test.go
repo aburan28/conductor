@@ -81,3 +81,19 @@ func TestSanitizeMachine(t *testing.T) {
 		}
 	}
 }
+
+// The CONDUCTOR_BACKUP_S3_ACCESS_KEY variables take the secret and session token from the AWS_*
+// variables when their own are unset. internal/storage's path must agree with this one.
+func TestFromEnvAccessKeyFallsBackToAWSSecretAndToken(t *testing.T) {
+	env := map[string]string{
+		"CONDUCTOR_BACKUP_S3_BUCKET": "b", "CONDUCTOR_BACKUP_S3_ACCESS_KEY": "AKID",
+		"AWS_SECRET_ACCESS_KEY": "awssecret", "AWS_SESSION_TOKEN": "awstok",
+	}
+	store, ok, err := FromEnv(func(k string) string { return env[k] })
+	if err != nil || !ok {
+		t.Fatalf("FromEnv enabled=%v err=%v", ok, err)
+	}
+	if c := store.s3.cfg; c.AccessKey != "AKID" || c.SecretKey != "awssecret" || c.SessionToken != "awstok" {
+		t.Fatalf("access key path: %+v", c)
+	}
+}

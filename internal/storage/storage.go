@@ -269,10 +269,11 @@ func Resolve(getenv func(string) string) (Resolved, error) {
 			},
 			Auth: Auth{Method: AuthEnvironment},
 		}
-		// The variables have always taken an explicit key pair before the AWS_* ones.
+		// The variables have always taken an explicit key pair before the AWS_* ones. The secret
+		// falls back to AWS_SECRET_ACCESS_KEY, as internal/backup's FromEnv does.
 		if ak := getenv("CONDUCTOR_BACKUP_S3_ACCESS_KEY"); ak != "" {
 			r.Settings.Auth = Auth{Method: AuthStatic, AccessKeyID: ak, Secret: SecretFile,
-				SecretAccessKey: getenv("CONDUCTOR_BACKUP_S3_SECRET_KEY")}
+				SecretAccessKey: firstNonEmpty(getenv("CONDUCTOR_BACKUP_S3_SECRET_KEY"), getenv("AWS_SECRET_ACCESS_KEY"))}
 		}
 		return r, nil
 	}
@@ -318,7 +319,7 @@ func (r Resolved) Credentials(env awscreds.Env) (backup.CredentialSource, error)
 		case a.Secret == SecretFile:
 			sessionToken := ""
 			if r.Source == SourceEnv {
-				sessionToken = env.Getenv("CONDUCTOR_BACKUP_S3_SESSION_TOKEN")
+				sessionToken = firstNonEmpty(env.Getenv("CONDUCTOR_BACKUP_S3_SESSION_TOKEN"), env.Getenv("AWS_SESSION_TOKEN"))
 			}
 			return awscreds.Static{Creds: backup.Credentials{AccessKey: a.AccessKeyID, SecretKey: a.SecretAccessKey,
 				SessionToken: sessionToken, Source: "access key (" + r.Source + ")"}}, nil
