@@ -160,20 +160,28 @@ func archiveCommandPrefix() string {
 	return prefix
 }
 
-// archivingSettings are the postgresql.conf settings that hand WAL to archive-wal.
-func archivingSettings(d dbStorage) [][2]string {
+// archivingSettings are the postgresql.conf settings that hand WAL to archive-wal. wal_level is
+// included only when raiseWALLevel is set (see walLevelIsMinimal): archiving needs replica or
+// higher, and a logical setting the cluster already has must not be overridden.
+func archivingSettings(d dbStorage, raiseWALLevel bool) [][2]string {
 	if !d.archive {
 		return [][2]string{{"archive_mode", "off"}}
 	}
-	return [][2]string{
+	settings := [][2]string{
 		{"archive_mode", "on"},
 		{"archive_command", archiveCommandPrefix() + " db archive-wal %p %f"},
 		{"archive_timeout", fmt.Sprintf("%ds", d.resolved.Settings.Database.ArchiveTimeout())},
-		{"wal_level", "replica"},
 	}
+	if raiseWALLevel {
+		settings = append(settings, [2]string{"wal_level", "replica"})
+	}
+	return settings
 }
 
 const autoConfMarker = "# Managed by `conductor db archiving`"
+
+// archiveKeys are the archive settings conductor owns in postgresql.auto.conf wherever they are.
+var archiveKeys = map[string]bool{"archive_mode": true, "archive_command": true, "archive_timeout": true}
 
 func dbArchiving(args []string) error {
 	fs := flag.NewFlagSet("db archiving", flag.ContinueOnError)
@@ -187,7 +195,13 @@ func dbArchiving(args []string) error {
 	if err != nil {
 		return err
 	}
-	settings := archivingSettings(d)
+	raise := false
+	if *dataDir != "" && d.archive {
+		if raise, err = walLevelIsMinimal(*dataDir); err != nil {
+			return err
+		}
+	}
+	settings := archivingSettings(d, raise)
 	if *write {
 		if *dataDir == "" {
 			return errors.New("--write needs --data-dir")
@@ -206,42 +220,160 @@ func dbArchiving(args []string) error {
 	for _, kv := range settings {
 		fmt.Printf("%s = %s\n", kv[0], pgarchive.ConfQuote(kv[1]))
 	}
+	if d.archive && *dataDir == "" {
+		fmt.Fprintln(os.Stderr, "wal_level must be replica or higher for archiving; pass --data-dir to check the cluster's value")
+	}
 	if *write {
 		fmt.Fprintf(os.Stderr, "Wrote %s. Restart Postgres if archive_mode changed.\n", filepath.Join(*dataDir, "postgresql.auto.conf"))
 	}
 	return nil
 }
 
-// writeAutoConf replaces the managed keys in postgresql.auto.conf (which Postgres itself
-// rewrites with ALTER SYSTEM, one `key = 'value'` per line) and appends them under a marker.
+// confLine is one line of a postgresql.conf-style file, classified for conductor's managed block.
+type confLine struct {
+	text string
+	// key is the setting name when the line is "key = value", else "".
+	key string
+	// owned is set for the settings conductor wrote under its marker. Only the managed settings in
+	// the run right after the marker are conductor's: a line added elsewhere, such as one Postgres's
+	// ALTER SYSTEM wrote, is not.
+	owned bool
+}
+
+// scanConfLines splits body into lines and marks conductor's own block.
+func scanConfLines(body string) []confLine {
+	if body == "" {
+		return nil
+	}
+	var out []confLine
+	inBlock := false
+	for _, text := range strings.Split(strings.TrimRight(body, "\n"), "\n") {
+		trimmed := strings.TrimSpace(text)
+		line := confLine{text: text}
+		if trimmed == autoConfMarker {
+			inBlock = true
+			out = append(out, line)
+			continue
+		}
+		if k, _, ok := strings.Cut(trimmed, "="); ok {
+			line.key = strings.TrimSpace(k)
+		}
+		line.owned = inBlock && line.key != "" && (archiveKeys[line.key] || line.key == "wal_level")
+		inBlock = line.owned
+		out = append(out, line)
+	}
+	return out
+}
+
+// confValue is the value of a "key = value" line: a quoted string or a bare word, without any
+// trailing comment.
+func confValue(text string) string {
+	_, v, _ := strings.Cut(text, "=")
+	v = strings.TrimSpace(v)
+	if strings.HasPrefix(v, "'") {
+		if end := strings.Index(v[1:], "'"); end >= 0 {
+			return v[1 : end+1]
+		}
+		return ""
+	}
+	if i := strings.IndexAny(v, " \t#"); i >= 0 {
+		v = v[:i]
+	}
+	return v
+}
+
+// walLevelIsMinimal reports whether the cluster in dataDir would run with wal_level = minimal, the
+// one value below replica, which archiving cannot use. The server reads postgresql.conf and then
+// postgresql.auto.conf, and the later assignment wins. Conductor's own lines are left out: the
+// question is the cluster's setting, not the one conductor may write. Unset means replica.
+func walLevelIsMinimal(dataDir string) (bool, error) {
+	level := "replica"
+	for _, name := range []string{"postgresql.conf", "postgresql.auto.conf"} {
+		body, err := os.ReadFile(filepath.Join(dataDir, name))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		for _, l := range scanConfLines(string(body)) {
+			if l.key == "wal_level" && !l.owned {
+				level = confValue(l.text)
+			}
+		}
+	}
+	return strings.EqualFold(level, "minimal"), nil
+}
+
+// writeAutoConf sets the archive settings in postgresql.auto.conf, which Postgres itself rewrites
+// with ALTER SYSTEM. Archive settings are replaced wherever they are. wal_level is replaced only
+// in conductor's own block, so a wal_level set elsewhere is kept, and a stale one that conductor
+// wrote is dropped when it is no longer needed. The rest of the file is kept as it is.
 func writeAutoConf(path string, settings [][2]string) error {
+	return writeAutoConfWith(path, settings, nil)
+}
+
+// writeAutoConfWith is writeAutoConf. beforeRename runs once the new contents are complete and
+// before they replace the file; a test uses it to interrupt the write.
+func writeAutoConfWith(path string, settings [][2]string, beforeRename func() error) error {
 	existing, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	managed := map[string]bool{}
-	for _, kv := range settings {
-		managed[kv[0]] = true
-	}
-	managed["archive_command"], managed["archive_timeout"] = true, true
 	var keep []string
-	for _, line := range strings.Split(strings.TrimRight(string(existing), "\n"), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == autoConfMarker {
+	for _, l := range scanConfLines(string(existing)) {
+		if strings.TrimSpace(l.text) == autoConfMarker || archiveKeys[l.key] || (l.owned && l.key == "wal_level") {
 			continue
 		}
-		if k, _, ok := strings.Cut(trimmed, "="); ok && managed[strings.TrimSpace(k)] {
-			continue
-		}
-		if line != "" || len(keep) > 0 {
-			keep = append(keep, line)
+		if l.text != "" || len(keep) > 0 {
+			keep = append(keep, l.text)
 		}
 	}
 	keep = append(keep, autoConfMarker)
 	for _, kv := range settings {
 		keep = append(keep, kv[0]+" = "+pgarchive.ConfQuote(kv[1]))
 	}
-	return os.WriteFile(path, []byte(strings.Join(keep, "\n")+"\n"), 0o600)
+	return replaceFile(path, []byte(strings.Join(keep, "\n")+"\n"), 0o600, beforeRename)
+}
+
+// replaceFile writes data to path through a temporary file in the same directory, synced and then
+// renamed over path. An interrupted write therefore leaves the old file whole, never a truncated
+// one.
+func replaceFile(path string, data []byte, perm os.FileMode, beforeRename func() error) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name()) // a no-op once the file has been renamed
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if beforeRename != nil {
+		if err := beforeRename(); err != nil {
+			return err
+		}
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return err
+	}
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync() // make the rename durable where the platform allows it
+		d.Close()
+	}
+	return nil
 }
 
 func dbArchiveWAL(ctx context.Context, args []string) error {

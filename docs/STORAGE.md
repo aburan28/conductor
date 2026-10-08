@@ -183,6 +183,11 @@ directory's `postgresql.auto.conf`, with the binary's absolute path. It prefixes
 carry it. Restart Postgres when `archive_mode` changes. `conductor db restore` writes the
 `restore_command`.
 
+`wal_level` is set to `replica` only when the cluster's own value is `minimal`, the one value archiving
+cannot use. A `logical` (or `replica`) setting is left alone, so logical decoding keeps working. The
+file is replaced through a temporary file and a rename, so an interrupted write leaves the old
+file whole.
+
 ```
 conductor db archiving --data-dir DIR [--write] [--json]
 conductor db archive-wal <path> <name> [--data-dir DIR]     # archive_command
