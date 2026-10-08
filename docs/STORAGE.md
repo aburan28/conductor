@@ -156,6 +156,11 @@ with defaults applied. `source` is `file`, `env`, or `none`. `off` is true when
   "error": "" }
 ```
 
+## Limits
+
+An object is read in full only up to 128 MiB, which holds a 64 MiB WAL segment with the seal
+overhead. A larger object is refused with an error, never returned in part.
+
 ## Sealing
 
 Sealed objects are encrypted on the machine before upload with a passphrase:

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -339,5 +340,29 @@ func TestMissingBucketIsAnErrorAndMissingKeyIsNotFound(t *testing.T) {
 		Endpoint: "http://" + u.Host, PathStyle: true, Insecure: true})
 	if _, err := real.Get(ctx, "conductor/machines/m/sessions.json"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("a missing key = %v; want ErrNotFound", err)
+	}
+}
+
+// A GET returns the object whole up to the 128 MiB cap, and an object over it is an error, never
+// a silently cut-off prefix.
+type zeros struct{}
+
+func (zeros) Read(p []byte) (int, error) { clear(p); return len(p), nil }
+
+func TestGetRefusesAnObjectOverTheCap(t *testing.T) {
+	const limit = 128 << 20
+	for _, size := range []int64{limit, limit + 1} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+			_, _ = io.CopyN(w, zeros{}, size)
+		}))
+		body, err := testClient(srv).Get(context.Background(), "sessions/big.ckpt")
+		srv.Close()
+		if size == limit && (err != nil || int64(len(body)) != limit) {
+			t.Fatalf("an object of exactly the cap: %d bytes, %v; want all %d", len(body), err, limit)
+		}
+		if size > limit && err == nil {
+			t.Fatalf("an object of %d bytes was accepted; want an error over the %d-byte cap", size, limit)
+		}
 	}
 }

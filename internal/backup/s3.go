@@ -111,7 +111,12 @@ func (s *S3) Put(ctx context.Context, key string, body []byte, contentType strin
 	return nil
 }
 
-// Get fetches key. A missing key returns ErrNotFound.
+// maxObjectBytes is the largest object Get returns: 128 MiB, which holds a 64 MiB WAL segment
+// with the seal's overhead. A larger object is an error. It is never returned cut short, because
+// a truncated checkpoint or segment would look valid until it failed to open.
+const maxObjectBytes = 128 << 20
+
+// Get fetches key. A missing key returns ErrNotFound; an object over maxObjectBytes is an error.
 func (s *S3) Get(ctx context.Context, key string) ([]byte, error) {
 	req, err := s.newRequest(ctx, http.MethodGet, key, nil)
 	if err != nil {
@@ -131,7 +136,22 @@ func (s *S3) Get(ctx context.Context, key string) ([]byte, error) {
 		}
 		return nil, s3ErrorFrom("GET", key, resp, body)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	if resp.ContentLength > maxObjectBytes {
+		return nil, objectTooLarge(key)
+	}
+	// One byte past the cap tells a body that is exactly the cap from one that is larger.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxObjectBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxObjectBytes {
+		return nil, objectTooLarge(key)
+	}
+	return body, nil
+}
+
+func objectTooLarge(key string) error {
+	return fmt.Errorf("backup: S3 GET %s: the object is larger than %d MiB and was not read", key, maxObjectBytes>>20)
 }
 
 // List returns the keys under a prefix (up to 1000, which is far more sessions than a machine
