@@ -10,9 +10,9 @@ import (
 	"github.com/aburan28/conductor/internal/pgarchive"
 )
 
-// s3Failure is the shape of an error from a bucket that is down or refusing us: not "not
+// errS3Failure is the shape of an error from a bucket that is down or refusing us: not "not
 // archived", so Postgres must not read it as the end of the archive.
-var s3Failure = errors.New("backup: S3 GET conductor/db/7001/wal/000000010000000000000029: 503 Service Unavailable: SlowDown")
+var errS3Failure = errors.New("backup: S3 GET conductor/db/7001/wal/000000010000000000000029: 503 Service Unavailable: SlowDown")
 
 func TestFetchWALOnlyAMissingSegmentIsNotArchived(t *testing.T) {
 	cases := []struct {
@@ -23,7 +23,7 @@ func TestFetchWALOnlyAMissingSegmentIsNotArchived(t *testing.T) {
 		{"segment written", nil, fetchWALDone},
 		{"segment absent", pgarchive.ErrNotArchived, fetchWALNotArchived},
 		{"segment absent, wrapped", fmt.Errorf("fetch: %w", pgarchive.ErrNotArchived), fetchWALNotArchived},
-		{"S3 error", s3Failure, fetchWALFailed},
+		{"S3 error", errS3Failure, fetchWALFailed},
 		{"missing settings", errors.New("the database is not archived: configure a bucket"), fetchWALFailed},
 		{"bad key", errors.New("the archive key file is corrupt"), fetchWALFailed},
 	}
@@ -38,9 +38,9 @@ func TestFetchWALRetriesAreBounded(t *testing.T) {
 	calls := 0
 	res, err := runFetchWAL(context.Background(), func(context.Context) error {
 		calls++
-		return s3Failure
+		return errS3Failure
 	}, fetchWALAttempts, 0)
-	if res != fetchWALFailed || !errors.Is(err, s3Failure) {
+	if res != fetchWALFailed || !errors.Is(err, errS3Failure) {
 		t.Fatalf("result %v, err %v; want a failure carrying the S3 error", res, err)
 	}
 	if calls != fetchWALAttempts {
@@ -64,7 +64,7 @@ func TestFetchWALRecoversFromATransientFailure(t *testing.T) {
 	res, err := runFetchWAL(context.Background(), func(context.Context) error {
 		calls++
 		if calls == 1 {
-			return s3Failure
+			return errS3Failure
 		}
 		return nil
 	}, fetchWALAttempts, 0)
@@ -79,7 +79,7 @@ func TestFetchWALStopsRetryingWhenCancelled(t *testing.T) {
 	calls := 0
 	res, _ := runFetchWAL(ctx, func(context.Context) error {
 		calls++
-		return s3Failure
+		return errS3Failure
 	}, fetchWALAttempts, time.Hour)
 	if res != fetchWALFailed || calls != 1 {
 		t.Fatalf("result %v after %d fetches; want one fetch and then failure", res, calls)
