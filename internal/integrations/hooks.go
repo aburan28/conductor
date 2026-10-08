@@ -5,8 +5,8 @@ import (
 	"strings"
 )
 
-// HookCommand is the prefix every hook this package installs starts with. Removal and
-// idempotency key on it, so a user's own hooks on the same event are never touched.
+// HookCommand is the prefix every hook this package installs starts with. Removal matches
+// known full commands, leaving unrelated user hooks on the same event alone.
 const HookCommand = "conductor hook"
 
 // Claude Code hook events this package wires (DESIGN.md §17.4). PreToolUse on the editing
@@ -23,6 +23,10 @@ var claudeHooks = []hookSpec{
 	// changed) and one right before compaction, when the transcript is at its richest.
 	{"Stop", "", HookCommand + " checkpoint", 30},
 	{"PreCompact", "", HookCommand + " checkpoint", 30},
+	{"PostToolUse", "", HookCommand + " memory-observe --harness claude", 5},
+	{"PostToolUseFailure", "", HookCommand + " memory-observe --harness claude", 5},
+	{"Stop", "", HookCommand + " memory-observe --harness claude", 5},
+	{"UserPromptSubmit", "", HookCommand + " memory-context", 5},
 }
 
 // hookSpec is one hook a harness runs: on Event, for tools matching Matcher, run Command.
@@ -45,11 +49,16 @@ var codexHooks = []hookSpec{
 	{"SessionEnd", "", HookCommand + " session-end --harness codex", 3},
 	{"Stop", "", HookCommand + " checkpoint --harness codex", 30},
 	{"PreCompact", "", HookCommand + " checkpoint --harness codex", 30},
+	{"PostToolUse", "", HookCommand + " memory-observe --harness codex", 5},
+	{"Stop", "", HookCommand + " memory-observe --harness codex", 5},
+	{"UserPromptSubmit", "", HookCommand + " memory-context", 5},
 }
 
-// optionalHookEvents are events older Claude Code builds do not have; their absence does
-// not make an integration "not installed".
-var optionalHookEvents = map[string]bool{"SessionEnd": true, "Stop": true, "PreCompact": true}
+// Older builds can omit these coordination events. Memory's Stop capture is required.
+func optionalHook(h hookSpec) bool {
+	return h.Event == "SessionEnd" || h.Event == "PreCompact" ||
+		strings.HasPrefix(h.Command, HookCommand+" checkpoint")
+}
 
 // mergeClaudeHooks installs (or with remove, uninstalls) Conductor's hooks in a Claude Code
 // settings object, leaving every hook that is not ours exactly where it was.
@@ -68,9 +77,16 @@ func mergeHooks(settings map[string]any, specs []hookSpec, remove bool) {
 		}
 		hooks = map[string]any{}
 	}
-
+	byEvent := make(map[string][]hookSpec)
+	var events []string
 	for _, h := range specs {
-		groups, _ := hooks[h.Event].([]any)
+		if len(byEvent[h.Event]) == 0 {
+			events = append(events, h.Event)
+		}
+		byEvent[h.Event] = append(byEvent[h.Event], h)
+	}
+	for _, event := range events {
+		groups, _ := hooks[event].([]any)
 		var kept []any
 		for _, g := range groups {
 			group, ok := g.(map[string]any)
@@ -81,7 +97,7 @@ func mergeHooks(settings map[string]any, specs []hookSpec, remove bool) {
 			handlers, _ := group["hooks"].([]any)
 			var others []any
 			for _, hd := range handlers {
-				if !isConductorHook(hd) {
+				if !isManagedHook(hd) {
 					others = append(others, hd)
 				}
 			}
@@ -95,20 +111,22 @@ func mergeHooks(settings map[string]any, specs []hookSpec, remove bool) {
 			}
 		}
 		if !remove {
-			group := map[string]any{
-				"hooks": []any{map[string]any{
-					"type": "command", "command": h.Command, "timeout": h.Timeout,
-				}},
+			for _, h := range byEvent[event] {
+				group := map[string]any{
+					"hooks": []any{map[string]any{
+						"type": "command", "command": h.Command, "timeout": h.Timeout,
+					}},
+				}
+				if h.Matcher != "" {
+					group["matcher"] = h.Matcher
+				}
+				kept = append(kept, group)
 			}
-			if h.Matcher != "" {
-				group["matcher"] = h.Matcher
-			}
-			kept = append(kept, group)
 		}
 		if len(kept) == 0 {
-			delete(hooks, h.Event)
+			delete(hooks, event)
 		} else {
-			hooks[h.Event] = kept
+			hooks[event] = kept
 		}
 	}
 
@@ -131,14 +149,14 @@ func hooksInstalled(settings map[string]any, specs []hookSpec) bool {
 		return false
 	}
 	for _, h := range specs {
-		if optionalHookEvents[h.Event] {
+		if optionalHook(h) {
 			continue
 		}
 		found := false
 		for _, g := range toSlice(hooks[h.Event]) {
 			group, _ := g.(map[string]any)
 			for _, hd := range toSlice(group["hooks"]) {
-				if isConductorHook(hd) {
+				if hookCommand(hd) == h.Command {
 					found = true
 				}
 			}
@@ -150,13 +168,28 @@ func hooksInstalled(settings map[string]any, specs []hookSpec) bool {
 	return true
 }
 
-func isConductorHook(handler any) bool {
+func hookCommand(handler any) string {
 	h, ok := handler.(map[string]any)
 	if !ok {
-		return false
+		return ""
 	}
 	cmd, _ := h["command"].(string)
-	return strings.HasPrefix(strings.TrimSpace(cmd), HookCommand)
+	return strings.TrimSpace(cmd)
+}
+
+func isManagedHook(handler any) bool {
+	cmd := hookCommand(handler)
+	if cmd == HookCommand+" pre-tool" { // old installs before --auto-reserve
+		return true
+	}
+	for _, specs := range [][]hookSpec{claudeHooks, codexHooks} {
+		for _, h := range specs {
+			if cmd == h.Command {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func toSlice(v any) []any {
