@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -132,7 +134,11 @@ func (a *Archiver) BaseBackup(ctx context.Context, opts BaseBackupOptions) (m Ma
 		partSize = 64 << 20
 	}
 	started := a.cfg.Now().UTC()
-	m = Manifest{Version: 1, ID: started.Format("20060102T150405Z"), SystemID: a.systemID, PGVersion: opts.Info.Version,
+	id, err := newBackupID(started)
+	if err != nil {
+		return m, err
+	}
+	m = Manifest{Version: 1, ID: id, SystemID: a.systemID, PGVersion: opts.Info.Version,
 		StartedAt: started.Format(time.RFC3339), WALSegmentSize: opts.Info.WALSegmentSize, Sealed: a.cfg.Seal}
 
 	var key *DataKey
@@ -167,6 +173,12 @@ func (a *Archiver) BaseBackup(ctx context.Context, opts BaseBackupOptions) (m Ma
 		}
 	}
 	objectKey := a.baseTarKey(m.ID, a.cfg.Seal)
+	// abandon ends a failed run. It deletes only the object this run wrote. The ID is unique to
+	// the run, so no other backup's base.tar or manifest is ever named here.
+	abandon := func(cause error) (Manifest, error) {
+		_ = a.s3.Delete(context.WithoutCancel(ctx), objectKey)
+		return m, cause
+	}
 	stored, putErr := a.s3.PutStream(ctx, objectKey, body, partSize, "application/x-tar")
 	if putErr != nil {
 		cancel() // stop pg_basebackup; nothing will read its output
@@ -174,33 +186,42 @@ func (a *Archiver) BaseBackup(ctx context.Context, opts BaseBackupOptions) (m Ma
 	waitErr := cmd.Wait()
 	switch {
 	case putErr != nil:
-		return m, fmt.Errorf("uploading the base backup: %w", putErr)
+		return abandon(fmt.Errorf("uploading the base backup: %w", putErr))
 	case waitErr != nil:
-		// The upload saw the stream end early and stored a short object; it has no
-		// manifest, so it is not a backup, but remove it.
-		_ = a.s3.Delete(context.WithoutCancel(ctx), objectKey)
-		return m, fmt.Errorf("pg_basebackup: %v: %s", waitErr, lastLines(stderr.String(), 3))
+		// The upload saw the stream end early and stored a short object; it has no manifest,
+		// so it is not a backup.
+		return abandon(fmt.Errorf("pg_basebackup: %v: %s", waitErr, lastLines(stderr.String(), 3)))
 	}
 
 	log := stderr.String()
 	sm := startRE.FindStringSubmatch(log)
 	em := endRE.FindStringSubmatch(log)
 	if sm == nil || em == nil {
-		_ = a.s3.Delete(context.WithoutCancel(ctx), objectKey)
-		return m, fmt.Errorf("pg_basebackup did not report its WAL range: %s", lastLines(log, 3))
+		return abandon(fmt.Errorf("pg_basebackup did not report its WAL range: %s", lastLines(log, 3)))
 	}
 	tli, _ := strconv.ParseUint(sm[2], 10, 32)
 	m.StartLSN, m.EndLSN, m.Timeline = sm[1], em[1], uint32(tli)
 	if m.StartWAL, err = SegmentForLSN(m.Timeline, m.StartLSN, m.WALSegmentSize); err != nil {
-		return m, err
+		return abandon(err)
 	}
 	m.Size, m.StoredSize = plain.n.Load(), stored
 	m.FinishedAt = a.cfg.Now().UTC().Format(time.RFC3339)
 	manifest, _ := json.MarshalIndent(m, "", "  ")
 	if err := a.s3.Put(ctx, a.manifestKey(m.ID), manifest, "application/json"); err != nil {
-		return m, fmt.Errorf("writing the manifest: %w", err)
+		return abandon(fmt.Errorf("writing the manifest: %w", err))
 	}
 	return m, nil
+}
+
+// newBackupID names a base backup by its start time to the second, plus a random suffix. Two
+// runs in the same second get different IDs, so the second can neither overwrite nor delete the
+// first one's base.tar or manifest.
+func newBackupID(started time.Time) (string, error) {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("base backup ID: %w", err)
+	}
+	return started.UTC().Format("20060102T150405Z") + "-" + hex.EncodeToString(b[:]), nil
 }
 
 func (a *Archiver) baseTarKey(id string, sealed bool) string {

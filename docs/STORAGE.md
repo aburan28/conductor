@@ -220,9 +220,13 @@ segments:
 ```
 <prefix>/db/<system-identifier>/key.json                       the sealed data key
 <prefix>/db/<system-identifier>/wal/<file>[.sealed]
-<prefix>/db/<system-identifier>/base/<UTC timestamp>/base.tar[.sealed]
-<prefix>/db/<system-identifier>/base/<UTC timestamp>/manifest.json
+<prefix>/db/<system-identifier>/base/<backup ID>/base.tar[.sealed]
+<prefix>/db/<system-identifier>/base/<backup ID>/manifest.json
 ```
+
+A backup ID is its UTC start time to the second, then a random suffix (`20261008T024522Z-1a2b3c4d`),
+so two runs in one second never share objects. Backups are ordered by timeline and start log
+position, not by ID.
 
 `archive-wal` is idempotent. It succeeds if the bucket already holds identical content under
 that name, and fails if the bucket holds different content. Postgres then keeps the segment
