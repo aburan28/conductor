@@ -122,11 +122,14 @@ func (s *S3) Get(ctx context.Context, key string) ([]byte, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, ErrNotFound
-	}
 	if resp.StatusCode/100 != 2 {
-		return nil, s3Error("GET", key, resp)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+		// Only a missing key is "nothing there". A 404 for anything else, such as a misspelled
+		// bucket (NoSuchBucket), is an error: read as "nothing to restore", it would exit 0.
+		if resp.StatusCode == http.StatusNotFound && s3ErrorCode(body) == "NoSuchKey" {
+			return nil, ErrNotFound
+		}
+		return nil, s3ErrorFrom("GET", key, resp, body)
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 }
@@ -414,9 +417,24 @@ func hmacSHA256(key []byte, data string) []byte {
 
 func s3Error(op, key string, resp *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+	return s3ErrorFrom(op, key, resp, body)
+}
+
+func s3ErrorFrom(op, key string, resp *http.Response, body []byte) error {
 	msg := strings.TrimSpace(string(body))
 	if len(msg) > 300 {
 		msg = msg[:300]
 	}
 	return fmt.Errorf("backup: S3 %s %s: %s: %s", op, key, resp.Status, msg)
+}
+
+// s3ErrorCode is the <Code> of an S3 XML error body, or "" when there is none.
+func s3ErrorCode(body []byte) string {
+	var e struct {
+		Code string `xml:"Code"`
+	}
+	if xml.Unmarshal(body, &e) != nil {
+		return ""
+	}
+	return e.Code
 }

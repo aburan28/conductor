@@ -3,6 +3,7 @@ package backup
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/aburan28/conductor/internal/backup/s3fake"
 )
 
 // fakeS3 is an in-memory, path-style S3 that records the requests it receives, so the client's
@@ -48,6 +51,7 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		body, ok := f.obj[key]
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `<Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message></Error>`)
 			return
 		}
 		_, _ = w.Write(body)
@@ -315,5 +319,25 @@ func TestPlainHTTPEndpointNeedsInsecure(t *testing.T) {
 	}
 	if err := testClient(srv).Put(context.Background(), "k", []byte("x"), "text/plain"); err != nil {
 		t.Errorf("Put over http with Insecure: %v", err)
+	}
+}
+
+// A missing bucket is a 404 too, with the code NoSuchBucket. It is an error, not "nothing to
+// restore", and a missing key is still ErrNotFound.
+func TestMissingBucketIsAnErrorAndMissingKeyIsNotFound(t *testing.T) {
+	fake := s3fake.New("real-bucket")
+	defer fake.Close()
+	u, _ := url.Parse(fake.URL)
+	ctx := context.Background()
+	typo := New(S3Config{Bucket: "typo-bucket", Region: "us-east-1", AccessKey: "AK", SecretKey: "SK",
+		Endpoint: "http://" + u.Host, PathStyle: true, Insecure: true})
+	if _, err := typo.Get(ctx, "conductor/machines/m/sessions.json"); err == nil || errors.Is(err, ErrNotFound) ||
+		!strings.Contains(err.Error(), "NoSuchBucket") {
+		t.Fatalf("a missing bucket read as %v; want a NoSuchBucket error", err)
+	}
+	real := New(S3Config{Bucket: "real-bucket", Region: "us-east-1", AccessKey: "AK", SecretKey: "SK",
+		Endpoint: "http://" + u.Host, PathStyle: true, Insecure: true})
+	if _, err := real.Get(ctx, "conductor/machines/m/sessions.json"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a missing key = %v; want ErrNotFound", err)
 	}
 }
