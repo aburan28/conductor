@@ -329,6 +329,12 @@ func applyStaticSecret(ctx context.Context, env awscreds.Env, a *storage.Auth, f
 	if a.AccessKeyID == "" {
 		return errors.New("--auth static needs --access-key-id")
 	}
+	// Without --secret-from nothing is moved, so asking for the Keychain would only be
+	// recorded in the file while the secret stayed where it was. Refuse rather than say "Saved".
+	if from == "" && store == storage.SecretKeychain {
+		return errors.New("--secret-store keychain needs --secret-from: stdin stores the secret in the Keychain, " +
+			"keychain uses the item already there; without either, the secret is not moved")
+	}
 	if store == "" {
 		store = a.Secret
 	}

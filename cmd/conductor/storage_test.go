@@ -196,3 +196,24 @@ func TestStorageSetRejectsSpaceSeparatedBool(t *testing.T) {
 		t.Fatal("a half-parsed command still wrote settings")
 	}
 }
+
+// --secret-store keychain with no --secret-from used to keep a plaintext secret already in
+// storage.json and still print "Saved". It is refused, and the error names both flags.
+func TestStorageSecretStoreKeychainNeedsSecretFrom(t *testing.T) {
+	isolateStorage(t)
+	ctx := context.Background()
+	if _, err := captureStdout(t, func() error {
+		return storageSet(ctx, []string{"--bucket", "b1", "--auth", "static", "--access-key-id", "AKIDPLAIN",
+			"--secret-from", "stdin", "--secret-store", "file"}, strings.NewReader("plainsecret\n"))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err := storageSet(ctx, []string{"--secret-store", "keychain"}, strings.NewReader(""))
+	if err == nil || !strings.Contains(err.Error(), "--secret-store") || !strings.Contains(err.Error(), "--secret-from") {
+		t.Fatalf("--secret-store keychain without --secret-from = %v; want an error naming both flags", err)
+	}
+	s, ok, err := storage.Load(os.Getenv)
+	if err != nil || !ok || s.Auth.Secret != storage.SecretFile || s.Auth.SecretAccessKey != "plainsecret" {
+		t.Fatalf("settings changed by the refused command: %+v, %v", s.Auth, err)
+	}
+}
