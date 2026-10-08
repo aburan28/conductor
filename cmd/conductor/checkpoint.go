@@ -772,7 +772,10 @@ Flags:
 	if err != nil {
 		return err
 	}
-	pass := storage.SealPassphrase(ctx, awscreds.Default())
+	pass, err := storage.SealPassphrase(ctx, awscreds.Default())
+	if err != nil {
+		return err
+	}
 	if pass == "" {
 		return errors.New("no seal passphrase: set CONDUCTOR_CHECKPOINT_KEY (or, on macOS, set one in the app's " +
 			"Storage settings); a checkpoint is pushed only sealed")
@@ -990,7 +993,11 @@ Flags:
 // checkpointPassphrase reads the sealing passphrase from CONDUCTOR_CHECKPOINT_KEY, or asks
 // on the terminal.
 func checkpointPassphrase(required bool) (string, error) {
-	if v := storage.SealPassphrase(context.Background(), awscreds.Default()); v != "" {
+	v, err := storage.SealPassphrase(context.Background(), awscreds.Default())
+	if err != nil {
+		return "", err
+	}
+	if v != "" {
 		return v, nil
 	}
 	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)

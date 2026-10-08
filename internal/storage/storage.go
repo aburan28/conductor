@@ -402,16 +402,26 @@ func OpenStore(env awscreds.Env, use string) (*backup.Store, bool, error) {
 }
 
 // SealPassphrase is the passphrase sealed uploads use: CONDUCTOR_CHECKPOINT_KEY, else on
-// macOS the Keychain item dev.conductor.seal/default. Empty when neither is set.
-func SealPassphrase(ctx context.Context, env awscreds.Env) string {
+// macOS the Keychain item dev.conductor.seal/default. It returns "" with no error when no
+// seal is configured: neither source is set, the Keychain item does not exist, or this is not
+// macOS. Any other failure is an error. A caller must stop rather than upload unsealed in its
+// place, because an empty passphrase means "do not seal".
+func SealPassphrase(ctx context.Context, env awscreds.Env) (string, error) {
 	if v := env.Getenv("CONDUCTOR_CHECKPOINT_KEY"); v != "" {
-		return v
+		return v, nil
 	}
 	v, err := awscreds.KeychainGet(ctx, env, awscreds.KeychainSealService, awscreds.KeychainSealAccount)
-	if err != nil {
-		return ""
+	switch {
+	case err == nil && v != "":
+		return v, nil
+	case err == nil:
+		return "", fmt.Errorf("the seal passphrase in the Keychain (%s/%s) is empty",
+			awscreds.KeychainSealService, awscreds.KeychainSealAccount)
+	case errors.Is(err, awscreds.ErrNoKeychain), errors.Is(err, awscreds.ErrKeychainItemNotFound):
+		return "", nil
+	default:
+		return "", fmt.Errorf("reading the seal passphrase from the Keychain: %w", err)
 	}
-	return v
 }
 
 func hostname() string {

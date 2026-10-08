@@ -37,9 +37,14 @@ import (
 // whatever comes back is sanitized and marked as restored (sanitizeRestored), so `conductor
 // resume` relaunches only a known harness's own resume invocation, and asks first.
 
-// backupKey is the passphrase that seals backups: the checkpoint passphrase, reused.
-func backupKey() string {
-	return storage.SealPassphrase(context.Background(), awscreds.Default())
+// sealEnv is the environment the seal passphrase is read from. A test replaces it.
+var sealEnv = awscreds.Default
+
+// backupKey is the passphrase that seals backups: the checkpoint passphrase, reused. The read
+// runs under ctx, so a shutdown bound covers the Keychain. An error means a passphrase is
+// configured but cannot be read; the caller must stop rather than go on without it.
+func backupKey(ctx context.Context) (string, error) {
+	return storage.SealPassphrase(ctx, sealEnv())
 }
 
 // openSessionStore opens the bucket for session records, honouring storage.json and the
@@ -139,7 +144,11 @@ func pushRecords(ctx context.Context, store *backup.Store, at time.Time) (int, e
 	if err != nil {
 		return 0, err
 	}
-	if key := backupKey(); key != "" {
+	key, err := backupKey(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if key != "" {
 		if data, err = checkpoint.Seal(data, key); err != nil {
 			return 0, err
 		}
@@ -221,11 +230,16 @@ func pullRecordsWith(ctx context.Context, store *backup.Store, force, allowUnsea
 	if err != nil {
 		return 0, err
 	}
-	key := backupKey()
+	key, err := backupKey(ctx)
+	if err != nil {
+		return 0, err
+	}
 	switch {
 	case checkpoint.IsSealed(data):
 		if key == "" {
-			return 0, errors.New("the backup in S3 is sealed; set CONDUCTOR_CHECKPOINT_KEY to the passphrase it was pushed with")
+			return 0, errors.New("the backup in S3 is sealed, but no checkpoint passphrase is configured: set " +
+				"CONDUCTOR_CHECKPOINT_KEY to the passphrase it was pushed with (on macOS, the Keychain item " +
+				"dev.conductor.seal/default works too)")
 		}
 		if data, err = checkpoint.Unseal(data, key); err != nil {
 			return 0, fmt.Errorf("backup: %w", err)

@@ -226,8 +226,8 @@ func TestOpenStoreHonoursUses(t *testing.T) {
 
 func TestSealPassphrase(t *testing.T) {
 	env := testAWSEnv(map[string]string{"CONDUCTOR_CHECKPOINT_KEY": "pass"})
-	if SealPassphrase(context.Background(), env) != "pass" {
-		t.Error("env passphrase ignored")
+	if got, err := SealPassphrase(context.Background(), env); err != nil || got != "pass" {
+		t.Errorf("env passphrase = %q, %v", got, err)
 	}
 	env = testAWSEnv(nil)
 	env.GOOS = "darwin"
@@ -237,7 +237,32 @@ func TestSealPassphrase(t *testing.T) {
 		}
 		return nil, errors.New("exit status 44")
 	}
-	if got := SealPassphrase(context.Background(), env); got != "from-keychain" {
-		t.Errorf("keychain passphrase = %q", got)
+	if got, err := SealPassphrase(context.Background(), env); err != nil || got != "from-keychain" {
+		t.Errorf("keychain passphrase = %q, %v", got, err)
+	}
+}
+
+// A Keychain read that fails for any reason other than "not found" must reach the caller. It
+// must not become an empty passphrase, which the backup code reads as "no seal configured" and
+// uploads in the clear. Off macOS, and with no item, there is no seal configured.
+func TestSealPassphraseKeychainErrors(t *testing.T) {
+	ctx := context.Background()
+	keychain := func(out []byte, err error) awscreds.Env {
+		env := testAWSEnv(nil)
+		env.GOOS = "darwin"
+		env.Command = func(context.Context, []byte, string, ...string) ([]byte, error) { return out, err }
+		return env
+	}
+	if pass, err := SealPassphrase(ctx, keychain(nil, errors.New("exit status 128: User interaction is not allowed."))); err == nil || pass != "" {
+		t.Fatalf("a failed Keychain read = %q, %v; want an error and no passphrase", pass, err)
+	}
+	if pass, err := SealPassphrase(ctx, keychain([]byte("\n"), nil)); err == nil || pass != "" {
+		t.Fatalf("an empty Keychain item = %q, %v; want an error", pass, err)
+	}
+	if pass, err := SealPassphrase(ctx, keychain(nil, errors.New("exit status 44: could not be found"))); err != nil || pass != "" {
+		t.Fatalf("a missing Keychain item = %q, %v; want no seal and no error", pass, err)
+	}
+	if pass, err := SealPassphrase(ctx, testAWSEnv(nil)); err != nil || pass != "" {
+		t.Fatalf("off macOS = %q, %v; want no seal and no error", pass, err)
 	}
 }
