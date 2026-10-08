@@ -6,13 +6,14 @@ Conductor can keep three kinds of state in one S3-compatible bucket:
 |---|---|---|
 | Session resume records (`conductor backup`) | a replaced machine reopens its sessions | when a seal passphrase is set |
 | Checkpoints (`conductor checkpoint push`) | continue a conversation on another machine | always (plaintext is refused) |
-| The control-plane database (`conductor db …`) | Postgres stays local and fast; the bucket makes it durable | when `database.seal` is true |
+| The control-plane database (`conductor db …`, planned: lands with the database archive pull request) | Postgres stays local and fast; the bucket makes it durable | when `database.seal` is true |
 
 Postgres remains the database: it runs on the machine (the macOS app bundles a private
-one). What S3 adds is durability. Postgres archives every write-ahead-log segment to the
-bucket as it fills (or at least every `archive_timeout`, 60 s by default) and takes a base
-backup on a schedule, so a lost machine restores to within about a minute of where it
-stopped, on any other machine that can reach the bucket.
+one). What S3 adds is durability. Once the database archive lands (planned, see "The
+database" below), Postgres will archive every write-ahead-log segment to the bucket as it
+fills (or at least every `archive_timeout`, 60 s by default) and take a base backup on a
+schedule, so a lost machine restores to within about a minute of where it stopped, on any
+other machine that can reach the bucket. This build does not archive the database yet.
 
 ## The settings file
 
@@ -163,7 +164,13 @@ Sealed objects are encrypted on the machine before upload with a passphrase:
 
 ## The database
 
-Postgres archives to the bucket through two commands it calls itself:
+**Planned.** The `conductor db` commands and the `archive_command` and `restore_command`
+settings below land with the database archive pull request. In this build the `database.*`
+settings are stored and shown by `conductor storage show`, but no WAL segment is archived and
+no base backup is taken. The description that follows is the design, not the current
+behaviour.
+
+Postgres archives to the bucket through two commands it calls itself (planned):
 
 ```
 archive_mode = on
@@ -171,6 +178,8 @@ archive_command = 'conductor db archive-wal %p %f'
 restore_command = 'conductor db fetch-wal %f %p'     # only while restoring
 archive_timeout = 60
 ```
+
+Planned commands:
 
 ```
 conductor db archiving --data-dir DIR [--write]   # print (or append to postgresql.auto.conf) the settings above
@@ -182,7 +191,7 @@ conductor db prune [--keep N]                     # drop old base backups and th
 ```
 
 Keys are namespaced by the cluster's system identifier, so two databases never share
-segments:
+segments (planned layout):
 
 ```
 <prefix>/db/<system-identifier>/wal/<segment>[.sealed]

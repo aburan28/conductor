@@ -131,8 +131,9 @@ func storageShow(ctx context.Context, args []string) error {
 		if !d.Seal {
 			seal = "not sealed"
 		}
-		fmt.Printf("Database    WAL archive %s (at least every %ds), base backup every %dh, keep %d, %s\n",
+		fmt.Printf("Database    configured: WAL archive %s (at least every %ds), base backup every %dh, keep %d, %s\n",
 			onOff(d.ArchiveWAL), d.ArchiveTimeoutSeconds, d.BaseBackupEveryHours, d.KeepBaseBackups, seal)
+		fmt.Println("            archiving is not available in this build, so the database is not sent to the bucket yet")
 	}
 	fmt.Printf("From        %s\n", from)
 	return nil

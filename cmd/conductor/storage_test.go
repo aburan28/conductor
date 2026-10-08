@@ -217,3 +217,22 @@ func TestStorageSecretStoreKeychainNeedsSecretFrom(t *testing.T) {
 		t.Fatalf("settings changed by the refused command: %+v, %v", s.Auth, err)
 	}
 }
+
+// Database backups can be configured, but this build has no archiver. `storage show` must say
+// so rather than describe a WAL archive that is not running.
+func TestStorageShowSaysDatabaseArchivingIsUnavailable(t *testing.T) {
+	isolateStorage(t)
+	ctx := context.Background()
+	if _, err := captureStdout(t, func() error {
+		return storageSet(ctx, []string{"--bucket", "b1", "--database=true"}, strings.NewReader(""))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := captureStdout(t, func() error { return storageShow(ctx, nil) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "configured") || !strings.Contains(out, "archiving is not available in this build") {
+		t.Fatalf("storage show does not say database archiving is unavailable:\n%s", out)
+	}
+}
