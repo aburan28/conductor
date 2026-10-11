@@ -157,9 +157,9 @@ struct GeneralSettings: View {
         // The app itself at login, beside the agents' RunAtLoad.
         do {
             if draft.startAtLogin {
-                try SMAppService.mainApp.register()
+                try await SMAppService.mainApp.register()
             } else {
-                try SMAppService.mainApp.unregister()
+                try await SMAppService.mainApp.unregister()
             }
         } catch {
             // Not fatal: the agents still start at login; only the menu bar item waits.
