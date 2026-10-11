@@ -42,8 +42,55 @@ func TestReadHookInputDecodesOnlyThePath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if in.ToolName != "Write" || in.path() != "internal/api/api.go" || in.Cwd != "/repo" {
+	if in.ToolName != "Write" || len(in.paths()) != 1 || in.paths()[0] != "internal/api/api.go" || in.Cwd != "/repo" {
 		t.Fatalf("decoded wrong: %+v", in)
+	}
+}
+
+func TestReadHookInputExtractsCodexPatchPaths(t *testing.T) {
+	patch := "*** Begin Patch\n*** Update File: internal/api/api.go\n@@\n-old SECRET\n+new SECRET\n" +
+		"*** Add File: docs/new.md\n+*** Update File: not/a/header.go\n" +
+		"*** Update File: cmd/a.go\r\n*** Move to: cmd/b.go\n*** Delete File: old.txt\n" +
+		"*** Update File: internal/api/api.go\n*** End Patch\n"
+	body, _ := json.Marshal(map[string]any{
+		"session_id": "s1", "turn_id": "t1", "cwd": "/repo", "hook_event_name": "PreToolUse",
+		"tool_name": "apply_patch", "tool_input": map[string]any{"command": patch},
+	})
+	in, err := readHookInput(strings.NewReader(string(body)), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"internal/api/api.go", "docs/new.md", "cmd/a.go", "cmd/b.go", "old.txt"}
+	if got := in.paths(); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("patch paths = %v, want %v", got, want)
+	}
+	if !isEditTool(in.ToolName) {
+		t.Fatal("apply_patch must count as an edit")
+	}
+
+	// A shell command is never parsed, even one that looks like a patch.
+	body, _ = json.Marshal(map[string]any{"tool_name": "Bash", "tool_input": map[string]any{"command": patch}})
+	if in, _ := readHookInput(strings.NewReader(string(body)), false); len(in.paths()) != 0 {
+		t.Fatalf("Bash command was parsed: %v", in.paths())
+	}
+}
+
+func TestPreToolNotesShapePerHarness(t *testing.T) {
+	var claude, codex struct {
+		Out map[string]any `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal([]byte(preToolNotes("claude", "note")), &claude); err != nil {
+		t.Fatal(err)
+	}
+	if claude.Out["permissionDecision"] != "allow" || claude.Out["additionalContext"] != "note" {
+		t.Fatalf("claude output: %v", claude.Out)
+	}
+	if err := json.Unmarshal([]byte(preToolNotes("codex", "note")), &codex); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := codex.Out["permissionDecision"]; ok || codex.Out["additionalContext"] != "note" ||
+		codex.Out["hookEventName"] != "PreToolUse" {
+		t.Fatalf("codex output must carry context only: %v", codex.Out)
 	}
 }
 

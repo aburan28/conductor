@@ -400,6 +400,29 @@ Example:
 
 Run ` + "`conductor backup <subcommand> -h`" + ` for its flags.
 `},
+	{name: "storage", group: "Sessions and machines", subs: []string{"show", "set", "test", "unset", "profiles"},
+		summary: "the bucket for sessions, checkpoints, and the database, and how to sign in to it",
+		topic: `conductor storage — the bucket Conductor keeps off-machine state in
+
+Usage:
+  conductor storage show [--json]       what is configured, and where it came from
+  conductor storage set …               choose the bucket and the sign-in method
+  conductor storage test [--json]       sign in, then put, get, list, and delete a probe
+  conductor storage unset               forget the bucket (its contents stay)
+  conductor storage profiles [--json]   the AWS profiles on this machine
+
+Sign-in methods (--auth):
+  static        access key ID + secret (secret in the macOS Keychain, or the settings file)
+  profile       a profile from ~/.aws: static keys, SSO, assumed role, credential_process
+  environment   AWS_* variables, web identity, ECS container role, EC2 instance role
+
+Example:
+  conductor storage set --bucket my-team-conductor --region us-east-1 --auth profile --profile dev
+  conductor storage test
+
+Settings live in ~/.conductor/storage.json; CONDUCTOR_BACKUP_S3_* variables override it.
+See docs/STORAGE.md.
+`},
 	{name: "serve", group: "Sessions and machines",
 		summary: "start local vLLM for OpenCode (GLM-5.3 / Qwen 3.8)"},
 

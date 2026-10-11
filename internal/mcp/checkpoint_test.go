@@ -31,7 +31,13 @@ func TestCheckpointToolHonoursKillSwitch(t *testing.T) {
 func TestCheckpointToolCapturesLocally(t *testing.T) {
 	state := t.TempDir()
 	cfg := t.TempDir()
-	work := t.TempDir()
+	// The real path: on macOS t.TempDir() is under /var, a symlink to /private/var, and the
+	// tool sees the working directory as the latter after the chdir below. Claude Code names
+	// its project directory after the real path too, so the fixture must use it.
+	work, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("CONDUCTOR_STATE_DIR", state)
 	t.Setenv("CLAUDE_CONFIG_DIR", cfg)
 	t.Setenv("CONDUCTOR_HARNESS", "claude")

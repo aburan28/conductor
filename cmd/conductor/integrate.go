@@ -39,7 +39,7 @@ edits. Safe to re-run; --remove undoes it.
 
   conductor integrate claude              .mcp.json + PreToolUse hook in .claude/settings.json
   conductor integrate cursor              .cursor/mcp.json + .cursor/rules/conductor.mdc
-  conductor integrate codex               ~/.codex/config.toml [mcp_servers.conductor]
+  conductor integrate codex               ~/.codex/config.toml + hooks in .codex/hooks.json + AGENTS.md
   conductor integrate opencode            opencode.json + .opencode/plugins/conductor.js
   conductor integrate all                 every tool found on this machine
   conductor integrate claude --transport http --print
