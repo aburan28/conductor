@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aburan28/conductor/internal/awscreds"
 	"github.com/aburan28/conductor/internal/backup"
 	"github.com/aburan28/conductor/internal/checkpoint"
 	"github.com/aburan28/conductor/internal/localstate"
@@ -245,5 +246,65 @@ func TestCheckpointPushLeavesNoManifestInTheClear(t *testing.T) {
 	var entry checkpoint.IndexEntry
 	if err := json.Unmarshal(index, &entry); err != nil || entry.ID != m.ID || !entry.Sealed {
 		t.Errorf("index entry = %+v (%v)", entry, err)
+	}
+}
+
+// A seal passphrase that exists but cannot be read must stop both directions. Nothing may be
+// uploaded in the clear, the Keychain read runs under the caller's context so a shutdown bound
+// covers it, and a sealed backup that cannot be unsealed reports the Keychain read error.
+func TestBackupStopsWhenTheSealPassphraseCannotBeRead(t *testing.T) {
+	store, mem := memoryBackup(t)
+	t.Setenv("CONDUCTOR_STATE_DIR", t.TempDir())
+	type ctxKey struct{}
+	var sawCallerCtx bool
+	old := sealEnv
+	t.Cleanup(func() { sealEnv = old })
+	unreadable := func(_ context.Context, _ []byte, _ string, _ ...string) ([]byte, error) {
+		return nil, errors.New("exit status 128: User interaction is not allowed.")
+	}
+	sealEnv = func() awscreds.Env {
+		return awscreds.Env{GOOS: "darwin", Getenv: func(string) string { return "" },
+			Command: func(ctx context.Context, in []byte, name string, args ...string) ([]byte, error) {
+				sawCallerCtx = ctx.Value(ctxKey{}) == "caller"
+				return unreadable(ctx, in, name, args...)
+			}}
+	}
+	ctx := context.WithValue(context.Background(), ctxKey{}, "caller")
+
+	if err := localstate.KeepForResume(localstate.Record{
+		ID: "p1", Harness: "claude", Cwd: "/home/op/secret-project", StartedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := pushRecords(ctx, store, time.Now().UTC())
+	if err == nil || !strings.Contains(err.Error(), "Keychain") {
+		t.Fatalf("push without a readable seal passphrase = %v; want a Keychain error", err)
+	}
+	if len(mem.obj) != 0 {
+		t.Errorf("%d object(s) were uploaded without the seal", len(mem.obj))
+	}
+	if !sawCallerCtx {
+		t.Error("the Keychain read did not run under the caller's context")
+	}
+
+	// A backup sealed with a passphrase that is later unreadable: the pull reports the Keychain
+	// read, not a suggestion that the passphrase was never set.
+	sealEnv = func() awscreds.Env {
+		return awscreds.Env{GOOS: "linux", Getenv: func(k string) string {
+			if k == "CONDUCTOR_CHECKPOINT_KEY" {
+				return "correct horse"
+			}
+			return ""
+		}}
+	}
+	if _, err := pushRecords(context.Background(), store, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	sealEnv = func() awscreds.Env {
+		return awscreds.Env{GOOS: "darwin", Getenv: func(string) string { return "" }, Command: unreadable}
+	}
+	_, err = pullRecords(context.Background(), store, false)
+	if err == nil || !strings.Contains(err.Error(), "Keychain") || strings.Contains(err.Error(), "set CONDUCTOR_CHECKPOINT_KEY") {
+		t.Fatalf("pull with an unreadable passphrase = %v; want the Keychain read error", err)
 	}
 }
