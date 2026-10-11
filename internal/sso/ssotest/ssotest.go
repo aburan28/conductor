@@ -179,9 +179,13 @@ func publicJWK(pub crypto.PublicKey, kid string) map[string]any {
 		return map[string]any{"kty": "RSA", "kid": kid, "use": "sig", "alg": "RS256",
 			"n": b64(k.N.Bytes()), "e": b64(big.NewInt(int64(k.E)).Bytes())}
 	case *ecdsa.PublicKey:
-		x, y := make([]byte, 32), make([]byte, 32)
-		k.X.FillBytes(x)
-		k.Y.FillBytes(y)
+		// Uncompressed P-256 point: 0x04 || X (32 bytes) || Y (32 bytes).
+		ek, err := k.ECDH()
+		if err != nil {
+			panic(err)
+		}
+		pt := ek.Bytes()
+		x, y := pt[1:33], pt[33:65]
 		return map[string]any{"kty": "EC", "kid": kid, "use": "sig", "alg": "ES256", "crv": "P-256",
 			"x": b64(x), "y": b64(y)}
 	}
