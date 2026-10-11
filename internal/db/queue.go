@@ -8,7 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // Admission queue (DESIGN.md §7.7 concurrency, domain.AdmissionTicket).

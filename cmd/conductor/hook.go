@@ -9,16 +9,19 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/adamburan/conductor/internal/client"
-	"github.com/adamburan/conductor/internal/config"
-	"github.com/adamburan/conductor/internal/coord"
-	"github.com/adamburan/conductor/internal/db"
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/localstate"
-	"github.com/adamburan/conductor/internal/privacy"
+	"github.com/aburan28/conductor/internal/checkpoint"
+	"github.com/aburan28/conductor/internal/client"
+	"github.com/aburan28/conductor/internal/config"
+	"github.com/aburan28/conductor/internal/coord"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/localstate"
+	"github.com/aburan28/conductor/internal/privacy"
+	"github.com/aburan28/conductor/internal/resource"
 )
 
 // Hooks are how a coding tool asks Conductor a question at the moment it matters — "may I
@@ -38,7 +41,7 @@ const hookTimeout = 5 * time.Second
 
 func cmdHook(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: conductor hook <pre-tool|session-start|session-end>")
+		return errors.New("usage: conductor hook <pre-tool|session-start|session-end|checkpoint>")
 	}
 	switch args[0] {
 	case "pre-tool":
@@ -47,6 +50,8 @@ func cmdHook(ctx context.Context, args []string) error {
 		return hookSessionStart(ctx, args[1:])
 	case "session-end":
 		return hookSessionEnd(ctx, args[1:])
+	case "checkpoint":
+		return hookCheckpoint(ctx, args[1:])
 	default:
 		return fmt.Errorf("unknown hook event %q", args[0])
 	}
@@ -54,7 +59,8 @@ func cmdHook(ctx context.Context, args []string) error {
 
 // hookInput is the subset of a tool's hook payload this command reads. It is deliberately
 // tiny: there is no field for file content or tool arguments beyond a path, so they cannot be
-// decoded even by accident.
+// decoded even by accident. The one exception is a patch (Codex's apply_patch), whose file
+// paths exist only inside the patch text: its header lines are read and the rest discarded.
 type hookInput struct {
 	SessionID     string `json:"session_id"`
 	Cwd           string `json:"cwd"`
@@ -66,10 +72,49 @@ type hookInput struct {
 		NotebookPath  string `json:"notebook_path"`
 		Path          string `json:"path"`
 	} `json:"tool_input"`
+	// patchPaths are the files a patch touches, filled by readHookInput for patch tools.
+	patchPaths []string
 }
 
-func (h hookInput) path() string {
-	return firstNonEmptyString(h.ToolInput.FilePath, h.ToolInput.FilePathCamel, h.ToolInput.NotebookPath, h.ToolInput.Path)
+// paths are the files the tool is about to modify: the one path an edit names, or every file
+// a patch adds, updates, deletes, or moves to.
+func (h hookInput) paths() []string {
+	if p := firstNonEmptyString(h.ToolInput.FilePath, h.ToolInput.FilePathCamel, h.ToolInput.NotebookPath, h.ToolInput.Path); p != "" {
+		return []string{p}
+	}
+	return h.patchPaths
+}
+
+// isPatchTool reports whether a tool carries its edits as a patch rather than a path.
+func isPatchTool(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "apply_patch", "patch":
+		return true
+	}
+	return false
+}
+
+// patchHeaders are the apply_patch lines that name a file; every other line is content.
+var patchHeaders = []string{"*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: "}
+
+// patchFilePaths extracts the file paths from an apply_patch body, in order, without
+// duplicates. Only header lines are examined.
+func patchFilePaths(patch string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, line := range strings.Split(patch, "\n") {
+		line = strings.TrimRight(line, "\r")
+		for _, h := range patchHeaders {
+			if p, ok := strings.CutPrefix(line, h); ok {
+				if p = strings.TrimSpace(p); p != "" && !seen[p] {
+					seen[p] = true
+					out = append(out, p)
+				}
+				break
+			}
+		}
+	}
+	return out
 }
 
 // readHookInput decodes the hook payload from stdin when one was piped in.
@@ -87,6 +132,27 @@ func readHookInput(r io.Reader, isTerminal bool) (hookInput, error) {
 	}
 	if err := json.Unmarshal(body, &in); err != nil {
 		return in, fmt.Errorf("hook input is not JSON: %w", err)
+	}
+	if isPatchTool(in.ToolName) {
+		// The patch text is decoded only here, only for a patch tool, and only its file
+		// paths outlive this function.
+		var raw struct {
+			ToolInput json.RawMessage `json:"tool_input"`
+		}
+		if json.Unmarshal(body, &raw) == nil {
+			var patch struct {
+				Command string `json:"command"`
+				Input   string `json:"input"`
+				Patch   string `json:"patch"`
+			}
+			var text string
+			if json.Unmarshal(raw.ToolInput, &patch) == nil {
+				text = firstNonEmptyString(patch.Command, patch.Input, patch.Patch)
+			} else {
+				_ = json.Unmarshal(raw.ToolInput, &text) // some harnesses pass the patch bare
+			}
+			in.patchPaths = patchFilePaths(text)
+		}
 	}
 	return in, nil
 }
@@ -165,12 +231,25 @@ func judgePreTool(d coord.IntentDecision, self string) preToolVerdict {
 		others = append(others, c)
 	}
 	for _, c := range others {
-		if c.Outcome.Blocks() {
-			return preToolVerdict{Block: true, Message: fmt.Sprintf(
-				"Conductor: %s holds %s for %s (%s). Wait for it, split your scope, or join their task "+
-					"with coord_start_work(attach_to: %q). Run conductor_check_conflicts to see the current holders.",
-				c.HolderOwner, c.ResourceKey, c.HolderTaskRef, c.HolderMode, c.HolderTaskRef)}
+		if !c.Outcome.Blocks() {
+			continue
 		}
+		if c.PendingMerge() {
+			// The holder is not editing: their finished change to this file is waiting to
+			// merge. Editing now would build on contents that are about to change under you.
+			pr := ""
+			if c.HolderPullRequest != "" {
+				pr = " (" + c.HolderPullRequest + ")"
+			}
+			return preToolVerdict{Block: true, Message: fmt.Sprintf(
+				"Conductor: %s's %s changed %s and is waiting to merge%s. The file stays reserved until "+
+					"that merges or %s is marked done. Wait for the merge, or build on their branch.",
+				c.HolderOwner, c.HolderTaskRef, c.ResourceKey, pr, c.HolderTaskRef)}
+		}
+		return preToolVerdict{Block: true, Message: fmt.Sprintf(
+			"Conductor: %s holds %s for %s (%s). Wait for it, split your scope, or join their task "+
+				"with coord_start_work(attach_to: %q). Run conductor_check_conflicts to see the current holders.",
+			c.HolderOwner, c.ResourceKey, c.HolderTaskRef, c.HolderMode, c.HolderTaskRef)}
 	}
 	if len(others) > 0 {
 		c := others[0]
@@ -189,7 +268,9 @@ func hookPreTool(ctx context.Context, args []string) error {
 	project := fs.String("project", "", "project id or slug")
 	strict := fs.Bool("strict", false, "block when Conductor cannot be reached, instead of failing open")
 	requireClaim := fs.Bool("require-claim", false, "block edits from a session that holds no task")
+	autoReserve := fs.Bool("auto-reserve", true, "reserve a file under the session's claim the first time it is edited outside the claimed scope (=false only reports it)")
 	asJSON := fs.Bool("json", false, "print the decision and verdict to stderr")
+	harness := fs.String("harness", "claude", "harness that fired the hook, which decides the output shape (claude, codex)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -199,17 +280,25 @@ func hookPreTool(ctx context.Context, args []string) error {
 		return failOpen(*strict, err.Error())
 	}
 	tool := firstNonEmptyString(*toolFlag, in.ToolName)
-	path := firstNonEmptyString(*pathFlag, in.path())
-	if !isEditTool(tool) || path == "" {
+	paths := in.paths()
+	if *pathFlag != "" {
+		paths = []string{*pathFlag}
+	}
+	if !isEditTool(tool) || len(paths) == 0 {
 		return nil
 	}
 	cwd := in.Cwd
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
-	rel, ok := repoRelative(cwd, path)
-	if !ok {
-		return nil // not inside a repository Conductor knows about
+	var rels []string
+	for _, p := range paths {
+		if rel, ok := repoRelative(cwd, p); ok {
+			rels = append(rels, rel)
+		}
+	}
+	if len(rels) == 0 {
+		return nil // nothing inside a repository Conductor knows about
 	}
 
 	creds := client.LoadCredentials()
@@ -225,47 +314,189 @@ func hookPreTool(ctx context.Context, args []string) error {
 	ctx, cancel := context.WithTimeout(ctx, hookTimeout)
 	defer cancel()
 
-	excludeTask := os.Getenv("CONDUCTOR_TASK_ID")
+	sessionID := os.Getenv("CONDUCTOR_SESSION_ID")
+	claim := claimFromEnv(ctx, api, ref, sessionID)
+	excludeTask := claim.ID
 	hasClaim := excludeTask != ""
-	if sessionID := os.Getenv("CONDUCTOR_SESSION_ID"); excludeTask == "" && sessionID != "" {
-		if active := activeTaskFor(ctx, api, ref, sessionID); active.ID != "" {
-			excludeTask, hasClaim = active.ID, true
-		}
-	}
 	if *requireClaim && !hasClaim {
 		return blockEdit("Conductor: this session holds no task. Claim one first (coord_start_work, or " +
 			"`conductor task claim --next`), then edit.")
 	}
 
-	var decision coord.IntentDecision
-	err = api.Post(ctx, "/v1/projects/"+ref+"/intents/check", map[string]any{
-		"summary":      "edit " + rel,
-		"scopes":       []domain.ScopeRequest{{Resource: "path:" + rel, Mode: domain.ModeWriteExclusive}},
-		"exclude_task": excludeTask,
-	}, &decision)
-	if err != nil {
-		return failOpen(*strict, "could not check "+rel+" with Conductor: "+err.Error())
+	// A patch can touch several files: every one is checked before any is reserved, and one
+	// blocked file blocks the whole patch, since the tool applies it all or nothing.
+	self := selfHandle(ctx, api, creds)
+	notes := []string{}
+	for _, rel := range rels {
+		var decision coord.IntentDecision
+		err = api.Post(ctx, "/v1/projects/"+ref+"/intents/check", map[string]any{
+			"summary":      "edit " + rel,
+			"scopes":       []domain.ScopeRequest{{Resource: "path:" + rel, Mode: domain.ModeWriteExclusive}},
+			"exclude_task": excludeTask,
+		}, &decision)
+		if err != nil {
+			return failOpen(*strict, "could not check "+rel+" with Conductor: "+err.Error())
+		}
+		verdict := judgePreTool(decision, self)
+		if *asJSON {
+			_ = json.NewEncoder(os.Stderr).Encode(map[string]any{"path": rel, "decision": decision, "verdict": verdict})
+		}
+		if verdict.Block {
+			return blockEdit(verdict.Message)
+		}
+		if verdict.Warning != "" {
+			notes = append(notes, verdict.Warning)
+		}
 	}
 
-	verdict := judgePreTool(decision, selfHandle(ctx, api, creds))
-	if *asJSON {
-		_ = json.NewEncoder(os.Stderr).Encode(map[string]any{"decision": decision, "verdict": verdict})
+	// The edit goes ahead. What remains is making it visible: an edit outside the claim's
+	// scope is scope expansion, and an edit with no claim at all is invisible to everyone.
+	if hasClaim {
+		for _, rel := range rels {
+			if note := expandOwnScope(ctx, api, claim, rel, *autoReserve); note != "" {
+				notes = append(notes, note)
+			}
+		}
+	} else if note := unclaimedEditNote(sessionID, cwd); note != "" {
+		notes = append(notes, note)
 	}
-	switch {
-	case verdict.Block:
-		return blockEdit(verdict.Message)
-	case verdict.Warning != "":
-		// Exit 0 with a JSON body: the edit proceeds and the model sees the warning.
-		out := map[string]any{"hookSpecificOutput": map[string]any{
-			"hookEventName":            "PreToolUse",
-			"permissionDecision":       "allow",
-			"permissionDecisionReason": verdict.Warning,
-			"additionalContext":        verdict.Warning,
-		}}
-		body, _ := json.Marshal(out)
-		fmt.Println(string(body))
+	if len(notes) > 0 {
+		// Exit 0 with a JSON body: the edit proceeds and the model sees the notes.
+		fmt.Println(preToolNotes(*harness, strings.Join(notes, " ")))
 	}
 	return nil
+}
+
+// preToolNotes is the exit-0 body that lets an edit through with notes the model reads.
+// Claude Code takes an explicit allow with a reason; Codex accepts only additionalContext on
+// an allowed call and marks a hook that sends permissionDecision without updatedInput as
+// failed, so it gets the context alone.
+func preToolNotes(harness, text string) string {
+	specific := map[string]any{"hookEventName": "PreToolUse", "additionalContext": text}
+	if checkpoint.NormalizeHarness(harness) != "codex" {
+		specific["permissionDecision"] = "allow"
+		specific["permissionDecisionReason"] = text
+	}
+	body, _ := json.Marshal(map[string]any{"hookSpecificOutput": specific})
+	return string(body)
+}
+
+// claimFromEnv finds the claim this hook's session is working under: a runner-launched
+// attempt names its task and fence in the environment; a wrapped session is looked up by its
+// session id.
+func claimFromEnv(ctx context.Context, api *client.Client, project, sessionID string) activeTask {
+	if taskID := os.Getenv("CONDUCTOR_TASK_ID"); taskID != "" {
+		claim := activeTask{ID: taskID, Ref: os.Getenv("CONDUCTOR_TASK_REF"), FetchedAt: time.Now()}
+		claim.Fence = domain.Fence{TaskID: taskID, AttemptID: os.Getenv("CONDUCTOR_ATTEMPT_ID"),
+			LeaseID: os.Getenv("CONDUCTOR_LEASE_ID")}
+		if n, err := strconv.ParseInt(os.Getenv("CONDUCTOR_FENCING_EPOCH"), 10, 64); err == nil {
+			claim.Fence.FencingEpoch = n
+		}
+		var view privacy.TaskView
+		if err := api.Get(ctx, "/v1/tasks/"+taskID, &view); err == nil {
+			claim.Ref, claim.Scopes = view.Ref, view.Scopes
+		}
+		return claim
+	}
+	if sessionID == "" {
+		return activeTask{}
+	}
+	claim := activeTaskFor(ctx, api, project, sessionID)
+	claim.SessionID = sessionID
+	return claim
+}
+
+// coveredBy reports whether a repository path falls inside any of a claim's scopes.
+func coveredBy(scopes []string, rel string) bool {
+	want, err := resource.Parse("path:" + rel)
+	if err != nil {
+		return true // not a path Conductor can reason about; do not nag about it
+	}
+	for _, sc := range scopes {
+		held, err := resource.Parse(sc)
+		if err != nil {
+			continue
+		}
+		if held.Type == domain.ResourceRepo || resource.Overlaps(want, held) {
+			return true
+		}
+	}
+	return false
+}
+
+// expandOwnScope handles an edit outside the caller's own claimed scope.
+//
+// Scope drift is normal — the work turns out to need an adjacent file — but unreported it is
+// invisible: the claim says one thing, the diff says another, and a teammate who checks the
+// file is told it is free. With auto-reserve (the default, and what `conductor integrate`
+// configures) the file is reserved under the claim on its first edit, as an `observed`
+// reservation, and the model is told so. Without it the model is told to report the expansion
+// itself. Only the path is sent, never the edit.
+func expandOwnScope(ctx context.Context, api *client.Client, claim activeTask, rel string, autoReserve bool) string {
+	if coveredBy(claim.Scopes, rel) {
+		return ""
+	}
+	ref := firstNonEmptyString(claim.Ref, "your task")
+	if !autoReserve {
+		return fmt.Sprintf("Conductor: %s is outside %s's claimed scope. Report the scope expansion "+
+			"(coord_expand_scope, or `conductor scope add %s path:%s`) so teammates can see it.", rel, ref, ref, rel)
+	}
+	scopes := []domain.ScopeRequest{{Resource: "path:" + rel, Mode: domain.ModeWriteExclusive}}
+	var result coord.ExpandScopeResult
+	var err error
+	switch {
+	case claim.SessionID != "":
+		var out coord.SessionScopeResult
+		err = api.Post(ctx, "/v1/sessions/"+claim.SessionID+"/scopes",
+			map[string]any{"scopes": scopes, "source": domain.SourceObserved}, &out)
+		result = out.ExpandScopeResult
+		if err == nil && out.NoClaim {
+			return ""
+		}
+	case claim.Fence.LeaseID != "":
+		err = api.Post(ctx, "/v1/tasks/"+claim.ID+"/scopes", map[string]any{
+			"attempt_id": claim.Fence.AttemptID, "lease_id": claim.Fence.LeaseID,
+			"fencing_epoch": claim.Fence.FencingEpoch,
+			"scopes":        scopes, "source": domain.SourceObserved,
+		}, &result)
+	default:
+		return ""
+	}
+	if err != nil {
+		var apiErr *client.APIError
+		if errors.As(err, &apiErr) && apiErr.Blocked() {
+			return fmt.Sprintf("Conductor: %s is outside %s's claimed scope and could not be reserved: %s",
+				rel, ref, result.Advice)
+		}
+		return fmt.Sprintf("Conductor: %s is outside %s's claimed scope (reserving it failed: %v). "+
+			"Report the scope expansion with coord_expand_scope.", rel, ref, err)
+	}
+	// Remember it, so the next edit of the same file costs nothing.
+	claim.Scopes = append(claim.Scopes, "path:"+rel)
+	if claim.SessionID != "" {
+		writeHookCache("session-"+claim.SessionID, claim)
+	}
+	return fmt.Sprintf("Conductor: %s was outside %s's claimed scope, so it is now reserved for %s "+
+		"(scope expansion recorded).", rel, ref, ref)
+}
+
+// unclaimedNoticeEvery bounds how often a session with no claim is reminded of it.
+const unclaimedNoticeEvery = 10 * time.Minute
+
+// unclaimedEditNote reminds a session that holds no task that its edits reserve nothing. It
+// does not block (that is --require-claim) and it does not repeat on every edit.
+func unclaimedEditNote(sessionID, cwd string) string {
+	key := "unclaimed-" + firstNonEmptyString(sessionID, cwd)
+	var last struct {
+		At time.Time `json:"at"`
+	}
+	if readHookCache(key, &last) && time.Since(last.At) < unclaimedNoticeEvery {
+		return ""
+	}
+	last.At = time.Now()
+	writeHookCache(key, last)
+	return "Conductor: this session holds no task, so its edits reserve nothing and teammates cannot " +
+		"see them. Claim the work first (coord_start_work, or `conductor task claim`) to protect it."
 }
 
 // blockEdit is the one hard answer a hook gives: exit 2, reason on stderr.
@@ -312,7 +543,12 @@ func selfHandle(ctx context.Context, api *client.Client, creds client.Credential
 type activeTask struct {
 	ID        string    `json:"task_id"`
 	Ref       string    `json:"task_ref"`
+	Scopes    []string  `json:"scopes,omitempty"`
 	FetchedAt time.Time `json:"fetched_at"`
+	// SessionID and Fence say how to act on the claim: through the wrapped session, or with
+	// a runner attempt's fence. Neither is cached.
+	SessionID string       `json:"-"`
+	Fence     domain.Fence `json:"-"`
 }
 
 // activeTaskFor finds the task a session holds, caching the answer briefly so a burst of
@@ -334,7 +570,7 @@ func activeTaskFor(ctx context.Context, api *client.Client, project, sessionID s
 			found.Ref = s.ActiveTaskRef
 			var view privacy.TaskView
 			if err := api.Get(ctx, "/v1/tasks/"+s.ActiveTaskRef+client.Query("project", project), &view); err == nil {
-				found.ID = view.ID
+				found.ID, found.Scopes = view.ID, view.Scopes
 			}
 			break
 		}
@@ -455,6 +691,15 @@ func hookSessionStart(ctx context.Context, args []string) error {
 // hookSessionEnd closes a bare session's presence record. A session launched through
 // `conductor wrap` is closed by the wrapper itself and is left alone here.
 func hookSessionEnd(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("hook session-end", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	harness := fs.String("harness", "", "harness that fired the hook (default: claude, or CONDUCTOR_HARNESS)")
+	if fs.Parse(args) == nil && *harness != "" {
+		os.Setenv("CONDUCTOR_HARNESS", *harness)
+	}
+	// The transcript is complete now: the last checkpoint of this session, forced past the
+	// rate limit but still skipped when nothing changed.
+	hookCheckpointFromStdin(ctx, true)
 	sessionID := os.Getenv("CONDUCTOR_SESSION_ID")
 	if sessionID == "" {
 		return nil
@@ -484,4 +729,54 @@ func trimLines(s string, n int) string {
 		return strings.Join(lines, "\n")
 	}
 	return strings.Join(lines[:n], "\n") + "\n…"
+}
+
+// hookCheckpoint is the Stop / PreCompact hook: checkpoint this session so it can continue
+// elsewhere. It is rate-limited and skips unchanged sessions inside the checkpoint package,
+// and like every hook it fails open — a checkpoint that could not be taken is one line on
+// stderr, never a blocked turn. Only the session id, cwd, and event name are read from the
+// hook payload; the transcript is located from those, not from a path the payload names.
+func hookCheckpoint(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("hook checkpoint", flag.ContinueOnError)
+	harness := fs.String("harness", "", "harness that fired the hook (default: claude, or CONDUCTOR_HARNESS)")
+	force := fs.Bool("force", false, "ignore the rate limit (still skips an unchanged session)")
+	if err := fs.Parse(args); err != nil {
+		return nil
+	}
+	if *harness != "" {
+		os.Setenv("CONDUCTOR_HARNESS", *harness)
+	}
+	hookCheckpointFromStdin(ctx, *force)
+	return nil
+}
+
+func hookCheckpointFromStdin(ctx context.Context, force bool) {
+	if checkpoint.Disabled(os.Getenv) {
+		return
+	}
+	in, err := readHookInput(os.Stdin, stdinIsTerminal())
+	if err != nil {
+		return
+	}
+	cwd := in.Cwd
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+	harness := checkpoint.NormalizeHarness(firstNonEmptyString(os.Getenv("CONDUCTOR_HARNESS"), "claude"))
+	reason := checkpoint.ReasonHook
+	if in.HookEventName != "" {
+		reason = checkpoint.ReasonHook + ":" + in.HookEventName
+		if in.HookEventName == "PreCompact" || in.HookEventName == "SessionEnd" {
+			force = true
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
+	_, err = checkpoint.Capture(ctx, checkpoint.Request{
+		Harness: harness, Cwd: cwd, SessionID: in.SessionID, Since: time.Now().Add(-30 * 24 * time.Hour),
+		Reason: reason, Force: force, Conductor: conductorRefFromEnv(),
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "conductor: checkpoint not taken: %v\n", err)
+	}
 }

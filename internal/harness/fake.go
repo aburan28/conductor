@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // FakeDriver is a deterministic in-process harness.

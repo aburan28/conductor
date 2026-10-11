@@ -10,8 +10,8 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/adamburan/conductor/internal/config"
-	"github.com/adamburan/conductor/internal/systemd"
+	"github.com/aburan28/conductor/internal/config"
+	"github.com/aburan28/conductor/internal/systemd"
 )
 
 // ---------------------------------------------------------------------------
@@ -122,7 +122,7 @@ func systemdOptions(f *systemdFlags) (systemd.Options, error) {
 
 func siblingBinary(exe, name string) string {
 	if dir := filepath.Dir(exe); dir != "" {
-		if cand := filepath.Join(dir, name); fileExists(cand) {
+		if cand := filepath.Join(dir, name); unitFileExists(cand) {
 			return cand
 		}
 	}
@@ -132,7 +132,7 @@ func siblingBinary(exe, name string) string {
 	return name
 }
 
-func fileExists(p string) bool {
+func unitFileExists(p string) bool {
 	fi, err := os.Stat(p)
 	return err == nil && !fi.IsDir()
 }

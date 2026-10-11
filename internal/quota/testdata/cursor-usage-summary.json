@@ -1,0 +1,14 @@
+{
+  "billingCycleStart": "2026-09-20T14:11:55.000Z",
+  "billingCycleEnd": "2026-10-20T14:11:55.000Z",
+  "membershipType": "pro",
+  "limitType": "user",
+  "isUnlimited": false,
+  "autoModelSelectedDisplayMessage": "You've used 40% of your included usage",
+  "individualUsage": {
+    "plan": {"enabled": true, "used": 1640, "limit": 2000, "remaining": 360,
+             "breakdown": {"included": 2000, "bonus": 0, "total": 2000},
+             "autoPercentUsed": 12, "apiPercentUsed": 82, "totalPercentUsed": 82},
+    "onDemand": {"enabled": false, "used": 0, "limit": null, "remaining": null}
+  }
+}

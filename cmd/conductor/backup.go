@@ -7,10 +7,14 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
-	"github.com/adamburan/conductor/internal/backup"
-	"github.com/adamburan/conductor/internal/localstate"
+	"github.com/aburan28/conductor/internal/awscreds"
+	"github.com/aburan28/conductor/internal/backup"
+	"github.com/aburan28/conductor/internal/checkpoint"
+	"github.com/aburan28/conductor/internal/localstate"
+	"github.com/aburan28/conductor/internal/storage"
 )
 
 // Off-host backup of this machine's resume records.
@@ -24,6 +28,35 @@ import (
 // working directory, and resume invocation. The harness argv is redacted before upload
 // (redactForBackup) because it can carry a first-turn prompt, and a transcript never leaves
 // the harness's own local store in the first place.
+
+// Sealing. The bucket is shared infrastructure that more principals can write than this
+// machine, and a restored record names a command to run and a directory to run it in. So
+// the manifest is sealed with the checkpoint passphrase (CONDUCTOR_CHECKPOINT_KEY, the same
+// AES-256-GCM format as a checkpoint) whenever one is configured: authenticated encryption
+// means a record that was not written by someone holding the passphrase does not open. And
+// whatever comes back is sanitized and marked as restored (sanitizeRestored), so `conductor
+// resume` relaunches only a known harness's own resume invocation, and asks first.
+
+// sealEnv is the environment the seal passphrase is read from. A test replaces it.
+var sealEnv = awscreds.Default
+
+// backupKey is the passphrase that seals backups: the checkpoint passphrase, reused. The read
+// runs under ctx, so a shutdown bound covers the Keychain. An error means a passphrase is
+// configured but cannot be read; the caller must stop rather than go on without it.
+func backupKey(ctx context.Context) (string, error) {
+	return storage.SealPassphrase(ctx, sealEnv())
+}
+
+// openSessionStore opens the bucket for session records, honouring storage.json and the
+// CONDUCTOR_BACKUP_S3_* variables (docs/STORAGE.md).
+func openSessionStore() (*backup.Store, bool, error) {
+	return storage.OpenStore(awscreds.Default(), storage.UseSessions)
+}
+
+// errUnsealedBackup is a plaintext manifest pulled while a passphrase is configured: either
+// an old backup, or one someone replaced to strip the seal.
+var errUnsealedBackup = errors.New("the backup in S3 is not sealed, but CONDUCTOR_CHECKPOINT_KEY is set; " +
+	"push again from the origin machine to seal it, or pull with --allow-unsealed if you trust the bucket")
 
 // backupManifest is what is written to S3: the machine's session records plus enough context
 // to know whose they are and when they were captured.
@@ -51,15 +84,16 @@ func cmdBackup(ctx context.Context, args []string) error {
 	}
 }
 
-// openBackup builds the configured Store, or explains that backup is not configured.
-func openBackup() (*backup.Store, error) {
-	store, enabled, err := backup.FromEnv(os.Getenv)
+// openBackup opens the bucket for one use (storage.UseSessions or UseCheckpoints), or
+// explains that it is not configured.
+func openBackup(use string) (*backup.Store, error) {
+	store, enabled, err := storage.OpenStore(awscreds.Default(), use)
 	if err != nil {
 		return nil, err
 	}
 	if !enabled {
-		return nil, errors.New("off-host backup is not configured. Set CONDUCTOR_BACKUP_S3_BUCKET " +
-			"(and AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY, plus CONDUCTOR_BACKUP_S3_REGION) to enable it")
+		return nil, fmt.Errorf("no bucket is configured for %s (or %s are turned off for it). "+
+			"Choose one with `conductor storage set`, or set CONDUCTOR_BACKUP_S3_BUCKET", use, use)
 	}
 	return store, nil
 }
@@ -82,7 +116,7 @@ Flags:
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	store, err := openBackup()
+	store, err := openBackup(storage.UseSessions)
 	if err != nil {
 		return err
 	}
@@ -110,6 +144,15 @@ func pushRecords(ctx context.Context, store *backup.Store, at time.Time) (int, e
 	if err != nil {
 		return 0, err
 	}
+	key, err := backupKey(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if key != "" {
+		if data, err = checkpoint.Seal(data, key); err != nil {
+			return 0, err
+		}
+	}
 	if err := store.PutSessions(ctx, data, at); err != nil {
 		return 0, err
 	}
@@ -136,6 +179,7 @@ func redactForBackup(records []localstate.Record) []localstate.Record {
 func backupPull(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("backup pull", flag.ExitOnError)
 	force := fs.Bool("force", false, "overwrite local records that already exist")
+	allowUnsealed := fs.Bool("allow-unsealed", false, "accept a plaintext backup even though CONDUCTOR_CHECKPOINT_KEY is set")
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, `conductor backup pull — restore this machine's resume records from S3
@@ -145,6 +189,10 @@ Downloads the records this machine last pushed and writes them under ~/.conducto
 replaced a terminated one. Existing local records are left alone unless --force. To restore
 another machine's sessions, set CONDUCTOR_MACHINE_ID to that machine's id before pulling.
 
+A backup pushed with CONDUCTOR_CHECKPOINT_KEY set is sealed and needs the same passphrase.
+Restored records relaunch only their harness's own resume invocation, and `+"`conductor resume`"+`
+asks before reopening one that came from another machine.
+
 Flags:
 `)
 		fs.PrintDefaults()
@@ -152,11 +200,11 @@ Flags:
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	store, err := openBackup()
+	store, err := openBackup(storage.UseSessions)
 	if err != nil {
 		return err
 	}
-	restored, err := pullRecords(ctx, store, *force)
+	restored, err := pullRecordsWith(ctx, store, *force, *allowUnsealed)
 	if errors.Is(err, backup.ErrNotFound) {
 		fmt.Println("Nothing to restore: this machine has no records in S3 yet.")
 		return nil
@@ -174,16 +222,46 @@ Flags:
 // pullRecords downloads the manifest and writes each record locally. A record whose id already
 // exists locally is skipped unless force, so a pull cannot clobber a live session's record.
 func pullRecords(ctx context.Context, store *backup.Store, force bool) (int, error) {
+	return pullRecordsWith(ctx, store, force, false)
+}
+
+func pullRecordsWith(ctx context.Context, store *backup.Store, force, allowUnsealed bool) (int, error) {
 	data, err := store.GetSessions(ctx)
 	if err != nil {
 		return 0, err
+	}
+	key, err := backupKey(ctx)
+	if err != nil {
+		return 0, err
+	}
+	switch {
+	case checkpoint.IsSealed(data):
+		if key == "" {
+			return 0, errors.New("the backup in S3 is sealed, but no checkpoint passphrase is configured: set " +
+				"CONDUCTOR_CHECKPOINT_KEY to the passphrase it was pushed with (on macOS, the Keychain item " +
+				"dev.conductor.seal/default works too)")
+		}
+		if data, err = checkpoint.Unseal(data, key); err != nil {
+			return 0, fmt.Errorf("backup: %w", err)
+		}
+	case key != "" && !allowUnsealed:
+		return 0, errUnsealedBackup
 	}
 	var manifest backupManifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		return 0, fmt.Errorf("backup: manifest is corrupt: %w", err)
 	}
+	origin := manifest.Machine
+	if origin == "" {
+		origin = store.Machine()
+	}
 	restored := 0
 	for _, r := range manifest.Records {
+		r, ok := sanitizeRestored(r, origin)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "conductor: skipped backup record %q: not a session this build knows how to resume\n", r.ID)
+			continue
+		}
 		if !force {
 			if _, exists := localstate.Get(r.ID); exists {
 				continue
@@ -199,13 +277,55 @@ func pullRecords(ctx context.Context, store *backup.Store, force bool) (int, err
 	return restored, nil
 }
 
+// sanitizeRestored reduces a record pulled from S3 to what resume may act on. A backup never
+// legitimately carries an argv (redactForBackup strips it), and its process ids name
+// processes on another machine, so those are cleared. The resume invocation is recomputed
+// here from the harness name rather than taken from the bucket, the harness must be one this
+// build knows, and wrap flags must parse as wrap flags with plain values. What remains can
+// only reopen a known harness's own conversation — and resume still asks first, because the
+// working directory came from the bucket too.
+func sanitizeRestored(r localstate.Record, origin string) (localstate.Record, bool) {
+	resume := localstate.ResumeInvocation(r.Harness)
+	if len(resume) == 0 {
+		return r, false
+	}
+	if len(r.WrapFlags) > 0 {
+		if _, rest := parseWrapFlags(r.WrapFlags); len(rest) > 0 {
+			return r, false
+		}
+		for _, f := range r.WrapFlags {
+			if !plainArg(f) {
+				return r, false
+			}
+		}
+	}
+	r.Command, r.Args = "", nil
+	r.ResumeArgs = resume
+	r.PID, r.PGID, r.WrapPID, r.TTY = 0, 0, 0, ""
+	r.RestoredFrom = origin
+	return r, true
+}
+
+// plainArg reports an argument made only of characters that need no quoting anywhere.
+func plainArg(s string) bool {
+	for _, c := range s {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.ContainsRune("-_.=:/@+", c):
+		default:
+			return false
+		}
+	}
+	return s != ""
+}
+
 func backupStatus(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("backup status", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	store, enabled, err := backup.FromEnv(os.Getenv)
+	store, enabled, err := openSessionStore()
 	if err != nil {
 		return err
 	}
@@ -213,9 +333,9 @@ func backupStatus(ctx context.Context, args []string) error {
 		if *asJSON {
 			return emit(map[string]any{"enabled": false})
 		}
-		fmt.Println("Off-host backup: not configured.")
-		fmt.Println("Enable it by setting CONDUCTOR_BACKUP_S3_BUCKET, CONDUCTOR_BACKUP_S3_REGION,")
-		fmt.Println("and AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY. Then `conductor backup push`.")
+		fmt.Println("Off-host backup: not configured, or sessions are turned off for the bucket.")
+		fmt.Println("Choose a bucket with `conductor storage set` (see `conductor storage show`),")
+		fmt.Println("then `conductor backup push`.")
 		return nil
 	}
 	snaps, err := store.ListSnapshots(ctx)
@@ -243,7 +363,7 @@ func backupStatus(ctx context.Context, args []string) error {
 // best-effort and tightly bounded: a shutdown must not wait on the network, and a machine
 // with no backup configured does nothing at all.
 func backupOnShutdown(_ localstate.Record) {
-	store, enabled, err := backup.FromEnv(os.Getenv)
+	store, enabled, err := openSessionStore()
 	if err != nil || !enabled {
 		return
 	}
@@ -258,7 +378,7 @@ func backupOnShutdown(_ localstate.Record) {
 // A failure is reported but never fails the save: the local records are already written, which
 // is what makes the machine itself resumable.
 func maybeBackupAfterSave(ctx context.Context) {
-	store, enabled, err := backup.FromEnv(os.Getenv)
+	store, enabled, err := openSessionStore()
 	if err != nil || !enabled {
 		return
 	}
@@ -276,7 +396,7 @@ func maybeRestoreBeforeResume(ctx context.Context) {
 	if err != nil || len(local) > 0 {
 		return
 	}
-	store, enabled, err := backup.FromEnv(os.Getenv)
+	store, enabled, err := openSessionStore()
 	if err != nil || !enabled {
 		return
 	}

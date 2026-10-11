@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -9,7 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 const taskColumns = `
@@ -21,7 +22,8 @@ const taskColumns = `
 	COALESCE(t.intent_fingerprint, ''), COALESCE(t.intent_minhash, '{}'),
 	t.model_alias, t.harness_pref, t.budget, t.features,
 	t.attempts_count, t.max_attempts, COALESCE(t.superseded_by::text, ''),
-	t.created_by::text, t.created_at, t.updated_at, t.completed_at, t.labels`
+	t.created_by::text, t.created_at, t.updated_at, t.completed_at, t.labels,
+	t.pull_request_url, t.pull_request_state`
 
 func scanTask(scan func(...any) error) (domain.Task, error) {
 	var t domain.Task
@@ -34,7 +36,8 @@ func scanTask(scan func(...any) error) (domain.Task, error) {
 		&t.Fingerprint, &t.MinHash,
 		&t.ModelAlias, &t.HarnessPref, &budget, &features,
 		&t.AttemptsCount, &t.MaxAttempts, &t.SupersededBy,
-		&t.CreatedBy, &t.CreatedAt, &t.UpdatedAt, &t.CompletedAt, &t.Labels); err != nil {
+		&t.CreatedBy, &t.CreatedAt, &t.UpdatedAt, &t.CompletedAt, &t.Labels,
+		&t.PullRequestURL, &t.PullRequestState); err != nil {
 		return domain.Task{}, err
 	}
 	if err := decodeJSON(criteria, &t.AcceptanceCriteria); err != nil {
@@ -79,6 +82,18 @@ type CreateTaskParams struct {
 // The human-facing ref (T-42) comes from a per-project counter bumped inside the same
 // transaction, so refs are dense and monotonic even under concurrent creation.
 func (s *Store) CreateTask(ctx context.Context, p CreateTaskParams) (domain.Task, error) {
+	var out domain.Task
+	err := s.Tx(ctx, func(tx pgx.Tx) error {
+		var err error
+		out, err = createTaskTx(ctx, tx, p)
+		return err
+	})
+	return out, err
+}
+
+// createTaskTx is CreateTask inside the caller's transaction, for a task created together
+// with something that must not exist without it (an imported issue's link, tracker.go).
+func createTaskTx(ctx context.Context, tx pgx.Tx, p CreateTaskParams) (domain.Task, error) {
 	if p.Status == "" {
 		p.Status = domain.TaskProposed
 	}
@@ -111,52 +126,48 @@ func (s *Store) CreateTask(ctx context.Context, p CreateTaskParams) (domain.Task
 		return domain.Task{}, err
 	}
 
-	var out domain.Task
-	err = s.Tx(ctx, func(tx pgx.Tx) error {
-		var seq int64
-		var orgID domain.ID
-		if err := tx.QueryRow(ctx, `
-			UPDATE projects SET task_seq = task_seq + 1
-			 WHERE id = $1::uuid
-			RETURNING task_seq, organization_id::text`, p.ProjectID).Scan(&seq, &orgID); err != nil {
-			return noRows(err)
-		}
-		ref := "T-" + strconv.FormatInt(seq, 10)
+	var seq int64
+	var orgID domain.ID
+	if err := tx.QueryRow(ctx, `
+		UPDATE projects SET task_seq = task_seq + 1
+		 WHERE id = $1::uuid
+		RETURNING task_seq, organization_id::text`, p.ProjectID).Scan(&seq, &orgID); err != nil {
+		return domain.Task{}, noRows(err)
+	}
+	ref := "T-" + strconv.FormatInt(seq, 10)
 
-		out, err = scanTask(tx.QueryRow(ctx, `
-			INSERT INTO tasks (organization_id, project_id, ref, parent_id, external_ref,
-			        title, objective, acceptance_criteria, status, visibility, priority,
-			        risk_level, base_sha, workflow_sha, intent_fingerprint, intent_minhash,
-			        model_alias, harness_pref, budget, features, max_attempts, created_by, labels)
-			VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5, $6, $7, $8, $9, $10, $11,
-			        $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22::uuid, $23)
-			RETURNING `+strings.ReplaceAll(taskColumns, "t.", "tasks."),
-			orgID, p.ProjectID, ref, nullable(p.ParentID), nullableText(p.ExternalRef),
-			p.Title, p.Objective, criteria, p.Status, p.Visibility, p.Priority,
-			p.RiskLevel, p.BaseSHA, p.WorkflowSHA, nullableText(p.Fingerprint), p.MinHash,
-			p.ModelAlias, p.HarnessPref, budget, features, p.MaxAttempts, p.CreatedBy,
-			normalizeLabels(p.Labels),
-		).Scan)
-		if err != nil {
-			return err
-		}
+	out, err := scanTask(tx.QueryRow(ctx, `
+		INSERT INTO tasks (organization_id, project_id, ref, parent_id, external_ref,
+		        title, objective, acceptance_criteria, status, visibility, priority,
+		        risk_level, base_sha, workflow_sha, intent_fingerprint, intent_minhash,
+		        model_alias, harness_pref, budget, features, max_attempts, created_by, labels)
+		VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5, $6, $7, $8, $9, $10, $11,
+		        $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22::uuid, $23)
+		RETURNING `+strings.ReplaceAll(taskColumns, "t.", "tasks."),
+		orgID, p.ProjectID, ref, nullable(p.ParentID), nullableText(p.ExternalRef),
+		p.Title, p.Objective, criteria, p.Status, p.Visibility, p.Priority,
+		p.RiskLevel, p.BaseSHA, p.WorkflowSHA, nullableText(p.Fingerprint), p.MinHash,
+		p.ModelAlias, p.HarnessPref, budget, features, p.MaxAttempts, p.CreatedBy,
+		normalizeLabels(p.Labels),
+	).Scan)
+	if err != nil {
+		return domain.Task{}, err
+	}
 
-		for _, dep := range p.DependsOn {
-			if _, err := tx.Exec(ctx, `
-				INSERT INTO task_dependencies (task_id, depends_on_id)
-				VALUES ($1::uuid, $2::uuid) ON CONFLICT DO NOTHING`, out.ID, dep); err != nil {
-				return err
-			}
+	for _, dep := range p.DependsOn {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO task_dependencies (task_id, depends_on_id)
+			VALUES ($1::uuid, $2::uuid) ON CONFLICT DO NOTHING`, out.ID, dep); err != nil {
+			return domain.Task{}, err
 		}
-		if len(p.DependsOn) > 0 {
-			if err := assertNoCycle(ctx, tx, out.ID); err != nil {
-				return err
-			}
-			out.DependsOn = p.DependsOn
+	}
+	if len(p.DependsOn) > 0 {
+		if err := assertNoCycle(ctx, tx, out.ID); err != nil {
+			return domain.Task{}, err
 		}
-		return nil
-	})
-	return out, err
+		out.DependsOn = p.DependsOn
+	}
+	return out, nil
 }
 
 // assertNoCycle walks the dependency graph from taskID and fails if it reaches itself.
@@ -297,29 +308,126 @@ func (s *Store) ListTasks(ctx context.Context, projectID domain.ID, f ListTasksF
 // The current status is read under a row lock so the guard and the write cannot straddle a
 // concurrent transition — otherwise two callers could each validate against the old status
 // and both apply.
+//
+// A transition into a terminal status also ends whatever the task still holds, in the same
+// transaction: its live lease (and the attempt under it) and its scope reservations. That is
+// what makes `conductor task done`, a dashboard cancel, and a merged pull request hand the
+// territory back — a task in verifying keeps its reservations as a pending-merge hold (see
+// Release), and something has to drop that hold when the work lands.
 func (s *Store) UpdateTaskStatus(ctx context.Context, id domain.ID, to domain.TaskStatus) (domain.Task, error) {
 	var out domain.Task
 	err := s.Tx(ctx, func(tx pgx.Tx) error {
-		var from domain.TaskStatus
-		if err := tx.QueryRow(ctx,
-			`SELECT status FROM tasks WHERE id = $1::uuid FOR UPDATE`, id).Scan(&from); err != nil {
-			return noRows(err)
-		}
-		if err := domain.AssertTaskTransition(from, to); err != nil {
-			return err
-		}
 		var err error
-		out, err = scanTask(tx.QueryRow(ctx, `
-			UPDATE tasks
-			   SET status = $2,
-			       updated_at = now(),
-			       completed_at = CASE WHEN $2 IN ('done','cancelled','superseded')
-			                           THEN now() ELSE completed_at END
-			 WHERE id = $1::uuid
-			RETURNING `+strings.ReplaceAll(taskColumns, "t.", "tasks."), id, to).Scan)
+		out, err = updateTaskStatusTx(ctx, tx, id, to, "")
 		return err
 	})
 	return out, err
+}
+
+// updateTaskStatusTx is UpdateTaskStatus inside the caller's transaction. reason, when set,
+// is recorded on the status event.
+//
+// via names intermediate statuses the task passes through on the way to `to`; every edge of
+// the walk must be legal. Only the final status is written — the intermediate ones are how
+// the state machine is honoured for a jump it has no single edge for (a merge completing a
+// task that was still running), not states anyone needs to observe.
+func updateTaskStatusTx(ctx context.Context, tx pgx.Tx, id domain.ID, to domain.TaskStatus, reason string, via ...domain.TaskStatus) (domain.Task, error) {
+	var from domain.TaskStatus
+	if err := tx.QueryRow(ctx,
+		`SELECT status FROM tasks WHERE id = $1::uuid FOR UPDATE`, id).Scan(&from); err != nil {
+		return domain.Task{}, noRows(err)
+	}
+	prev := from
+	for _, next := range append(via, to) {
+		if err := domain.AssertTaskTransition(prev, next); err != nil {
+			return domain.Task{}, err
+		}
+		prev = next
+	}
+	terminal := to.IsTerminal() || to == domain.TaskFailed
+	if terminal && from != to {
+		if err := endLiveLeaseTx(ctx, tx, id, string(to)); err != nil {
+			return domain.Task{}, err
+		}
+	}
+	out, err := scanTask(tx.QueryRow(ctx, `
+		UPDATE tasks
+		   SET status = $2,
+		       updated_at = now(),
+		       active_lease_id = CASE WHEN $3::boolean THEN NULL ELSE active_lease_id END,
+		       completed_at = CASE WHEN $2 IN ('done','cancelled','superseded')
+		                           THEN now() ELSE completed_at END
+		 WHERE id = $1::uuid
+		RETURNING `+strings.ReplaceAll(taskColumns, "t.", "tasks."), id, to, terminal).Scan)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	if from == to {
+		return out, nil
+	}
+	if terminal {
+		if err := releaseTaskReservationsTx(ctx, tx, id); err != nil {
+			return domain.Task{}, err
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE conflict_edges
+			   SET state = 'resolved', resolved_at = now(), updated_at = now(),
+			       resolution_note = COALESCE(resolution_note, 'task closed')
+			 WHERE (task_a = $1::uuid OR task_b = $1::uuid)
+			   AND state IN ('open','acknowledged')`, id); err != nil {
+			return domain.Task{}, err
+		}
+	}
+	return out, appendEvents(ctx, tx, out.OrganizationID, out.ProjectID, "",
+		eventSpec{"task", out.ID, "task.status_changed", domain.VisibilityTeamSummary, map[string]any{
+			"task_ref": out.Ref, "from": string(from), "to": string(to), "status": string(to),
+			"reason": reason,
+		}})
+}
+
+// endLiveLeaseTx releases a task's live lease, if it has one, and closes the attempt under
+// it. A task forced into a terminal status (cancelled from the dashboard, completed by a
+// merge) must not leave a lease behind that a worker could keep publishing under.
+func endLiveLeaseTx(ctx context.Context, tx pgx.Tx, taskID domain.ID, reason string) error {
+	var leaseID, attemptID domain.ID
+	err := tx.QueryRow(ctx, `
+		UPDATE leases SET released_at = now(), release_reason = $2
+		 WHERE task_id = $1::uuid AND released_at IS NULL
+		RETURNING id::text, attempt_id::text`, taskID, reason).Scan(&leaseID, &attemptID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var state domain.AttemptState
+	if err := tx.QueryRow(ctx,
+		`SELECT state FROM attempts WHERE id = $1::uuid FOR UPDATE`, attemptID).Scan(&state); err != nil {
+		return noRows(err)
+	}
+	// A merge proves the work happened, so the attempt succeeded if it got far enough to be
+	// able to; anything else just stops it.
+	next := domain.AttemptCancelled
+	if reason == string(domain.TaskDone) && domain.CanTransitionAttempt(state, domain.AttemptSucceeded) {
+		next = domain.AttemptSucceeded
+	}
+	if domain.CanTransitionAttempt(state, next) && state != next {
+		if _, err := tx.Exec(ctx, `
+			UPDATE attempts SET state = $2, ended_at = now(), last_event_at = now()
+			 WHERE id = $1::uuid`, attemptID, next); err != nil {
+			return err
+		}
+	}
+	// The epoch moves on, so a worker still holding the old fence is refused rather than
+	// publishing into a task that has already closed.
+	if _, err := tx.Exec(ctx, `
+		UPDATE tasks SET fencing_epoch = fencing_epoch + 1 WHERE id = $1::uuid`, taskID); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `
+		UPDATE sessions SET active_task_id = NULL, state = 'online_idle'
+		 WHERE active_task_id = $1::uuid`, taskID)
+	return err
 }
 
 // PatchTask applies caller-supplied field updates. Only fields explicitly present are

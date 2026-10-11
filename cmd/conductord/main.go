@@ -1,37 +1,66 @@
 // Command conductord is the Conductor control plane: REST API, SSE event stream, dashboard,
 // and the background scheduler.
 //
-// It is one process because DESIGN.md §28.1 targets a single host first. Nothing here
-// prevents running the API and the scheduler separately later — every scheduler step is
-// transactional and `SKIP LOCKED`-based, so replicas are safe without leader election.
+// It is one process because DESIGN.md §28.1 targets a single host first. Several replicas
+// may share one database: scheduler steps are transactional and `SKIP LOCKED`-based, the
+// state replicas must agree on (scheduler liveness, budget alert levels, the GitHub App, its
+// setups and check runs) is in Postgres, and the GitHub poller is gated by an advisory lock.
+// Two things remain per process: MCP HTTP sessions, which need session affinity at the load
+// balancer, and the authentication failure limiter. docs/OPERATIONS.md has the details.
 package main
 
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
-	"github.com/adamburan/conductor/internal/api"
-	"github.com/adamburan/conductor/internal/config"
-	"github.com/adamburan/conductor/internal/coord"
-	"github.com/adamburan/conductor/internal/db"
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/scheduler"
-	"github.com/adamburan/conductor/internal/web"
+	"github.com/aburan28/conductor/internal/api"
+	"github.com/aburan28/conductor/internal/client"
+	"github.com/aburan28/conductor/internal/config"
+	"github.com/aburan28/conductor/internal/coord"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/githubapp"
+	"github.com/aburan28/conductor/internal/notify"
+	"github.com/aburan28/conductor/internal/peer"
+	"github.com/aburan28/conductor/internal/scheduler"
+	"github.com/aburan28/conductor/internal/secretbox"
+	"github.com/aburan28/conductor/internal/sso"
+	"github.com/aburan28/conductor/internal/version"
+	"github.com/aburan28/conductor/internal/web"
 )
 
+// isVersionArg accepts the spellings people try first; the flag package would otherwise
+// reject --version as an undefined flag.
+func isVersionArg(arg string) bool {
+	return arg == "--version" || arg == "-version" || arg == "version"
+}
+
 func main() {
+	if len(os.Args) > 1 && isVersionArg(os.Args[1]) {
+		fmt.Println("conductord", version.Get())
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "config" {
+		os.Exit(configCommand(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "bootstrap" {
 		if err := bootstrap(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "bootstrap:", err)
@@ -40,131 +69,558 @@ func main() {
 		return
 	}
 	if err := serve(os.Args[1:]); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		fmt.Fprintln(os.Stderr, "conductord:", err)
-		os.Exit(1)
+		os.Exit(exitCode(err, os.Stderr))
 	}
 }
 
-func serve(args []string) error {
-	fs := flag.NewFlagSet("conductord", flag.ExitOnError)
-	addr := fs.String("addr", envOr("CONDUCTOR_ADDR", "127.0.0.1:8080"), "listen address")
-	dsn := fs.String("dsn", envOr("DATABASE_URL", ""), "PostgreSQL connection string")
-	tick := fs.Duration("tick", 2*time.Second, "scheduler tick interval")
-	detect := fs.Duration("detect-every", 15*time.Second, "conflict graph recomputation interval")
-	noScheduler := fs.Bool("no-scheduler", false, "serve the API without running the scheduler")
-	tlsCert := fs.String("tls-cert", envOr("CONDUCTOR_TLS_CERT", ""), "TLS certificate file")
-	tlsKey := fs.String("tls-key", envOr("CONDUCTOR_TLS_KEY", ""), "TLS private key file")
-	behindProxy := fs.Bool("behind-proxy", false,
+// serveConfig is everything serve reads from its flags and environment, validated.
+type serveConfig struct {
+	addr, dsn         string
+	tick, detect      time.Duration
+	tickTimeout       time.Duration
+	outageAfter       time.Duration
+	noScheduler       bool
+	tlsCert, tlsKey   string
+	tlsEnabled        bool
+	behindProxy       bool
+	publicURL         string
+	meshPeers         []peer.Peer
+	meshOn            bool
+	peerCA            string
+	peerCert, peerKey string
+	peerDiscoverDNS   string
+	peerDNSServer     string
+	securityMode      string
+	githubPoll        time.Duration
+	githubAPI         string
+	githubWeb         string
+	shutdownTimeout   time.Duration
+	database          db.Options
+	retention         db.RetentionPolicy
+	ops               api.OpsOptions
+	secretKeyFile     string
+	secretKeyEnv      string
+	notifyPoll        time.Duration
+	notifyNetwork     notify.NetworkPolicy
+	verbose           bool
+	// sso is single sign-on, with its providers built from --sso-provider.
+	sso api.SSOOptions
+	// admin is what the config file locks for every organization, and the effective
+	// configuration the admin area shows (config.go).
+	admin api.AdminOptions
+	// warnings are problems config check reports without failing.
+	warnings []string
+}
+
+// usageError is a command line flag could not parse. flag has already reported it, with
+// the usage text, so it is not printed again.
+type usageError struct{ err error }
+
+func (e usageError) Error() string { return e.err.Error() }
+func (e usageError) Unwrap() error { return e.err }
+
+// exitCode reports err the way the flag package's ExitOnError convention does — -h exits
+// 0, a flag that does not parse exits 2 (both already printed by flag) — and any other
+// failure on stderr with status 1.
+func exitCode(err error, stderr io.Writer) int {
+	var usage usageError
+	switch {
+	case errors.Is(err, flag.ErrHelp):
+		return 0
+	case errors.As(err, &usage):
+		return 2
+	}
+	fmt.Fprintln(stderr, "conductord:", err)
+	return 1
+}
+
+// parseServeConfig parses serve's flags, writing usage and parse errors to output.
+// Everything that can be checked without touching the network or the filesystem is checked
+// here, so a bad invocation fails before anything starts.
+func parseServeConfig(args []string, output io.Writer) (*serveConfig, error) {
+	return parseServeConfigMode(args, output, false)
+}
+
+// parseServeConfigMode is parseServeConfig; checkOnly (conductord config check) reports a
+// missing database as a warning rather than an error, since checking a file does not need
+// one.
+func parseServeConfigMode(args []string, output io.Writer, checkOnly bool) (*serveConfig, error) {
+	c := &serveConfig{}
+	fs := flag.NewFlagSet("conductord", flag.ContinueOnError)
+	fs.SetOutput(output)
+	configPath := fs.String("config", envOr("CONDUCTOR_CONFIG", ""),
+		"server config file (YAML; see README \"For enterprises\"). Flags and environment variables override it; "+
+			"its features, branding and policy sections lock those settings for every organization")
+	fs.StringVar(&c.addr, "addr", envOr("CONDUCTOR_ADDR", "127.0.0.1:8080"), "listen address")
+	fs.StringVar(&c.dsn, "dsn", envOr("DATABASE_URL", ""), "PostgreSQL connection string")
+	fs.DurationVar(&c.tick, "tick", 2*time.Second, "scheduler tick interval")
+	fs.DurationVar(&c.detect, "detect-every", 15*time.Second, "conflict graph recomputation interval")
+	fs.DurationVar(&c.tickTimeout, "tick-timeout", 30*time.Second, "longest one scheduler pass may run before it is cancelled")
+	fs.DurationVar(&c.outageAfter, "outage-after", 0,
+		"how long no scheduler replica may have ticked before open leases are extended by the gap instead of reclaimed (default: tick-timeout + 3 ticks, at least 30s)")
+	fs.BoolVar(&c.noScheduler, "no-scheduler", false, "serve the API without running the scheduler")
+	fs.StringVar(&c.tlsCert, "tls-cert", envOr("CONDUCTOR_TLS_CERT", ""), "TLS certificate file")
+	fs.StringVar(&c.tlsKey, "tls-key", envOr("CONDUCTOR_TLS_KEY", ""), "TLS private key file")
+	fs.BoolVar(&c.behindProxy, "behind-proxy", false,
 		"trust X-Forwarded-For (only set this when a proxy you control rewrites it)")
 	insecure := fs.Bool("insecure", false,
 		"permit binding a non-loopback address without TLS")
-	publicURL := fs.String("public-url", envOr("CONDUCTOR_PUBLIC_URL", ""),
+	fs.StringVar(&c.publicURL, "public-url", envOr("CONDUCTOR_PUBLIC_URL", ""),
 		"URL at which clients reach this server (used for the MCP endpoint and self-calls); defaults to the bind address")
-	verbose := fs.Bool("v", false, "verbose logging")
+	peers := &peerFlags{}
+	fs.Var(peers, "peer", "peer daemon as name=https://host:port (repeatable; CONDUCTOR_PEERS accepts a comma-separated list)")
+	fs.StringVar(&c.peerCA, "peer-ca", envOr("CONDUCTOR_PEER_CA", ""),
+		"mesh CA bundle (PEM) that peer certificates are signed by; enables the peer surface")
+	fs.StringVar(&c.peerCert, "peer-cert", envOr("CONDUCTOR_PEER_CERT", ""),
+		"this daemon's mesh certificate (PEM), presented to peers and served as the TLS certificate when --tls-cert is absent")
+	fs.StringVar(&c.peerKey, "peer-key", envOr("CONDUCTOR_PEER_KEY", ""),
+		"this daemon's mesh private key")
+	fs.StringVar(&c.peerDiscoverDNS, "peer-discover-dns", envOr("CONDUCTOR_PEER_DISCOVER_DNS", ""),
+		"DNS SRV record resolved on every tick to find mesh peers automatically, instead of a hand-maintained --peer per daemon (e.g. _conductor-mesh._tcp.mesh.internal)")
+	fs.StringVar(&c.peerDNSServer, "peer-dns-server", envOr("CONDUCTOR_PEER_DNS_SERVER", ""),
+		"host:port of the DNS server used for --peer-discover-dns lookups (default: system DNS). For a laptop-local directory: 127.0.0.1:15353")
+	fs.StringVar(&c.securityMode, "security-mode", envOr("CONDUCTOR_SECURITY_MODE", ""),
+		"local: this machine's owner can sign in without a token; enhanced: tokens only, everywhere. "+
+			"Unset: local when bound to loopback, enhanced otherwise, changeable with 'conductor security'")
+	fs.DurationVar(&c.githubPoll, "github-poll", 2*time.Minute,
+		"how often the GitHub App re-checks open pull requests (negative disables polling)")
+	fs.StringVar(&c.githubAPI, "github-api", envOr("CONDUCTOR_GITHUB_API", ""), "GitHub API base URL (GitHub Enterprise: https://HOST/api/v3)")
+	fs.StringVar(&c.githubWeb, "github-web", envOr("CONDUCTOR_GITHUB_WEB", ""), "GitHub web base URL (GitHub Enterprise: https://HOST)")
+
+	// Operations.
+	fs.DurationVar(&c.shutdownTimeout, "shutdown-timeout", 25*time.Second,
+		"on SIGTERM, how long in-flight requests and background work get to finish before the process exits")
+	fs.DurationVar(&c.database.StatementTimeout, "db-statement-timeout", db.DefaultStatementTimeout,
+		"longest a single SQL statement may run (negative: no limit; migrations are exempt)")
+	fs.DurationVar(&c.database.LockTimeout, "db-lock-timeout", db.DefaultLockTimeout,
+		"longest a statement may wait for a lock (negative: no limit)")
+	retention := scheduler.DefaultRetention()
+	const day = 24 * time.Hour
+	eventsDays := fs.Int("retention-days", envInt("CONDUCTOR_RETENTION_DAYS", int(retention.Events/day)),
+		"days to keep domain events and delivered outbox rows (0 keeps them forever)")
+	auditDays := fs.Int("audit-retention-days", envInt("CONDUCTOR_AUDIT_RETENTION_DAYS", int(retention.Audit/day)),
+		"days to keep the audit log (0 keeps it forever)")
+	outboxDays := fs.Int("outbox-undelivered-days", int(retention.OutboxUndelivered/day),
+		"days to keep outbox rows no consumer delivered (0 keeps them forever)")
+	usageDays := fs.Int("usage-retention-days", int(retention.Usage/day),
+		"days to keep usage buckets (0 keeps them forever; at least 31, since budgets look back 30 days)")
+	fs.DurationVar(&retention.Idempotency, "idempotency-ttl", retention.Idempotency,
+		"how long an Idempotency-Key's stored response is kept")
+	fs.StringVar(&c.ops.MetricsToken, "metrics-token", envOr("CONDUCTOR_METRICS_TOKEN", ""),
+		"bearer token /metrics requires; unset, /metrics answers only loopback connections (and nothing behind --behind-proxy)")
+	fs.DurationVar(&c.ops.BodyTimeout, "body-timeout", 30*time.Second,
+		"how long a client may take to send a request body (negative disables)")
+	fs.IntVar(&c.ops.MaxStreams, "max-streams", 1000, "most concurrent event-stream connections")
+	fs.IntVar(&c.ops.MaxStreamsPerPrincipal, "max-streams-per-principal", 16, "most concurrent event-stream connections per principal")
+	fs.IntVar(&c.ops.MaxWebhookChecks, "max-webhook-checks", 8, "most pull request checks running at once on behalf of webhook deliveries")
+	fs.StringVar(&c.secretKeyFile, "secret-key-file", envOr(secretbox.EnvKeyFile, ""),
+		"key that seals secrets conductord stores in the database (the GitHub App's private key); created 0600 on first use. "+
+			"Every replica must use the same key. Default: secret.key in CONDUCTOR_STATE_DIR or ~/.conductor. "+
+			secretbox.EnvKey+" (the base64 key itself) takes precedence")
+	fs.DurationVar(&c.notifyPoll, "notify-poll", 3*time.Second,
+		"how often the notification relay sends undelivered events to webhook and Slack channels (negative disables the relay)")
+	fs.BoolVar(&c.notifyNetwork.AllowPrivate, "notify-allow-private-networks", false,
+		"let notification channels reach loopback, private and link-local addresses (a chat server on your LAN); refused by default to prevent request forgery")
+	fs.BoolVar(&c.notifyNetwork.AllowHTTP, "notify-allow-http", false,
+		"accept http:// notification URLs, for local testing; credentials and payloads then cross the network in the clear")
+	notifyProxy := fs.String("notify-proxy", envOr("CONDUCTOR_NOTIFY_PROXY", ""),
+		"forward proxy (http, https or socks5 URL) for notification requests, where conductord reaches the internet only through one; "+
+			"destinations are still resolved and refused here if not public. HTTPS_PROXY is not used")
+	fs.BoolVar(&c.verbose, "v", false, "verbose logging")
+
+	// Single sign-on.
+	ssoSpecs := &stringFlags{}
+	fs.Var(ssoSpecs, "sso-provider",
+		"single sign-on provider as comma-separated key=value pairs (repeatable; CONDUCTOR_SSO_PROVIDERS takes several separated by ';'), e.g. "+
+			"name=google,issuer=https://accounts.google.com,client-id=ID,domain=example.com or name=github,client-id=ID,org=acme. "+
+			"The client secret is read from CONDUCTOR_SSO_<NAME>_CLIENT_SECRET, or client-secret-file=PATH; never from the command line")
+	fs.DurationVar(&c.sso.TokenTTL, "sso-token-ttl", 12*time.Hour, "lifetime of the token a single sign-on issues (at most 90 days)")
+	ssoAutoProvision := fs.String("sso-auto-provision", envOr("CONDUCTOR_SSO_AUTO_PROVISION", ""),
+		"create an account, with this role (contributor, reviewer or observer), for a first sign-in that matches no registered email. "+
+			"Off by default: an administrator registers each person first (conductor member add HANDLE --email ADDRESS)")
+	fs.StringVar(&c.sso.DefaultProject, "sso-default-project", envOr("CONDUCTOR_SSO_DEFAULT_PROJECT", ""),
+		"ORG/PROJECT (slugs) that --sso-auto-provision adds new accounts to")
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, `conductord — Conductor control plane
+		fmt.Fprintf(fs.Output(), `conductord — Conductor control plane
 
 Usage:
   conductord [flags]
   conductord bootstrap [flags]     create an organization, project, principal, and token
+  conductord config check [flags]  validate the config file and flags, and print the effective configuration
+  conductord --version             print the version and exit
 
 Flags:
 `)
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
-		return err
+		// flag has already printed the error and the usage text.
+		return nil, usageError{err}
 	}
-	if *dsn == "" {
-		return errors.New("no database configured: pass --dsn or set DATABASE_URL")
+	file, fromFile, err := applyConfigFile(fs, *configPath)
+	if err != nil {
+		return nil, err
+	}
+	if c.dsn == "" {
+		if !checkOnly {
+			return nil, errors.New("no database configured: pass --dsn, set DATABASE_URL, or set database.url_env in the config file")
+		}
+		c.warnings = append(c.warnings, "no database is configured (--dsn, DATABASE_URL, or database.url_env); the server would refuse to start")
+	}
+	c.secretKeyEnv = os.Getenv(secretbox.EnvKey)
+	if c.secretKeyFile == "" {
+		var err error
+		if c.secretKeyFile, err = secretbox.DefaultKeyPath(); err != nil {
+			return nil, fmt.Errorf("secret key file: %w", err)
+		}
 	}
 
-	tlsEnabled := *tlsCert != "" && *tlsKey != ""
-	if (*tlsCert == "") != (*tlsKey == "") {
-		return errors.New("--tls-cert and --tls-key must be given together")
+	for name, days := range map[string]int{"--retention-days": *eventsDays, "--audit-retention-days": *auditDays,
+		"--outbox-undelivered-days": *outboxDays, "--usage-retention-days": *usageDays} {
+		if days < 0 {
+			return nil, fmt.Errorf("%s must not be negative", name)
+		}
+	}
+	if *usageDays > 0 && *usageDays < 31 {
+		return nil, errors.New("--usage-retention-days must be 0 or at least 31: budgets total the last 30 days of usage")
+	}
+	retention.Events = time.Duration(*eventsDays) * day
+	retention.OutboxDelivered = min(retention.OutboxDelivered, retention.Events)
+	if retention.Events == 0 {
+		retention.OutboxDelivered = 0
+	}
+	retention.Audit = time.Duration(*auditDays) * day
+	retention.OutboxUndelivered = time.Duration(*outboxDays) * day
+	retention.Usage = time.Duration(*usageDays) * day
+	c.retention = retention
+
+	c.tlsEnabled = c.tlsCert != "" && c.tlsKey != ""
+	if (c.tlsCert == "") != (c.tlsKey == "") {
+		return nil, errors.New("--tls-cert and --tls-key must be given together")
+	}
+	c.meshPeers, err = peers.mergeEnv(os.Getenv("CONDUCTOR_PEERS"))
+	if err != nil {
+		return nil, err
+	}
+	// The mesh identity is one certificate in two roles: presented as the TLS client
+	// certificate when dialing peers, and served as this daemon's TLS certificate. A peer
+	// verifying the server against the mesh CA is what makes the link mutual, so a
+	// separate non-mesh --tls-cert cannot coexist with peering.
+	c.meshOn = c.peerCA != "" || c.peerCert != "" || c.peerKey != "" || len(c.meshPeers) > 0 || c.peerDiscoverDNS != ""
+	if (c.peerCert == "") != (c.peerKey == "") {
+		return nil, errors.New("--peer-cert and --peer-key must be given together")
+	}
+	if c.meshOn {
+		if c.peerCA == "" || c.peerCert == "" {
+			return nil, errors.New("peering requires --peer-ca, --peer-cert and --peer-key together")
+		}
+		if c.tlsCert != "" && c.tlsCert != c.peerCert {
+			return nil, errors.New("--tls-cert must be the mesh certificate when peering (pass --peer-cert as --tls-cert, or drop --tls-cert)")
+		}
+		if c.tlsCert == "" {
+			c.tlsCert, c.tlsKey = c.peerCert, c.peerKey
+			c.tlsEnabled = true
+		}
 	}
 	// Bearer tokens cross this connection. Binding a reachable address in plaintext puts
 	// them on the wire, so it requires saying so out loud — a default that fails safe is
 	// worth more than one that is convenient.
-	if !tlsEnabled && !*insecure && !isLoopback(*addr) && !*behindProxy {
-		return fmt.Errorf(`refusing to serve %s without TLS.
+	if !c.tlsEnabled && !*insecure && !isLoopback(c.addr) && !c.behindProxy {
+		return nil, fmt.Errorf(`refusing to serve %s without TLS.
 
 Bearer tokens would cross the network in the clear. Choose one:
 
   --tls-cert cert.pem --tls-key key.pem   terminate TLS here
+  --peer-ca ca.pem --peer-cert/--peer-key your mesh identity (implies TLS)
   --behind-proxy                          a proxy you control terminates TLS
   --insecure                              you accept the risk (trusted network only)
 
-Binding 127.0.0.1 needs none of these.`, *addr)
+Binding 127.0.0.1 needs none of these.`, c.addr)
+	}
+	switch c.securityMode {
+	case "", db.SecurityLocal, db.SecurityEnhanced:
+	default:
+		return nil, fmt.Errorf("--security-mode must be local or enhanced, not %q", c.securityMode)
+	}
+	if c.shutdownTimeout <= 0 {
+		return nil, errors.New("--shutdown-timeout must be positive")
+	}
+	var fileProviders []sso.Config
+	if file != nil {
+		fileProviders = file.Providers()
+		c.admin.Locks = file.Locks()
+		c.admin.ConfigFile = file.Path
+	}
+	ssoSource, err := c.parseSSO(*ssoSpecs, os.Getenv("CONDUCTOR_SSO_PROVIDERS"), fileProviders, *ssoAutoProvision)
+	if err != nil {
+		return nil, err
+	}
+	if *notifyProxy != "" {
+		proxy, err := notify.ParseProxy(*notifyProxy)
+		if err != nil {
+			return nil, fmt.Errorf("--notify-proxy: %w", err)
+		}
+		c.notifyNetwork.Proxy = proxy
+	}
+	c.admin.Config = effectiveConfig(fs, fromFile, c.sso.Providers, ssoSource)
+	return c, nil
+}
+
+// parseSSO builds the single sign-on providers and checks the whole configuration, including
+// the public URL every redirect URI is built from, before anything starts. Providers come
+// from --sso-provider, else CONDUCTOR_SSO_PROVIDERS, else the config file — one source, never
+// a mix — and it reports which.
+func (c *serveConfig) parseSSO(flags []string, env string, file []sso.Config, autoProvision string) (string, error) {
+	specs, source := flags, "flag"
+	if len(specs) == 0 {
+		specs, source = strings.FieldsFunc(env, func(r rune) bool { return r == ';' || r == '\n' }), "env"
+	}
+	configs, err := sso.ParseSpecs(specs, os.Getenv)
+	if err != nil {
+		return "", err
+	}
+	if len(configs) == 0 && len(file) > 0 {
+		configs, source = file, "file"
+	}
+	for _, cfg := range configs {
+		p, err := sso.New(cfg, sso.Options{})
+		if err != nil {
+			return "", err
+		}
+		c.sso.Providers = append(c.sso.Providers, p)
+	}
+	c.sso.AutoProvisionRole = domain.Role(autoProvision)
+	c.sso.PublicURL = c.publicURL
+	if c.sso.PublicURL == "" {
+		scheme := "http"
+		if c.tlsEnabled {
+			scheme = "https"
+		}
+		c.sso.PublicURL = scheme + "://" + displayHost(c.addr)
+	}
+	return source, api.ValidateSSOOptions(c.sso)
+}
+
+// stringFlags is a repeatable string flag.
+type stringFlags []string
+
+func (f *stringFlags) String() string { return strings.Join(*f, " ") }
+
+func (f *stringFlags) Set(v string) error {
+	*f = append(*f, v)
+	return nil
+}
+
+func serve(args []string) error {
+	cfg, err := parseServeConfig(args, os.Stderr)
+	if err != nil {
+		return err
 	}
 
 	level := slog.LevelInfo
-	if *verbose {
+	if cfg.verbose {
 		level = slog.LevelDebug
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 	slog.SetDefault(logger)
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// sigCtx ends on SIGINT/SIGTERM; life ends with it, or when the listener fails, and is
+	// what every background goroutine and long-lived response runs under.
+	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	life, endLife := context.WithCancel(sigCtx)
+	defer endLife()
+	// background tracks every goroutine started here. The store is closed only after they
+	// have all returned, so none of them is cut off mid-transaction.
+	var background sync.WaitGroup
+	goBackground := func(name string, fn func(ctx context.Context) error) {
+		background.Add(1)
+		go func() {
+			defer background.Done()
+			if err := fn(life); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error(name+" exited", "error", err)
+			}
+		}()
+	}
 
-	store, err := db.Open(ctx, *dsn)
+	store, err := db.Open(life, cfg.dsn, cfg.database)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
 
-	if err := store.Migrate(ctx); err != nil {
+	if err := store.Migrate(life); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
 	logger.Info("database ready")
+	api.RegisterPoolMetrics(store)
 
 	scheme := "http"
-	if tlsEnabled {
+	if cfg.tlsEnabled {
 		scheme = "https"
 	}
-	selfEndpoint := *publicURL
+	selfEndpoint := cfg.publicURL
 	if selfEndpoint == "" {
-		selfEndpoint = scheme + "://" + displayHost(*addr)
+		selfEndpoint = scheme + "://" + displayHost(cfg.addr)
 	}
 
+	// Mesh identity and, when peers are configured, the link keeper that dials them.
+	// Link state is a projection, so it lives in memory and disappears with the process.
+	var (
+		meshName   string
+		meshPool   *x509.CertPool
+		peerStatus func() []peer.LinkStatus
+	)
+	if cfg.meshOn {
+		meshPool, err = peer.LoadCA(cfg.peerCA)
+		if err != nil {
+			return fmt.Errorf("mesh CA: %w", err)
+		}
+		ourCert, err := peer.LoadCert(cfg.peerCert, cfg.peerKey)
+		if err != nil {
+			return fmt.Errorf("mesh certificate: %w", err)
+		}
+		leaf, err := x509.ParseCertificate(ourCert.Certificate[0])
+		if err != nil {
+			return fmt.Errorf("mesh certificate: %w", err)
+		}
+		meshName = peer.CertName(leaf)
+		if meshName == "" {
+			return errors.New("mesh certificate carries no name (no DNS SAN, no common name)")
+		}
+		if len(cfg.meshPeers) > 0 || cfg.peerDiscoverDNS != "" {
+			// A pinned DNS server bypasses the system resolver for discovery
+			// lookups. The Go resolver ignores /etc/resolver, so on a laptop the
+			// directory has to live somewhere the OS resolver never looks —
+			// this points the lookup straight at it instead.
+			var resolver peer.SRVResolver
+			if cfg.peerDNSServer != "" {
+				dnsServer := cfg.peerDNSServer
+				resolver = &net.Resolver{
+					PreferGo: true,
+					Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+						return net.Dial(network, dnsServer)
+					},
+				}
+			}
+			mgr, err := peer.New(peer.Options{
+				Peers: cfg.meshPeers, SelfURL: selfEndpoint,
+				CAPath: cfg.peerCA, CertPath: cfg.peerCert, KeyPath: cfg.peerKey,
+				DiscoverDNS: cfg.peerDiscoverDNS,
+				Resolver:    resolver,
+				Logger:      logger,
+			})
+			if err != nil {
+				return err
+			}
+			goBackground("peer link keeper", mgr.Run)
+			peerStatus = mgr.Snapshot
+		}
+	}
+
+	// Local sign-in. A daemon only this machine can reach defaults to letting its owner in
+	// without a token; one reachable from the network defaults to tokens only. Either can be
+	// pinned with --security-mode, or switched at runtime with `conductor security`.
+	defaultMode := db.SecurityEnhanced
+	if isLoopback(cfg.addr) && !cfg.behindProxy {
+		defaultMode = db.SecurityLocal
+	}
+
+	// The GitHub App. Its credentials live in the database, shared by every replica; an app
+	// set up by an older conductord (a 0600 file beside the CLI's credentials) is imported
+	// once. With none, the integration serves only its setup flow. GitHub can deliver
+	// webhooks only to a public URL; anywhere else the poller finds pull requests itself.
+	// One key source for everything conductord seals, so a key file is created at most once.
+	secretKey := &secretbox.Source{Env: cfg.secretKeyEnv, Path: cfg.secretKeyFile}
+	githubCreds, err := githubapp.DefaultPath()
+	if err != nil {
+		return err
+	}
+	webhookURL := ""
+	if cfg.publicURL != "" && !isLoopbackURL(cfg.publicURL) {
+		webhookURL = strings.TrimRight(cfg.publicURL, "/") + "/github/webhook"
+	}
+	gh, ghErr := api.NewGitHub(api.GitHubOptions{
+		CredentialsPath: githubCreds, API: cfg.githubAPI, Web: cfg.githubWeb,
+		SecretKey: secretKey,
+		BaseURL:   selfEndpoint, WebhookURL: webhookURL, Poll: cfg.githubPoll, Logger: logger,
+	})
+
+	ops := cfg.ops
+	ops.BaseContext = life
 	svc := coord.New(store)
+	// Notification channels and the relay that delivers the outbox to them. Messages link to
+	// the dashboard only when it has a public address; a loopback link helps nobody in Slack.
+	dashboardURL := ""
+	if cfg.publicURL != "" && !isLoopbackURL(cfg.publicURL) {
+		dashboardURL = strings.TrimRight(cfg.publicURL, "/")
+	}
+	notifier := notify.New(store, svc, notify.Options{
+		SecretKey: secretKey, Network: cfg.notifyNetwork, DashboardURL: dashboardURL,
+		Poll: cfg.notifyPoll, Logger: logger,
+	})
 	server := api.New(store, svc, api.Options{
 		Logger:       logger,
 		Web:          web.Handler(),
-		BehindProxy:  *behindProxy,
-		TLSEnabled:   tlsEnabled,
+		BehindProxy:  cfg.behindProxy,
+		TLSEnabled:   cfg.tlsEnabled,
 		SelfEndpoint: selfEndpoint,
+		PeerName:     meshName,
+		PeerStatus:   peerStatus,
+		LocalLogin:   api.LocalLoginOptions{DefaultMode: defaultMode, ForcedMode: cfg.securityMode},
+		GitHub:       gh,
+		Notify:       notifier,
+		Ops:          ops,
+		SSO:          cfg.sso,
+		Admin:        cfg.admin,
 	})
+	if ghErr == nil {
+		ghErr = gh.Refresh(life)
+	}
+	if ghErr != nil {
+		logger.Warn("github app credentials could not be loaded; run `conductor github setup` again", "error", ghErr)
+	} else if gh.Configured() {
+		logger.Info("github app ready", "mode", map[bool]string{true: "webhook", false: "polling"}[webhookURL != ""])
+	}
+	goBackground("github poller", gh.Run)
+	for _, p := range cfg.sso.Providers {
+		// The one URL that must be registered with the provider, exactly.
+		logger.Info("single sign-on provider", "name", p.Config().Name, "type", p.Config().Kind,
+			"redirect_uri", strings.TrimRight(cfg.sso.PublicURL, "/")+"/v1/sso/"+p.Config().Name+"/callback")
+	}
+	if settings, err := store.GetServerSettings(life); err == nil {
+		mode := firstNonEmpty(cfg.securityMode, settings.SecurityMode, defaultMode)
+		logger.Info("security mode", "mode", mode, "local_owner_set", settings.LocalOwnerID != "")
+	}
 
-	if !*noScheduler {
-		sched := scheduler.New(store, svc, scheduler.Options{
-			Tick: *tick, DetectEvery: *detect, Logger: logger,
-		})
-		go func() {
-			if err := sched.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-				logger.Error("scheduler exited", "error", err)
-			}
-		}()
+	sched := scheduler.New(store, svc, scheduler.Options{
+		Tick: cfg.tick, DetectEvery: cfg.detect, TickTimeout: cfg.tickTimeout,
+		OutageAfter: cfg.outageAfter, Retention: cfg.retention, Logger: logger,
+	})
+	// Before the first request: if every replica was down long enough for leases to lapse,
+	// extend them now, or a worker's first heartbeat after the outage would be refused.
+	// This runs with --no-scheduler too; an API-only replica takes heartbeats as well.
+	if _, err := sched.RecoverOutage(life); err != nil {
+		logger.Warn("lease outage recovery failed; the scheduler retries on its first tick", "error", err)
+	}
+	if !cfg.noScheduler {
+		goBackground("scheduler", sched.Run)
+	}
+	if cfg.notifyPoll >= 0 {
+		goBackground("notification relay", notifier.Run)
 	}
 
 	httpServer := &http.Server{
-		Addr:              *addr,
+		Addr:              cfg.addr,
 		Handler:           server.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
-		// No WriteTimeout: the SSE event stream is a long-lived response, and a write
-		// deadline would sever every dashboard connection on a fixed interval.
+		// No ReadTimeout or WriteTimeout: both stay armed for the whole response, and the
+		// event stream is a long-lived one. Request bodies get their own deadline instead
+		// (--body-timeout, api.OpsOptions.BodyTimeout).
 		IdleTimeout: 120 * time.Second,
+		ErrorLog:    slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
-
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		defer cancel()
-		_ = httpServer.Shutdown(shutdownCtx)
-	}()
-
-	if tlsEnabled {
+	if cfg.tlsEnabled {
 		httpServer.TLSConfig = &tls.Config{
 			MinVersion: tls.VersionTLS12,
 			// Prefer forward-secret suites. Go picks sensibly for TLS 1.3; this only
@@ -178,15 +634,80 @@ Binding 127.0.0.1 needs none of these.`, *addr)
 				tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
 			},
 		}
+		if cfg.meshOn {
+			// Verify peer certificates when presented, without demanding one from human
+			// clients. The /v1/peer/* routes are the only consumers of the result.
+			httpServer.TLSConfig.ClientCAs = meshPool
+			httpServer.TLSConfig.ClientAuth = tls.VerifyClientCertIfGiven
+		}
 	}
 	logger.Info("conductor listening",
-		"addr", *addr, "tls", tlsEnabled, "behind_proxy", *behindProxy,
+		"addr", cfg.addr, "tls", cfg.tlsEnabled, "behind_proxy", cfg.behindProxy,
+		"mesh", cfg.meshOn,
 		"dashboard", selfEndpoint+"/", "mcp", selfEndpoint+"/mcp")
 
-	if tlsEnabled {
-		return httpServer.ListenAndServeTLS(*tlsCert, *tlsKey)
+	listen := httpServer.ListenAndServe
+	if cfg.tlsEnabled {
+		listen = func() error { return httpServer.ListenAndServeTLS(cfg.tlsCert, cfg.tlsKey) }
 	}
-	return httpServer.ListenAndServe()
+	// Background work started by requests (webhook checks) is awaited with the rest.
+	background.Add(1)
+	go func() {
+		defer background.Done()
+		<-life.Done()
+		server.Wait()
+	}()
+	return runServer(life, endLife, httpServer, listen, &background, cfg.shutdownTimeout, logger)
+}
+
+// runServer serves until ctx ends or the listener fails, then shuts down in order:
+//
+//  1. end ctx (via cancel), which stops the scheduler, the poller and peer links, ends event
+//     streams, and cancels background webhook checks;
+//  2. stop accepting connections and wait for in-flight requests to complete;
+//  3. wait for every background goroutine to return.
+//
+// All of it is bounded by timeout; past it, open connections are closed. It returns only
+// after step 3 (or the timeout), so the caller can close the store knowing nothing still
+// uses it.
+//
+// http.Server.ListenAndServe returns ErrServerClosed the moment Shutdown begins, not when it
+// ends — returning then, as serve once did, closed the store under requests still running.
+func runServer(ctx context.Context, cancel context.CancelFunc, srv *http.Server, listen func() error,
+	background *sync.WaitGroup, timeout time.Duration, logger *slog.Logger) error {
+	listenErr := make(chan error, 1)
+	go func() { listenErr <- listen() }()
+
+	var result error
+	select {
+	case <-ctx.Done():
+		logger.Info("shutting down", "timeout", timeout.String())
+	case err := <-listenErr:
+		if !errors.Is(err, http.ErrServerClosed) {
+			result = err
+		}
+	}
+	cancel()
+
+	deadline, done := context.WithTimeout(context.Background(), timeout)
+	defer done()
+	if err := srv.Shutdown(deadline); err != nil {
+		logger.Warn("in-flight requests did not finish in time; closing their connections", "error", err)
+		_ = srv.Close()
+	}
+
+	finished := make(chan struct{})
+	go func() {
+		background.Wait()
+		close(finished)
+	}()
+	select {
+	case <-finished:
+		logger.Info("shutdown complete")
+	case <-deadline.Done():
+		logger.Warn("background work did not stop in time; exiting anyway")
+	}
+	return result
 }
 
 // isLoopback reports whether a listen address is reachable only from this machine.
@@ -222,6 +743,10 @@ func displayHost(addr string) string {
 // It is a separate subcommand rather than an API endpoint on purpose: the very first
 // credential in a system cannot be authenticated by that system, so it is issued by someone
 // with database access, once.
+//
+// Because the single-host deployment (DESIGN.md §28.1) runs the CLI next to the database it
+// just bootstrapped, the minted token is also written straight into the operator's login
+// file — the copy-paste `conductor login` round trip only remains for other machines.
 func bootstrap(args []string) error {
 	fs := flag.NewFlagSet("bootstrap", flag.ExitOnError)
 	dsn := fs.String("dsn", envOr("DATABASE_URL", ""), "PostgreSQL connection string")
@@ -229,9 +754,18 @@ func bootstrap(args []string) error {
 	projectSlug := fs.String("project", "", "project slug (defaults to the repository directory name)")
 	handle := fs.String("principal", envOr("USER", "operator"), "principal handle")
 	repo := fs.String("repo", ".", "path to the repository this project coordinates")
-	role := fs.String("role", string(domain.RoleProjectAdmin), "role to grant the principal")
+	role := fs.String("role", "", "role to grant the principal (default: org_admin for the first principal of a new organization, "+
+		"so someone can reach the admin area; otherwise the role they already hold, or project_admin)")
+	endpoint := fs.String("endpoint", envOr("CONDUCTOR_PUBLIC_URL", "http://localhost:8080"),
+		"control plane URL saved into this machine's login")
+	noLogin := fs.Bool("no-login", false, "do not write this machine's login file; print the token only")
+	owner := fs.Bool("owner", false, "make this principal the machine's owner even if another is already set (local sign-in acts as the owner)")
+	tokenTTL := fs.Duration("token-ttl", 90*24*time.Hour, "lifetime of the minted token (0 for no expiry)")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *tokenTTL < 0 {
+		return errors.New("--token-ttl cannot be negative")
 	}
 	if *dsn == "" {
 		return errors.New("no database configured: pass --dsn or set DATABASE_URL")
@@ -260,8 +794,10 @@ func bootstrap(args []string) error {
 	// Idempotent: re-running bootstrap should mint a fresh token, not fail because the org
 	// already exists.
 	org, err := store.GetOrganizationBySlug(ctx, *orgSlug)
+	newOrg := false
 	if errors.Is(err, domain.ErrNotFound) {
 		org, err = store.CreateOrganization(ctx, *orgSlug, *orgSlug)
+		newOrg = true
 	}
 	if err != nil {
 		return fmt.Errorf("organization: %w", err)
@@ -302,9 +838,42 @@ func bootstrap(args []string) error {
 	if err != nil {
 		return fmt.Errorf("project: %w", err)
 	}
+	// Record the repository the project governs, so the GitHub App can match pull requests
+	// to it. project.yaml wins; otherwise the checkout's own origin.
+	if project.CanonicalRemote == "" {
+		if remote := gitOrigin(repoPath); remote != "" {
+			if err := store.SetProjectRemote(ctx, project.ID, remote); err == nil {
+				project.CanonicalRemote = remote
+			}
+		}
+	}
 
-	if err := store.AddMember(ctx, project.ID, principal.ID, domain.Role(*role)); err != nil {
+	// Bootstrap holds database credentials, so it may set a role outright; re-running it
+	// converges on what was asked for. Asked for nothing, it never demotes: re-running
+	// bootstrap to recover a login keeps the role the principal has.
+	if *role == "" {
+		current, err := store.RoleIn(ctx, project.ID, principal.ID)
+		switch {
+		case newOrg:
+			*role = string(domain.RoleOrgAdmin)
+		case err == nil:
+			*role = string(current)
+		default:
+			*role = string(domain.RoleProjectAdmin)
+		}
+	}
+	if err := store.UpsertMember(ctx, project.ID, principal.ID, domain.Role(*role)); err != nil {
 		return fmt.Errorf("membership: %w", err)
+	}
+
+	// The first person to bootstrap a machine owns it: local sign-in (`conductor security`)
+	// acts as them. A later bootstrap for a teammate does not take that over unless --owner.
+	isOwner := false
+	if principal.Kind == domain.PrincipalHuman || principal.Kind == "" {
+		isOwner, err = store.SetLocalOwner(ctx, principal.ID, !*owner)
+		if err != nil {
+			return fmt.Errorf("owner: %w", err)
+		}
 	}
 
 	if bundle.Workflow.Raw != "" {
@@ -318,9 +887,32 @@ func bootstrap(args []string) error {
 		}
 	}
 
-	token, err := store.CreateToken(ctx, principal.ID, "bootstrap", 0)
+	// Re-running bootstrap is how a lost login is recovered, so the token it printed last
+	// time is revoked as this one is minted: a bootstrap credential left in an old terminal
+	// scrollback or CI log stops working the next time anyone bootstraps. It also expires
+	// on its own (--token-ttl), like any other human credential.
+	token, revoked, err := store.ReplaceToken(ctx, principal.ID, "bootstrap", *tokenTTL)
 	if err != nil {
 		return fmt.Errorf("token: %w", err)
+	}
+	store.Audit(ctx, org.ID, project.ID, principal.ID, "bootstrap", "principal", principal.ID,
+		map[string]any{"principal": principal.Handle, "role": *role, "count": revoked})
+
+	loginSaved := false
+	if !*noLogin {
+		creds := client.Credentials{
+			Endpoint: *endpoint,
+			Token:    token,
+			Project:  project.Slug,
+			Handle:   principal.Handle,
+		}
+		if err := client.SaveCredentials(creds); err != nil {
+			// The tenant exists and the token was minted; losing the convenience of a
+			// saved login must not fail the bootstrap. The printed login line still works.
+			fmt.Fprintf(os.Stderr, "bootstrap: could not save login: %v\n", err)
+		} else {
+			loginSaved = true
+		}
 	}
 
 	fmt.Printf(`Conductor is bootstrapped.
@@ -329,13 +921,32 @@ func bootstrap(args []string) error {
   project       %s  (%s)
   principal     %s  (%s)
   repository    %s
+`, org.Slug, project.Slug, project.ID, principal.Handle, *role, repoPath)
 
-Save your credentials:
+	if loginSaved {
+		path, _ := client.CredentialsPath()
+		fmt.Printf("\nLogged in as %s — credentials saved to %s (mode 0600).\n", principal.Handle, path)
+	} else {
+		fmt.Println("\nThis machine was not logged in (--no-login).")
+	}
+	if isOwner {
+		fmt.Printf("%s owns this machine: the dashboard at %s signs them in without a token.\n", principal.Handle, *endpoint)
+	}
 
-  conductor login --endpoint http://localhost:8080 --token %s --project %s
+	fmt.Printf(`
+To log in on another machine, or again on this one:
 
-This token is shown once and is stored only as a hash. Keep it out of shared logs.
-`, org.Slug, project.Slug, project.ID, principal.Handle, *role, repoPath, token, project.Slug)
+  conductor login --endpoint %s --token %s --project %s
+
+The token is shown once and is stored only as a hash. Keep it out of shared logs.
+`, *endpoint, token, project.Slug)
+	if *tokenTTL > 0 {
+		fmt.Printf("It expires %s; run bootstrap again, or `conductor token reset --save`, before then.\n",
+			time.Now().Add(*tokenTTL).UTC().Format(time.RFC3339))
+	}
+	if revoked > 0 {
+		fmt.Printf("The %d bootstrap token(s) minted before this one were revoked.\n", revoked)
+	}
 	return nil
 }
 
@@ -346,6 +957,52 @@ func envOr(name, fallback string) string {
 	return fallback
 }
 
+// envInt reads an integer from the environment; an unset or malformed value is the fallback
+// (a malformed one is then reported by flag parsing only if passed as a flag).
+func envInt(name string, fallback int) int {
+	if v, err := strconv.Atoi(os.Getenv(name)); err == nil {
+		return v
+	}
+	return fallback
+}
+
+// peerFlags collects repeated --peer name=url flags.
+type peerFlags []peer.Peer
+
+func (p *peerFlags) String() string {
+	if p == nil {
+		return ""
+	}
+	return fmt.Sprintf("%v", []peer.Peer(*p))
+}
+
+func (p *peerFlags) Set(v string) error {
+	name, url, ok := strings.Cut(v, "=")
+	if !ok || name == "" || url == "" {
+		return fmt.Errorf("expected name=https://host:port, got %q", v)
+	}
+	*p = append(*p, peer.Peer{Name: name, URL: url})
+	return nil
+}
+
+// mergeEnv appends the CONDUCTOR_PEERS comma-separated list (name=url,name=url) to the
+// flags. Flags win only in the sense that both are kept; a name used twice is rejected by
+// peer.New.
+func (p *peerFlags) mergeEnv(env string) ([]peer.Peer, error) {
+	out := []peer.Peer(*p)
+	for _, entry := range strings.Split(env, ",") {
+		if strings.TrimSpace(entry) == "" {
+			continue
+		}
+		name, url, ok := strings.Cut(entry, "=")
+		if !ok || strings.TrimSpace(name) == "" || strings.TrimSpace(url) == "" {
+			return nil, fmt.Errorf("CONDUCTOR_PEERS entry %q must be name=https://host:port", entry)
+		}
+		out = append(out, peer.Peer{Name: strings.TrimSpace(name), URL: strings.TrimSpace(url)})
+	}
+	return out, nil
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, v := range values {
 		if v != "" {
@@ -353,4 +1010,27 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// isLoopbackURL reports whether a URL's host is loopback.
+func isLoopbackURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	h := u.Hostname()
+	if h == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
+}
+
+// gitOrigin returns the checkout's origin URL, or "".
+func gitOrigin(dir string) string {
+	out, err := exec.Command("git", "-C", dir, "remote", "get-url", "origin").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }

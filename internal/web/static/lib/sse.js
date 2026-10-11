@@ -11,7 +11,7 @@ export const EVENT_TYPES = [
   'lease.expired', 'lease.reclaimed', 'lease.released',
   'budget.downshift', 'budget.exhausted', 'budget.shared',
   'session.registered', 'session.closed', 'session.reaped', 'session.capabilities',
-  'conflict.detected', 'conflict.resolved', 'scope.expanded', 'scope.granted', 'scope.blocked',
+  'conflict.detected', 'conflict.resolved', 'conflict.blocked', 'conflict.suggest_join', 'scope.expanded', 'scope.granted', 'scope.blocked',
   'queue.enqueued', 'queue.granted', 'queue.released', 'queue.expired', 'queue.cancelled',
   'swarm.joined', 'swarm.left', 'member.added', 'member.removed', 'usage.recorded',
 ];

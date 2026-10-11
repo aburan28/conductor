@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"0199a213-0000-7800-8aa1-bbab2a035a53"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"SENSITIVE-PROMPT-CONTENT-DO-NOT-STORE"}}
+{"type":"error","message":"SENSITIVE-PROMPT-CONTENT-DO-NOT-STORE"}
+{"type":"turn.failed","error":{"message":"SENSITIVE-PROMPT-CONTENT-DO-NOT-STORE"}}

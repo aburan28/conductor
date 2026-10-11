@@ -458,6 +458,10 @@ type Task struct {
 	CreatedAt     time.Time    `json:"created_at"`
 	UpdatedAt     time.Time    `json:"updated_at"`
 	CompletedAt   *time.Time   `json:"completed_at,omitempty"`
+	// PullRequestURL is the pull request the work travels in, once one is known, and
+	// PullRequestState is GitHub's word for where it stands (open, merged, closed).
+	PullRequestURL   string `json:"pull_request_url,omitempty"`
+	PullRequestState string `json:"pull_request_state,omitempty"`
 
 	// Fingerprint and MinHash are coordination metadata, never rendered to another
 	// principal. See internal/privacy for why they can be stored without exposing text.

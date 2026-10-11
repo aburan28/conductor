@@ -4,7 +4,7 @@ import { card, empty, kv, markdown, skeleton, errorBox } from '../components/ui.
 import { pill, chip, chips, riskChip, tierChip } from '../components/pill.js';
 import { table } from '../components/table.js';
 import { relTime, fmtDate, fmtTokens, fmtUSD, fmtDuration, durationBetween } from '../lib/format.js';
-import { claimTask, releaseTask, assignTask, transitionTask, handoffTask, dispatchTask, cancelTask } from '../lib/actions.js';
+import { claimTask, releaseTask, assignTask, transitionTask, handoffTask, dispatchTask, cancelTask, markDone, reopenTask } from '../lib/actions.js';
 
 // Task detail renders inside a drawer over the board on wide screens and as a full-width
 // panel on narrow ones (the CSS decides). It is a route (/tasks/T-42), so it deep-links.
@@ -12,9 +12,9 @@ export function openTaskDrawer(ref, ctx, { onClose } = {}) {
   const body = h('div', { class: 'drawer-body' }, skeleton(8));
   const titleEl = h('span', { class: 'ref', style: { fontSize: '13px' } }, ref);
   const scrim = h('div', { class: 'drawer-scrim', onclick: () => close() });
-  const drawer = h('aside', { class: 'drawer', role: 'dialog', 'aria-label': 'Task ' + ref },
+  const drawer = h('div', { class: 'drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Task ' + ref },
     h('div', { class: 'drawer-bar' },
-      h('button', { class: 'btn ghost icon', 'aria-label': 'close', onclick: () => close() }, icon('back')),
+      h('button', { class: 'btn ghost icon', 'aria-label': 'Close task', onclick: () => close() }, icon('back')),
       titleEl, h('div', { class: 'spacer', style: { flex: 1 } }),
       h('button', { class: 'btn ghost sm', onclick: () => refresh() }, icon('refresh'), 'Refresh')),
     body);
@@ -46,12 +46,15 @@ export function openTaskDrawer(ref, ctx, { onClose } = {}) {
     ]);
     if (!alive) return;
     if (!task) { replace(body, errorBox(new Error(`Task ${ref} could not be loaded`), refresh)); return; }
+    // A task imported from (or naming) a GitHub issue links to it; the server knows its address.
+    const [issue] = task.external_ref && task.external_ref.startsWith('github:') ? await settle([ctx.api.get(t('/issue'))]) : [null];
+    if (!alive) return;
     replace(body, render({ task, attempts: (attempts && attempts.attempts) || [], validation: (validation && validation.results) || task.validation || [],
       decisions: (decisions && decisions.decisions) || [], handoff: handoff && handoff.bundle ? handoff.bundle : handoff && handoff.task_ref ? handoff : null,
-      cardText: typeof cardText === 'string' ? cardText : '', sessions: (caps && caps.sessions) || [], explain }));
+      cardText: typeof cardText === 'string' ? cardText : '', sessions: (caps && caps.sessions) || [], explain, issue }));
   }
 
-  function render({ task, attempts, validation, decisions, handoff, cardText, sessions, explain }) {
+  function render({ task, attempts, validation, decisions, handoff, cardText, sessions, explain, issue }) {
     const act = async fn => { const r = await fn(); if (r) { refresh(); if (ctx.refreshAll) ctx.refreshAll(); } };
     const isOpen = !['done', 'cancelled', 'superseded', 'failed'].includes(task.status);
     const actions = h('div', { class: 'btn-row' },
@@ -60,6 +63,8 @@ export function openTaskDrawer(ref, ctx, { onClose } = {}) {
       isOpen ? h('button', { class: 'btn', onclick: () => act(() => assignTask(ctx, task.ref, sessions)) }, 'Offer to session…') : null,
       ['ready', 'proposed'].includes(task.status) ? h('button', { class: 'btn', onclick: () => act(() => dispatchTask(ctx, task.ref)) }, icon('bolt'), 'Dispatch now') : null,
       ['claimed', 'running'].includes(task.status) ? h('button', { class: 'btn', onclick: () => act(() => handoffTask(ctx, task.ref)) }, 'Hand off…') : null,
+      ['claimed', 'running', 'verifying', 'review_required', 'merging'].includes(task.status) ? h('button', { class: 'btn', onclick: () => act(() => markDone(ctx, task.ref, task.status)) }, 'Mark done') : null,
+      ['verifying', 'review_required', 'merging'].includes(task.status) ? h('button', { class: 'btn', onclick: () => act(() => reopenTask(ctx, task.ref)) }, 'Reopen') : null,
       h('button', { class: 'btn', onclick: () => act(() => transitionTask(ctx, task.ref, task.status)) }, 'Transition…'),
       isOpen ? h('button', { class: 'btn danger', onclick: () => act(() => cancelTask(ctx, task.ref)) }, 'Cancel') : null);
 
@@ -85,6 +90,14 @@ export function openTaskDrawer(ref, ctx, { onClose } = {}) {
       ['Attempts', String(task.attempts_count || 0)],
       ['Branch', task.branch ? h('span', { class: 'mono' }, task.branch) : null],
       ['Commit', task.commit_sha ? h('span', { class: 'mono' }, task.commit_sha.slice(0, 12)) : null],
+      // Linked only when it is an https URL: it came from GitHub, but a javascript: link must never be clickable.
+      ['Pull request', task.pull_request_url ? h('span', {}, /^https:\/\//.test(task.pull_request_url)
+        ? h('a', { href: task.pull_request_url, target: '_blank', rel: 'noopener' }, task.pull_request_url.replace(/^https:\/\/[^/]+\//, ''))
+        : h('span', { class: 'mono' }, task.pull_request_url), ' ', pill(task.pull_request_state || 'open')) : null],
+      // Linked only when it is an https URL, as for the pull request above.
+      ['Issue', issue && issue.url ? h('span', {}, /^https:\/\//.test(issue.url)
+        ? h('a', { href: issue.url, target: '_blank', rel: 'noopener' }, task.external_ref.replace(/^github:/, ''))
+        : h('span', { class: 'mono' }, task.external_ref), issue.state ? ' ' : null, issue.state ? pill(issue.state) : null) : null],
       ['Depends on', task.depends_on && task.depends_on.length ? h('div', { class: 'chips' }, task.depends_on.map(d => h('a', { class: 'chip', href: `/tasks/${encodeURIComponent(d)}`, 'data-link': true }, d))) : null],
       ['Scopes', task.scopes && task.scopes.length ? chips(task.scopes) : h('span', { class: 'muted' }, 'none reserved')],
       ['Created', fmtDate(task.created_at)],

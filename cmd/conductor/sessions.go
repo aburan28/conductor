@@ -13,9 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adamburan/conductor/internal/localstate"
-	"github.com/adamburan/conductor/internal/privacy"
-	"github.com/adamburan/conductor/internal/shutdownhook"
+	"github.com/aburan28/conductor/internal/checkpoint"
+	"github.com/aburan28/conductor/internal/localstate"
+	"github.com/aburan28/conductor/internal/privacy"
+	"github.com/aburan28/conductor/internal/shutdownhook"
 )
 
 // ---------------------------------------------------------------------------
@@ -238,6 +239,14 @@ Flags:
 		maybeBackupAfterSave(ctx)
 	}
 
+	// Portability: a record says how to reopen a conversation on this machine; a checkpoint
+	// carries the conversation itself, so it can also continue on another one. Taken for
+	// every saved session, skipped when nothing changed; off with CONDUCTOR_CHECKPOINT=off.
+	var checkpoints []captureOutcome
+	if len(selected) > 0 && !checkpoint.Disabled(os.Getenv) {
+		checkpoints = captureSelectedSessions(ctx, selected, checkpoint.ReasonExit)
+	}
+
 	if *asJSON {
 		if selected == nil {
 			selected = []localstate.Record{}
@@ -251,7 +260,37 @@ Flags:
 	printRecords(selected)
 	fmt.Printf("\nSaved %d session(s). They stay resumable after a closed terminal or a reboot: `conductor resume` reopens them.\n",
 		len(selected))
+	if taken := countTaken(checkpoints); taken > 0 {
+		fmt.Printf("Checkpointed %d of them as well; `conductor checkpoint list` shows what can continue on another machine or login.\n", taken)
+	}
 	return nil
+}
+
+// captureSelectedSessions checkpoints the given records, quietly.
+func captureSelectedSessions(ctx context.Context, records []localstate.Record, reason string) []captureOutcome {
+	var out []captureOutcome
+	for _, rec := range records {
+		res, err := checkpoint.Capture(ctx, checkpoint.Request{
+			Harness: rec.Harness, Cwd: rec.Cwd, PID: rec.PID, Since: rec.StartedAt.Add(-time.Minute),
+			Reason: reason, Conductor: checkpoint.ConductorRef{Project: rec.Project, SessionID: rec.SessionID},
+		})
+		o := captureOutcome{Harness: rec.Harness, Cwd: rec.Cwd, Result: res}
+		if err != nil {
+			o.Error = err.Error()
+		}
+		out = append(out, o)
+	}
+	return out
+}
+
+func countTaken(outcomes []captureOutcome) int {
+	n := 0
+	for _, o := range outcomes {
+		if o.Error == "" {
+			n++
+		}
+	}
+	return n
 }
 
 // selectRecords picks the local records named by args. "all" means every session (optionally
@@ -429,7 +468,10 @@ Flags:
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
+	// Owner-only: the export names machines, worktree paths, and who ran what, which is the
+	// same class of data the control plane gates by role. A shared machine's other users
+	// have no business reading it.
+	if err := writePrivateFile(path, append(data, '\n')); err != nil {
 		return err
 	}
 	if *asJSON {
@@ -437,6 +479,15 @@ Flags:
 	}
 	fmt.Printf("Wrote %d session(s) to %s\n", len(selected), path)
 	return nil
+}
+
+// writePrivateFile writes data with mode 0600, tightening a file that already existed with a
+// looser mode (os.WriteFile keeps an existing file's permissions).
+func writePrivateFile(path string, data []byte) error {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
 }
 
 // selectSessions picks the exported sessions named by args. "all" means every session;

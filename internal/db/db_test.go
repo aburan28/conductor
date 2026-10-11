@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/privacy"
-	"github.com/adamburan/conductor/internal/resource"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/privacy"
+	"github.com/aburan28/conductor/internal/resource"
 )
 
 // Integration tests need a live Postgres. `make db-up` starts one; without DATABASE_URL the

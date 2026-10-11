@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adamburan/conductor/internal/coord"
-	"github.com/adamburan/conductor/internal/db"
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/coord"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // Handler-level tests. The store's own suite proves the invariants; these prove the HTTP
@@ -225,6 +225,77 @@ func TestInviteMintsAWorkingToken(t *testing.T) {
 	}
 }
 
+// Reset mints one replacement and kills everything else atomically: afterwards exactly
+// one credential is valid, and rotating again chains cleanly off the replacement.
+func TestTokenResetRotatesAtomically(t *testing.T) {
+	h := newHarness(t)
+	// Alice holds two credentials: the harness token and one more.
+	code, body := h.do(h.aliceTok, http.MethodPost, "/v1/tokens",
+		map[string]any{"name": "second"})
+	if code != http.StatusCreated {
+		t.Fatalf("create = %d\n%s", code, body)
+	}
+	var second struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(body, &second); err != nil || second.Token == "" {
+		t.Fatalf("create returned no token: %v\n%s", err, body)
+	}
+
+	code, body = h.do(h.aliceTok, http.MethodPost, "/v1/tokens/reset",
+		map[string]any{"name": "rotated"})
+	if code != http.StatusCreated {
+		t.Fatalf("reset = %d\n%s", code, body)
+	}
+	var result struct {
+		Name    string `json:"name"`
+		Token   string `json:"token"`
+		Revoked int    `json:"revoked"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("decode: %v\n%s", err, body)
+	}
+	if result.Name != "rotated" || result.Token == "" {
+		t.Errorf("reset returned name=%q empty-token=%v", result.Name, result.Token == "")
+	}
+	if result.Revoked != 2 {
+		t.Errorf("reset revoked %d, want 2 (both pre-reset credentials)", result.Revoked)
+	}
+
+	// Both pre-reset credentials are dead.
+	for _, tok := range []string{h.aliceTok, second.Token} {
+		if code, _ := h.do(tok, http.MethodGet, h.projectPath("/tasks"), nil); code != http.StatusUnauthorized {
+			t.Errorf("pre-reset token still valid: %d, want 401", code)
+		}
+	}
+	// The replacement works.
+	if code, _ := h.do(result.Token, http.MethodGet, h.projectPath("/tasks"), nil); code != http.StatusOK {
+		t.Errorf("replacement token cannot read tasks: %d", code)
+	}
+
+	// Rotating again chains: one live credential in, one out.
+	code, body = h.do(result.Token, http.MethodPost, "/v1/tokens/reset", map[string]any{})
+	if code != http.StatusCreated {
+		t.Fatalf("second reset = %d\n%s", code, body)
+	}
+	var again struct {
+		Token   string `json:"token"`
+		Revoked int    `json:"revoked"`
+	}
+	if err := json.Unmarshal(body, &again); err != nil || again.Token == "" {
+		t.Fatalf("second reset returned no token: %v\n%s", err, body)
+	}
+	if again.Revoked != 1 {
+		t.Errorf("second reset revoked %d, want 1 (the first replacement)", again.Revoked)
+	}
+	if code, _ := h.do(result.Token, http.MethodGet, h.projectPath("/tasks"), nil); code != http.StatusUnauthorized {
+		t.Errorf("first replacement still valid after second reset: %d, want 401", code)
+	}
+	if code, _ := h.do(again.Token, http.MethodGet, h.projectPath("/tasks"), nil); code != http.StatusOK {
+		t.Errorf("second replacement cannot read tasks: %d", code)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Privacy through the HTTP layer
 // ---------------------------------------------------------------------------
@@ -394,13 +465,41 @@ func TestSecurityHeadersArePresent(t *testing.T) {
 			t.Errorf("%s = %q, want %q", header, got, want)
 		}
 	}
-	if resp.Header.Get("Content-Security-Policy") == "" {
-		t.Error("no Content-Security-Policy header")
+	csp := resp.Header.Get("Content-Security-Policy")
+	if csp == "" {
+		t.Fatal("no Content-Security-Policy header")
+	}
+	// The dashboard's script and stylesheet are same-origin files under /static/. A policy
+	// that omits 'self' from script-src/style-src forbids them, and the page dies on its
+	// boot placeholder — a header that is present but wrong passes an existence check.
+	for _, directive := range []string{"script-src", "style-src"} {
+		value := directiveValue(csp, directive)
+		if value == "" {
+			t.Errorf("CSP has no %s directive: %q", directive, csp)
+			continue
+		}
+		if !strings.Contains(value, "'self'") {
+			t.Errorf("CSP %s = %q, must allow 'self' or the dashboard cannot load /static/*", directive, value)
+		}
+		if strings.Contains(value, "unsafe-inline") {
+			t.Errorf("CSP %s = %q, the dashboard uses no inline script or style", directive, value)
+		}
 	}
 	// HSTS over plaintext would be useless at best and lock out a local developer at worst.
 	if got := resp.Header.Get("Strict-Transport-Security"); got != "" {
 		t.Errorf("HSTS sent over plaintext: %q", got)
 	}
+}
+
+// directiveValue returns the token list of one CSP directive, or "" when absent.
+func directiveValue(csp, directive string) string {
+	for _, part := range strings.Split(csp, ";") {
+		fields := strings.Fields(part)
+		if len(fields) > 0 && fields[0] == directive {
+			return strings.Join(fields[1:], " ")
+		}
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------

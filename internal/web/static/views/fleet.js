@@ -8,14 +8,18 @@ import { relTime } from '../lib/format.js';
 export default defineView({
   title: 'Fleet',
   async load(ctx) {
-    const [caps, runners, models] = await settle([
+    // Mesh peering is a feature an organization turns on (Admin → Features).
+    const mesh = !!(ctx.org && ctx.org.features && ctx.org.features.mesh);
+    const [caps, runners, models, peers] = await settle([
       ctx.api.get(ctx.api.project(ctx.project, '/capabilities')),
       ctx.api.get(ctx.api.project(ctx.project, '/runners')),
       ctx.api.get(ctx.api.project(ctx.project, '/models')),
+      mesh ? ctx.api.get('/v1/peers') : Promise.resolve(null),
     ]);
-    return { inv: (caps && caps.inventory) || {}, sessions: (caps && caps.sessions) || [], runners: (runners && runners.runners) || [], profiles: (models && models.profiles) || [] };
+    return { inv: (caps && caps.inventory) || {}, sessions: (caps && caps.sessions) || [], runners: (runners && runners.runners) || [],
+      profiles: (models && models.profiles) || [], peers: peers ? peers.peers || [] : null };
   },
-  draw({ inv, sessions, runners, profiles }, ctx) {
+  draw({ inv, sessions, runners, profiles, peers }, ctx) {
     const kpis = h('div', { class: 'kpis' },
       kpi({ label: 'Sessions accepting', value: inv.available || 0, unit: `of ${inv.sessions || 0}` }),
       kpi({ label: 'Ceiling tier', value: inv.max_tier || '—', kind: 'accent', sub: 'highest tier accepting work' }),
@@ -71,6 +75,14 @@ export default defineView({
       : empty('The catalog is empty. Declare profiles in .conductor/models.yaml and re-run bootstrap.', 'conductor models'),
       footer: 'Aliases are roles (worker.fast, planner.frontier); profiles bind them to a concrete model on a harness. Policies name aliases, never models.' });
 
-    return h('div', { class: 'stack', style: { gap: '20px' } }, kpis, modelsLive, sessionCard, runnersCard, catalog);
+    const peersCard = peers ? card({ title: 'Mesh peers', flush: true, body: peers.length ? table({ caption: 'Peer links', columns: [
+      { key: 'name', label: 'Peer' },
+      { key: 'state', label: 'Link', render: p => pill(p.state === 'up' ? 'ok' : 'danger', p.state) },
+      { key: 'rtt_ms', label: 'Round trip', num: true, render: p => p.rtt_ms ? p.rtt_ms + ' ms' : '—' },
+      { key: 'last_check', label: 'Checked', render: p => relTime(p.last_check), sort: p => new Date(p.last_check) },
+      { key: 'last_error', label: 'Problem', render: p => p.last_error || '' },
+    ], rows: peers }) : empty('This daemon has no peers. Peering joins daemons on other machines into one view of the work.', 'conductord --peer-ca ca.pem --peer-cert me.pem --peer-key me.key --peer NAME=URL') }) : null;
+
+    return h('div', { class: 'stack', style: { gap: '20px' } }, kpis, modelsLive, sessionCard, runnersCard, peersCard, catalog);
   },
 });

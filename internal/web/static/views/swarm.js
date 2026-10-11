@@ -23,6 +23,7 @@ export default defineView({
     const policy = (budget && budget.policy) || {};
     const memberBudgets = (budget && budget.members) || [];
     const origin = ctx.origin;
+    const sharing = !ctx.org || !ctx.org.features || ctx.org.features.budget_sharing;
 
     const kpis = h('div', { class: 'kpis' },
       kpi({ label: 'Contributors', value: contributors.length, sub: `${capacity.runners || 0} runners · ${capacity.sessions_accepting || 0} sessions accepting` }),
@@ -49,7 +50,8 @@ export default defineView({
       footer: 'A contributor executes the team\'s tasks on their own machine, with their own account and budget. Spend lands on the person who ran it; the task\'s owner is charged nothing.' });
 
     const budgetCard = card({ title: 'Member budgets — this window', flush: true,
-      actions: h('button', { class: 'btn sm primary', onclick: async () => { if (await shareBudget(ctx, members.length ? members : memberBudgets)) refresh(); } }, 'Share budget…'),
+      // Budget sharing is a feature an organization turns on (Admin → Features).
+      actions: sharing ? h('button', { class: 'btn sm primary', onclick: async () => { if (await shareBudget(ctx, members.length ? members : memberBudgets)) refresh(); } }, 'Share budget…') : null,
       body: memberBudgets.length ? table({
         columns: [
           { key: 'handle', label: 'Member', render: m => h('span', {}, h('strong', {}, m.handle), m.handle === ctx.handle ? h('span', { class: 'muted' }, ' (you)') : null) },
@@ -59,7 +61,7 @@ export default defineView({
           { key: 'shared_out_tokens', label: 'Given', num: true, render: m => fmtTokens(m.shared_out_tokens) },
           { key: 'remaining_tokens', label: 'Remaining', num: true, render: m => h('span', { class: m.remaining_tokens < 0 ? 'risk-high' : '' }, fmtTokens(m.remaining_tokens)) },
           { key: 'bar', label: '', sortable: false, render: m => { const cap = m.allowance_tokens + m.shared_in_tokens - m.shared_out_tokens; return h('div', { style: { minWidth: '120px' } }, meter(m.spent_tokens, cap)); } },
-          { key: 'act', label: '', sortable: false, render: m => m.handle !== ctx.handle ? h('button', { class: 'btn sm', onclick: async ev => { ev.stopPropagation(); if (await shareBudget(ctx, members.length ? members : memberBudgets, m.handle)) refresh(); } }, 'Share with') : '' },
+          { key: 'act', label: '', sortable: false, render: m => sharing && m.handle !== ctx.handle ? h('button', { class: 'btn sm', onclick: async ev => { ev.stopPropagation(); if (await shareBudget(ctx, members.length ? members : memberBudgets, m.handle)) refresh(); } }, 'Share with') : '' },
         ], rows: memberBudgets, initialSort: { key: 'remaining_tokens', dir: 'asc' } }) : empty('No member budgets: per-member allowances are disabled.', 'budget.member.monthly_tokens: 20000000  # in .conductor/policies.yaml'),
       footer: 'Balances are arithmetic over two ledgers — attempt spend and grants — so nothing can drift and nobody can mint tokens.' });
 

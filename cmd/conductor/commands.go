@@ -14,11 +14,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/adamburan/conductor/internal/client"
-	"github.com/adamburan/conductor/internal/coord"
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/localstate"
-	"github.com/adamburan/conductor/internal/privacy"
+	"github.com/aburan28/conductor/internal/checkpoint"
+	"github.com/aburan28/conductor/internal/client"
+	"github.com/aburan28/conductor/internal/coord"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/localstate"
+	"github.com/aburan28/conductor/internal/privacy"
 )
 
 // scopeFlag collects repeatable --scope values.
@@ -118,8 +120,15 @@ func cmdStatus(ctx context.Context, args []string) error {
 			printPresence(p)
 		}
 	}
+	printQuotaStatus(ctx, api, ref)
+	printStatusNextStep(os.Stdout, summary)
 	return nil
 }
+
+// issueWeb is the GitHub web address issue links are printed under; taskList sets it from the
+// project's issue sync status, so a GitHub Enterprise host is linked right. Empty means
+// github.com.
+var issueWeb string
 
 func printTaskLine(t privacy.TaskView) {
 	title := t.Title
@@ -129,6 +138,12 @@ func printTaskLine(t privacy.TaskView) {
 	fmt.Printf("  %-8s %-18s %-10s %s\n", t.Ref, t.Status, t.Owner, title)
 	if len(t.Scopes) > 0 {
 		fmt.Printf("           %s\n", strings.Join(t.Scopes, "  "))
+	}
+	if t.PullRequestURL != "" {
+		fmt.Printf("           %s (%s)\n", t.PullRequestURL, t.PullRequestState)
+	}
+	if u := issueLink(issueWeb, t.ExternalRef); u != "" {
+		fmt.Printf("           issue %s\n", u)
 	}
 }
 
@@ -289,8 +304,7 @@ Flags:
 		fmt.Printf("\n  %-9s %s  %s  owner %s  [%s]\n", kind, d.TaskRef, title, d.Owner, d.Status)
 	}
 	for _, c := range decision.Conflicts {
-		fmt.Printf("\n  %-9s %s held by %s for %s (%s)\n",
-			c.Outcome, c.ResourceKey, c.HolderOwner, c.HolderTaskRef, c.HolderMode)
+		fmt.Printf("\n  %-9s %s\n", c.Outcome, describeHolding(c))
 	}
 
 	if decision.Outcome.Blocks() {
@@ -298,6 +312,21 @@ Flags:
 		os.Exit(3)
 	}
 	return nil
+}
+
+// describeHolding says who holds a contested resource and in what way. Finished work waiting
+// to merge reads differently from work in progress, because the right response differs: the
+// holder is not editing, their changes are sitting in a pull request.
+func describeHolding(c db.ScopeConflict) string {
+	if c.PendingMerge() {
+		line := fmt.Sprintf("%s changed in %s's %s, waiting to merge (%s)",
+			c.ResourceKey, c.HolderOwner, c.HolderTaskRef, c.HolderStatus)
+		if c.HolderPullRequest != "" {
+			line += " — " + c.HolderPullRequest
+		}
+		return line
+	}
+	return fmt.Sprintf("%s held by %s for %s (%s)", c.ResourceKey, c.HolderOwner, c.HolderTaskRef, c.HolderMode)
 }
 
 // ---------------------------------------------------------------------------
@@ -359,7 +388,7 @@ func cmdConflicts(ctx context.Context, args []string) error {
 
 func cmdTask(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: conductor task <list|show|create|claim|release|handoff|assign|export>")
+		return errors.New("usage: conductor task <list|show|create|claim|release|done|reopen|handoff|assign|export>")
 	}
 	sub, rest := args[0], args[1:]
 
@@ -374,6 +403,10 @@ func cmdTask(ctx context.Context, args []string) error {
 		return taskClaim(ctx, rest)
 	case "release":
 		return taskRelease(ctx, rest)
+	case "done":
+		return taskDone(ctx, rest)
+	case "reopen":
+		return taskReopen(ctx, rest)
 	case "handoff":
 		return taskHandoff(ctx, rest)
 	case "assign":
@@ -417,6 +450,17 @@ func taskList(ctx context.Context, args []string) error {
 		return nil
 	}
 	for _, t := range out.Tasks {
+		if issueLink("", t.ExternalRef) != "" {
+			var sync struct {
+				Web string `json:"web"`
+			}
+			if err := api.Get(ctx, "/v1/projects/"+ref+"/github/issues", &sync); err == nil {
+				issueWeb = sync.Web
+			}
+			break
+		}
+	}
+	for _, t := range out.Tasks {
 		printTaskLine(t)
 	}
 	return nil
@@ -454,6 +498,19 @@ func taskShow(ctx context.Context, args []string) error {
 		return err
 	}
 	fmt.Print(string(card))
+	// The card names an imported task's issue by its external_ref; give the link too. A task
+	// with no GitHub issue (or no GitHub App here) answers 404, and prints nothing more.
+	var issue struct {
+		URL   string `json:"url"`
+		State string `json:"state"`
+	}
+	if err := api.Get(ctx, "/v1/tasks/"+positional[0]+"/issue"+client.Query("project", ref), &issue); err == nil && issue.URL != "" {
+		fmt.Printf("\nIssue: %s", issue.URL)
+		if issue.State != "" {
+			fmt.Printf(" (%s)", issue.State)
+		}
+		fmt.Println()
+	}
 	return nil
 }
 
@@ -468,7 +525,7 @@ func taskCreate(ctx context.Context, args []string) error {
 	ready := fs.Bool("ready", true, "mark the task ready for dispatch")
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	var scopes scopeFlag
-	fs.Var(&scopes, "scope", "resource this task will touch (repeatable)")
+	fs.Var(&scopes, "scope", scopeFlagHelp)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -509,7 +566,7 @@ func taskClaim(ctx context.Context, args []string) error {
 	next := fs.Bool("next", false, "claim the highest-priority ready task")
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	var scopes scopeFlag
-	fs.Var(&scopes, "scope", "resource to reserve with the claim (repeatable)")
+	fs.Var(&scopes, "scope", scopeFlagHelp)
 	positional, err := parseFlags(fs, args)
 	if err != nil {
 		return err
@@ -523,9 +580,14 @@ func taskClaim(ctx context.Context, args []string) error {
 		return err
 	}
 
+	// Inside a wrapped session the claim is bound to it at once, and the session's heartbeat
+	// keeps it alive. From a plain shell it is recorded against this checkout, and the next
+	// `conductor wrap` here adopts it.
+	sessionID := os.Getenv("CONDUCTOR_SESSION_ID")
 	body := map[string]any{
 		"harness": "cli", "role": string(domain.RoleImplementer),
 		"scopes": []domain.ScopeRequest(scopes), "allow_warnings": true,
+		"session_id": sessionID, "worktree_path": worktreeRoot(ctx),
 	}
 	path := "/v1/projects/" + ref + "/claim-next"
 	if !*next {
@@ -552,8 +614,15 @@ func taskClaim(ctx context.Context, args []string) error {
 	if len(out.Task.Scopes) > 0 {
 		fmt.Printf("  holding %s\n", strings.Join(out.Task.Scopes, "  "))
 	}
-	fmt.Printf("\n  Your lease expires unless it is renewed. Run `conductor wrap <tool>` so a\n" +
-		"  sidecar heartbeats while you work, or release it when you stop.\n")
+	if sessionID != "" {
+		fmt.Printf("\n  Held by this session: its heartbeat keeps the claim alive while the session runs.\n")
+	} else {
+		fmt.Printf("\n  No session holds this claim yet, so it lapses at %s unless one adopts it.\n"+
+			"  Run `conductor wrap <tool>` in this checkout: the session takes the claim over and\n"+
+			"  keeps it alive while it runs. `conductor task release %s` hands it back.\n",
+			out.Lease.ExpiresAt.Local().Format(time.Kitchen), out.Task.Ref)
+	}
+	fmt.Printf("  When the work is merged: `conductor task done %s` (automatic with the GitHub App).\n", out.Task.Ref)
 	return nil
 }
 
@@ -584,6 +653,90 @@ func taskRelease(ctx context.Context, args []string) error {
 		return err
 	}
 	fmt.Printf("Released %s. Its reserved scopes are free immediately.\n", positional[0])
+	return nil
+}
+
+// taskDone marks a task's work as landed. With the GitHub App linked this happens by itself
+// when the pull request merges; this is the same step by hand, for a repository without the
+// app or work that landed some other way. It releases the task's territory.
+func taskDone(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("task done", flag.ExitOnError)
+	project := fs.String("project", "", "project id or slug")
+	positional, err := parseFlags(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) < 1 {
+		return errors.New("usage: conductor task done <ref>")
+	}
+	api, creds, err := mustClient()
+	if err != nil {
+		return err
+	}
+	ref, err := projectRef(*project, creds)
+	if err != nil {
+		return err
+	}
+	taskPath := "/v1/tasks/" + positional[0]
+	var view privacy.TaskView
+	if err := api.Get(ctx, taskPath+client.Query("project", ref), &view); err != nil {
+		return err
+	}
+
+	switch {
+	case view.Status == domain.TaskDone:
+		fmt.Printf("%s is already done.\n", view.Ref)
+		return nil
+	case db.PendingMerge(view.Status):
+		// Finished work waiting to merge: an ordinary status change.
+		if err := api.Post(ctx, taskPath+"/transition"+client.Query("project", ref),
+			map[string]any{"status": domain.TaskDone}, &view); err != nil {
+			return err
+		}
+	case view.Status == domain.TaskClaimed || view.Status == domain.TaskRunning || view.Status.IsBlocked():
+		// Still claimed: ending the claim and completing the task are one step.
+		var out struct {
+			Task privacy.TaskView `json:"task"`
+		}
+		if err := api.Post(ctx, taskPath+"/complete"+client.Query("project", ref), nil, &out); err != nil {
+			return err
+		}
+		view = out.Task
+	default:
+		return fmt.Errorf("%s is %s: nothing has been done on it yet, so it cannot be marked done "+
+			"(cancel it with the dashboard, or claim it first)", view.Ref, view.Status)
+	}
+	fmt.Printf("%s is done. Its reserved scopes are free.\n", view.Ref)
+	return nil
+}
+
+// taskReopen sends finished-but-unmerged work back: review asked for changes after the
+// attempt ended. The task returns to ready (claimable again) and keeps its territory, because
+// its branch still carries the edits.
+func taskReopen(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("task reopen", flag.ExitOnError)
+	project := fs.String("project", "", "project id or slug")
+	positional, err := parseFlags(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) < 1 {
+		return errors.New("usage: conductor task reopen <ref>")
+	}
+	api, creds, err := mustClient()
+	if err != nil {
+		return err
+	}
+	ref, err := projectRef(*project, creds)
+	if err != nil {
+		return err
+	}
+	var view privacy.TaskView
+	if err := api.Post(ctx, "/v1/tasks/"+positional[0]+"/transition"+client.Query("project", ref),
+		map[string]any{"status": domain.TaskReady}, &view); err != nil {
+		return err
+	}
+	fmt.Printf("%s is back in the queue (ready). It keeps its reserved scopes; claim it to carry on.\n", view.Ref)
 	return nil
 }
 
@@ -736,7 +889,7 @@ func cmdScope(ctx context.Context, args []string) error {
 		fs := flag.NewFlagSet("scope add", flag.ExitOnError)
 		project := fs.String("project", "", "project id or slug")
 		var scopes scopeFlag
-		fs.Var(&scopes, "scope", "resource to reserve (repeatable)")
+		fs.Var(&scopes, "scope", scopeFlagHelp)
 		positional, err := parseFlags(fs, rest)
 		if err != nil {
 			return err
@@ -835,6 +988,10 @@ func cmdWrap(ctx context.Context, args []string) error {
 	fmt.Fprintf(os.Stderr, "Conductor session %s registered for %s. Teammates can see that you are here.\n",
 		session.ID[:8], tool)
 	printCapabilityNotice(session)
+	// "claim, then wrap": a claim made in this checkout before the session existed is
+	// carried by this session from now on, so its heartbeat keeps the claim alive.
+	root := worktreeRoot(ctx)
+	adoptClaims(ctx, api, session.ID, root)
 
 	// Admission: if the project caps how many sessions run at once, take a ticket and wait
 	// for a slot before launching. The sidecar heartbeats the ticket so the slot is not
@@ -861,8 +1018,14 @@ func cmdWrap(ctx context.Context, args []string) error {
 					state = domain.SessionWaitingForInput
 				}
 				b, _ := gitOutput(heartbeatCtx, "rev-parse", "--abbrev-ref", "HEAD")
-				_ = api.Post(heartbeatCtx, "/v1/sessions/"+session.ID+"/heartbeat",
-					map[string]any{"state": string(state), "branch": b}, nil)
+				// The heartbeat renews the session and every claim it holds, and reports
+				// which paths the working tree has touched since the session started, so an
+				// interactive session feeds merge-risk detection the way a runner does.
+				body := map[string]any{"state": string(state), "branch": b}
+				if paths := observedPaths(heartbeatCtx, root, baseSHA); paths != nil {
+					body["changed_paths"] = paths
+				}
+				_ = api.Post(heartbeatCtx, "/v1/sessions/"+session.ID+"/heartbeat", body, nil)
 				admission.heartbeat(heartbeatCtx)
 			}
 		}
@@ -887,6 +1050,7 @@ func cmdWrap(ctx context.Context, args []string) error {
 	cmd.Env = append(os.Environ(),
 		"CONDUCTOR_SESSION_ID="+session.ID,
 		"CONDUCTOR_PROJECT="+ref,
+		"CONDUCTOR_HARNESS="+tool,
 	)
 
 	// Token usage. The harness writes its own usage log as it runs; this sidecar reads that
@@ -925,6 +1089,18 @@ func cmdWrap(ctx context.Context, args []string) error {
 	if err := localstate.Save(rec); err != nil {
 		fmt.Fprintf(os.Stderr, "conductor: pause/resume unavailable for this session: %v\n", err)
 	}
+
+	// Portability. The sidecar checkpoints the conversation and the working tree every
+	// few minutes into ~/.conductor/checkpoints, so a usage limit, a dead machine, or a
+	// change of harness is a `conductor checkpoint resume` away. Local only; off with
+	// CONDUCTOR_CHECKPOINT=off.
+	var checkpointer *wrapCheckpointer
+	if !checkpoint.Disabled(os.Getenv) {
+		checkpointer = newWrapCheckpointer(tool, cwd, cmd.Process.Pid,
+			checkpoint.ConductorRef{Project: ref, SessionID: session.ID})
+		go checkpointer.run(heartbeatCtx, checkpoint.IntervalFromEnv(os.Getenv))
+	}
+	startQuotaWatch(heartbeatCtx, api, ref, session.ID, tool, cwd, cmd.Process.Pid)
 
 	// SIGUSR1 pauses: SIGSTOP to the child only, so this sidecar keeps running and the shell
 	// never reclaims the terminal — which is what lets SIGCONT later hand the keyboard
@@ -984,6 +1160,9 @@ func cmdWrap(ctx context.Context, args []string) error {
 		keep := sig != syscall.SIGINT
 		if keep {
 			outcome.Store(outcomeKeep)
+			if checkpointer != nil {
+				checkpointer.final(checkpoint.ReasonSignal)
+			}
 			if err := localstate.KeepForResume(rec); err != nil {
 				fmt.Fprintf(os.Stderr, "conductor: could not save this session for resume: %v\n", err)
 			} else {
@@ -1035,6 +1214,16 @@ func cmdWrap(ctx context.Context, args []string) error {
 		_ = localstate.Remove(rec.ID)
 	}
 	stopHeartbeat()
+	if checkpointer != nil && outcome.Load() != outcomeKeep {
+		// The harness has finished writing its transcript: one last bundle, so the session
+		// is portable even if nothing changed in the last interval.
+		checkpointer.final(checkpoint.ReasonExit)
+	}
+	if checkpointer != nil {
+		if line := checkpointer.exitLine(); line != "" {
+			fmt.Fprintln(os.Stderr, line)
+		}
+	}
 	if collector != nil {
 		// The harness has finished writing; report the tail, on a context that survives Ctrl-C.
 		flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)

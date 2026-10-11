@@ -18,7 +18,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -377,15 +376,6 @@ func fileExists(path string) bool {
 func prettyJSON(v any) string {
 	body, _ := json.MarshalIndent(v, "", "  ")
 	return string(body)
-}
-
-func sortedKeys(m map[string]any) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 // readTextFile returns a file's content, or "" when it does not exist or cannot be read.

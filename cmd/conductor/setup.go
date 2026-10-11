@@ -5,14 +5,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
-	"github.com/adamburan/conductor/internal/client"
-	"github.com/adamburan/conductor/internal/config"
-	"github.com/adamburan/conductor/internal/harness"
-	"github.com/adamburan/conductor/internal/integrations"
+	"github.com/aburan28/conductor/internal/client"
+	"github.com/aburan28/conductor/internal/config"
 )
 
 // ---------------------------------------------------------------------------
@@ -69,15 +69,23 @@ func cmdInit(args []string) error {
 		}
 	}
 
-	fmt.Printf(`
+	fmt.Print(initNextSteps(root))
+	return nil
+}
+
+// initNextSteps is what `conductor init` prints when it is done. It used to suggest
+// `docker compose up -d db && conductord`, which only works inside the Conductor checkout:
+// a user's own repository has no compose file. `conductor up` works from anywhere.
+func initNextSteps(root string) string {
+	return fmt.Sprintf(`
 Scaffolded %s.
 
 Next:
   1. Edit %s/WORKFLOW.md — it is the contract every agent reads.
-  2. Start the control plane:   docker compose up -d db && conductord
-  3. Bootstrap and log in:      conductord bootstrap --repo %s
+  2. Start the control plane and log in (run from %s):
+       conductor up
+  3. See what is going on:      conductor status
 `, config.Dir, config.Dir, root)
-	return nil
 }
 
 const managedBegin = "<!-- conductor:begin -->"
@@ -126,10 +134,22 @@ func ensureManagedBlock(path string) error {
 func cmdLogin(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("login", flag.ExitOnError)
 	endpoint := fs.String("endpoint", "", "control plane URL")
-	token := fs.String("token", "", "bearer token from `conductord bootstrap`")
+	token := fs.String("token", "", "bearer token (not needed on the machine running conductord)")
 	project := fs.String("project", "", "default project id or slug")
-	if err := fs.Parse(args); err != nil {
+	var single ssoFlag
+	fs.Var(&single, "sso", "sign in through the control plane's single sign-on provider in your browser (--sso, --sso google, or --sso=google)")
+	positional, err := parseFlags(fs, args)
+	if err != nil {
 		return err
+	}
+	switch {
+	case len(positional) == 1 && single.set && single.provider == "":
+		single.provider = positional[0]
+	case len(positional) > 0:
+		return fmt.Errorf("unexpected argument %q (usage: conductor login [--endpoint URL] [--token TOKEN | --sso [PROVIDER]] [--project SLUG])", positional[0])
+	}
+	if single.set && *token != "" {
+		return errors.New("--sso and --token are two ways to sign in; pass one")
 	}
 
 	creds := client.LoadCredentials()
@@ -142,10 +162,42 @@ func cmdLogin(ctx context.Context, args []string) error {
 	if *project != "" {
 		creds.Project = *project
 	}
+	if single.set {
+		// The browser signs in at the provider; conductord issues an ordinary token for the
+		// account it maps to, saved exactly like a pasted one.
+		res, err := ssoSignIn(ctx, creds.Endpoint, "", single.provider, false)
+		if err != nil {
+			return err
+		}
+		creds.Token = res.Token
+		return finishLogin(ctx, creds)
+	}
+	if *token == "" && isLoopbackEndpoint(creds.Endpoint) {
+		// Logging in on the machine that runs the control plane needs no token at all.
+		local := creds
+		local.Token = ""
+		saved, err := localSignInAndSave(local)
+		if err == nil {
+			fmt.Printf("Logged in as %s at %s\n", saved.Handle, saved.Endpoint)
+			if saved.Project != "" {
+				fmt.Printf("Default project: %s\n", saved.Project)
+			}
+			return nil
+		}
+		if creds.Token == "" {
+			return fmt.Errorf("local sign-in failed: %w\n(pass --token, from `conductord bootstrap` or a teammate's `conductor invite`)", err)
+		}
+		// Otherwise re-verify the token already saved, against the endpoint and project given.
+	}
 	if creds.Token == "" {
-		return errors.New("no token: pass --token (get one from `conductord bootstrap`)")
+		return errors.New("no token: pass --token (get one from `conductord bootstrap` or a teammate's `conductor invite`)")
 	}
 
+	return finishLogin(ctx, creds)
+}
+
+// finishLogin verifies and saves a login, and says where it went.
+func finishLogin(ctx context.Context, creds client.Credentials) error {
 	saved, projects, err := connectAndSave(ctx, creds)
 	if err != nil {
 		return fmt.Errorf("verifying token: %w", err)
@@ -164,107 +216,6 @@ func cmdLogin(ctx context.Context, args []string) error {
 }
 
 // ---------------------------------------------------------------------------
-// doctor
-// ---------------------------------------------------------------------------
-
-func cmdDoctor(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
-	asJSON := fs.Bool("json", false, "machine-readable output")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-
-	reg := harness.BuildRegistry(harness.DefaultHarnessConfigs())
-	caps := reg.CapabilityReport(ctx)
-
-	type report struct {
-		Endpoint     string                 `json:"endpoint"`
-		Reachable    bool                   `json:"reachable"`
-		Principal    string                 `json:"principal,omitempty"`
-		Project      string                 `json:"project,omitempty"`
-		Harnesses    []harness.Capabilities `json:"harnesses"`
-		Repository   string                 `json:"repository,omitempty"`
-		Integrations []integrations.Status  `json:"integrations"`
-	}
-
-	creds := client.LoadCredentials()
-	out := report{Endpoint: creds.Endpoint, Project: creds.Project, Harnesses: caps}
-
-	if creds.Token != "" {
-		api := client.New(creds.Endpoint, creds.Token)
-		var who struct {
-			Principal struct {
-				Handle string `json:"handle"`
-			} `json:"principal"`
-		}
-		if err := api.Get(ctx, "/v1/whoami", &who); err == nil {
-			out.Reachable = true
-			out.Principal = who.Principal.Handle
-		}
-	}
-	if root, err := config.FindRoot("."); err == nil {
-		out.Repository = root
-	}
-	// Which coding tools on this machine are wired to Conductor, and how.
-	home, _ := os.UserHomeDir()
-	out.Integrations = integrations.Statuses(integrations.Options{
-		Root: out.Repository, Home: home, Getenv: os.Getenv,
-	})
-
-	if *asJSON {
-		return emit(out)
-	}
-
-	fmt.Printf("Control plane\n  %-12s %s\n", "endpoint", out.Endpoint)
-	if out.Reachable {
-		fmt.Printf("  %-12s reachable as %s\n", "status", out.Principal)
-	} else if creds.Token == "" {
-		fmt.Printf("  %-12s not logged in (run `conductor login`)\n", "status")
-	} else {
-		fmt.Printf("  %-12s unreachable\n", "status")
-	}
-	if out.Project != "" {
-		fmt.Printf("  %-12s %s\n", "project", out.Project)
-	}
-	if out.Repository != "" {
-		fmt.Printf("  %-12s %s\n", "repository", out.Repository)
-	}
-	fmt.Printf("\nHarnesses\n%s", harness.Describe(caps))
-
-	fmt.Printf("\nIntegrations\n")
-	var absent []string
-	for _, st := range out.Integrations {
-		if !st.Detected && !st.Configured {
-			absent = append(absent, st.Tool)
-			continue
-		}
-		state := "not connected"
-		if st.Configured {
-			state = "connected"
-			if st.Transport != "" {
-				state += " (" + st.Transport + ")"
-			}
-			if st.HooksSupported {
-				if st.Hooks {
-					state += " · hooks on"
-				} else {
-					state += " · hooks off"
-				}
-			}
-		}
-		fix := ""
-		if !st.Configured || (st.HooksSupported && !st.Hooks) {
-			fix = st.Fix
-		}
-		fmt.Printf("  %-11s %-32s %s\n", st.Tool, state, fix)
-	}
-	if len(absent) > 0 {
-		fmt.Printf("  %-11s %s\n", "not found", strings.Join(absent, ", "))
-	}
-	return nil
-}
-
-// ---------------------------------------------------------------------------
 // dashboard
 // ---------------------------------------------------------------------------
 
@@ -275,8 +226,31 @@ func cmdDashboard(args []string) error {
 		return err
 	}
 	creds := client.LoadCredentials()
+	// On this machine, in local security mode, the dashboard signs its owner in by itself:
+	// print the plain address, with no credential in it to leak.
+	if isLoopbackEndpoint(creds.Endpoint) && os.Getenv("CONDUCTOR_NO_LOCAL_LOGIN") == "" {
+		var st struct {
+			Available bool `json:"local_login_available"`
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := client.New(creds.Endpoint, "").Get(ctx, "/v1/local/status", &st)
+		cancel()
+		if err == nil && st.Available {
+			link := strings.TrimRight(creds.Endpoint, "/") + "/"
+			if creds.Project != "" || *project != "" {
+				link += "#project=" + url.QueryEscape(firstNonEmptyString(*project, creds.Project))
+			}
+			fmt.Println(link)
+			fmt.Fprintln(os.Stderr, "\nOpen it on this machine; you are signed in automatically.")
+			return nil
+		}
+	}
 	if creds.Token == "" {
-		return errors.New("not logged in: run `conductor login --token …`")
+		_, signed, err := mustClient()
+		if err != nil {
+			return err
+		}
+		creds = signed
 	}
 	ref, err := projectRef(*project, creds)
 	if err != nil {

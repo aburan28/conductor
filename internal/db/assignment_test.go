@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // Assignment lifecycle at the store level. The API suite proves the routing decision; these

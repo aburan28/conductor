@@ -19,3 +19,8 @@
 .DS_Store
 .idea/
 .vscode/
+
+# marketing + docs site build output and dependencies
+site/node_modules/
+site/dist/
+site/src/content/

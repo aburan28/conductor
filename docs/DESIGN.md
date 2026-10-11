@@ -618,6 +618,9 @@ stateDiagram-v2
     verifying --> done: checks pass and no review required
     review_required --> running: changes requested
     review_required --> merging: approved
+    verifying --> ready: sent back after the attempt ended
+    review_required --> ready: sent back from review
+    merging --> ready: pull request closed unmerged
     merging --> done: merged/published
     running --> failed: terminal policy or retry exhaustion
     ready --> cancelled
@@ -729,6 +732,34 @@ On expiration:
 - prevent stale result publication with the old epoch.
 
 The old worktree is retained for recovery; it is not automatically destroyed.
+
+### 10.5 Who renews a lease, and when territory is released
+
+A lease is renewed by whoever is demonstrably still working it:
+
+- a runner, on its progress heartbeat;
+- a session: every session heartbeat renews every live lease bound to that session and held
+  by the session's own principal. The `conductor wrap` sidecar heartbeats every 20 seconds, so
+  an interactive claim lives exactly as long as its session. A lease that has already expired
+  is not revived;
+- an MCP gateway, in the background: the stdio gateway for as long as its process (the
+  harness session) runs, an HTTP gateway session while its client has called within 15
+  minutes. Never a model tool call.
+
+A claim made with no session or runner behind it (`conductor task claim` in a plain shell)
+gets a ten-minute window, recorded against the checkout it was made in. `conductor wrap` in
+that checkout adopts it on start (same principal, not carried by another live session).
+
+Territory follows the work, not the attempt. A task that finishes into `verifying`,
+`review_required`, or `merging` keeps its reservations as a pending-merge hold: its changes sit
+in an unmerged branch, and the next claimant is told so (the conflict carries the holder's
+status and pull request). A terminal transition — `done`, `cancelled`, `failed`, or a merged
+pull request — ends any live lease and releases the reservations in the same transaction. A
+pull request closed without merging sends a waiting task back to `ready` and releases its hold.
+
+When reservations are released, anyone refused that territory in the last 15 minutes (a
+blocked check, start-work, or scope expansion leaves a short-lived waiting note) is named in a
+`scope.released` event, so "wait for it" has something to wait on.
 
 ---
 
@@ -1292,6 +1323,87 @@ Where the harness supports pre-tool interception:
 
 Where it does not, the Git watcher detects drift after the tool batch and pauses before publication or the next turn.
 
+### 17.5 Issue tracker sync
+
+Conductor does not replace the team's tracker (§3.2); it reads from it. A separate task
+backlog is an adoption tax, so a project can opt in to having its tracker's issues become
+tasks, and to having each task's claim and completion written back to its issue.
+
+**Shape.** `internal/tracker` is tracker-neutral: the field mapping (title; body as objective;
+a `## Acceptance` section's list as acceptance criteria; both bounded as an API-filed task's
+are), the edit and state rules, the write-back plan, and their application. An adapter supplies
+`tracker.Item`s it read, by webhook or polling, and a `tracker.Remote` that comments, labels,
+and closes. GitHub Issues is the only adapter (`internal/api/github_issues.go`, through the
+GitHub App); Linear is the next one planned, then Jira. A new adapter needs a reader that
+produces Items and a Remote; the rules, storage, and idempotency come with the package.
+
+**Storage (migration 0011).** `tracker_configs` is the per-project opt-in: which label
+qualifies (or all issues), the in-progress label, the visibility of tasks from public
+repositories, who enabled it (imported tasks are created by them), and the import's resume
+point (the newest `updated_at` read, and the ETag of the last listing from it).
+`tracker_links` maps `(project, external_ref)` to its task — the key that makes an import
+idempotent whatever the task's status — and remembers what the issue last said (hashes, not
+text), whether it is open or public, and what the write-back has told it. Every decision is made
+and applied in one transaction that holds the link row, or, for a first import, a
+transaction-scoped advisory lock on the issue, so a webhook, a poll, a manual sync, and a second
+replica racing on one new issue create one task.
+
+**Rules.**
+
+- An open issue that qualifies and is not linked becomes a `ready` task (`external_ref
+  github:owner/repo#N`). An open task already naming the issue is linked instead. Closed
+  issues are never imported; removing the label does not drop a task.
+- Edits are last-writer-wins per field group (the title; the objective with its criteria). An
+  issue edit applies unless the task's copy was edited in Conductor since the last sync; then
+  the later of the two wins: the issue's `updated_at` against `tracker_links.task_edited_at`,
+  which a trigger on `tasks` stamps whenever the title, objective, or criteria change by any
+  path. (`tasks.updated_at` cannot serve: it moves on every claim and status change.) A
+  Conductor edit that wins stays until the issue's text changes again. A reading older than one
+  already applied is ignored, so deliveries may arrive in any order.
+- A closed issue cancels its task unless the task is finished or its work is landing
+  (verifying, review, merging, or an open pull request) — a pull request's `Closes #N` closes
+  the issue just before the merge completes the task, and the merge decides. If such a pull
+  request closes unmerged and the task returns to ready, the write-back pass cancels it then.
+- A reopened issue revives a task the sync cancelled (`cancelled_by_sync`) to `ready`. This is
+  the one edge out of `cancelled`, deliberately outside the state machine of §9: the sync's
+  cancellation mirrored the issue and ended the lease, bumped the fence, and released the
+  territory, so `ready` is exactly what a fresh import would produce, with the task's history
+  kept. A task a person cancelled stays cancelled.
+
+**Write-back.** Reconciled from state, not from events: a pass lists synced tasks whose
+`updated_at` moved past what the link last reconciled, and for each compares what the issue has
+been told with what it should be told. A claim posts one comment per claimant ("Claimed by
+`<handle>` via Conductor") and adds the in-progress label; a release (or any state without a
+live lease or landing work) removes it; done posts one comment linking the pull request and
+closes the issue, unless it is already closed. Each step is recorded as soon as GitHub accepts
+it, so delivery is at least once and a crash repeats at most the step in flight. Passes run on
+the poller's goroutine every 15 seconds and at the end of each poll, under the poller's advisory
+lock, so two replicas never post the same comment; each pass is bounded, and a rate limit
+(a 429, or a 403 that says so) makes the client refuse every call until GitHub's
+`Retry-After` (at least a minute) has passed.
+
+**Privacy.** Content flows one way: nothing written in Conductor — title, objective, criteria,
+progress, anything private — is sent to the tracker, whose readers may not be the team's.
+Comments are fixed words plus, at most, the claimant's handle and a pull request in the issue's
+own repository. A task imported from a public repository is `team_artifacts` by default, since
+its content is public already and hiding it would only suppress the write-back; one from a
+private repository gets the project's default visibility. A private task is never written back
+to a public issue (its label is still removed), and the claimant's handle appears only when the
+task is not private and either the repository is private or the task is shared at
+`team_artifacts` or above.
+
+**Delivery.** `issues` webhooks (opened, edited, closed, reopened, labeled, unlabeled) when
+webhooks are configured, applied before answering. The poller covers everything else, under its
+existing lock and lifecycle: per repository, one listing of issues updated since the resume
+point, oldest first, bounded to three pages, as a conditional request — an idle repository costs
+one 304, which does not count against GitHub's rate limit.
+
+**Permissions.** Issue sync needs `issues: write`. GitHub applies a manifest's permissions only
+when it creates an app, so an app created before issue sync lacks it, and every installation
+must accept a raised permission before it applies. `conductor github status` reports both gaps
+with the page to click; a project whose installation lacks the permission says so in its sync
+status instead of failing silently.
+
 ---
 
 ## 18. MCP contract
@@ -1765,6 +1877,20 @@ CREATE TABLE domain_events (
 
 Use an append-only domain event table plus an outbox in the same transaction as state changes. Build presence, dashboards, notifications, and analytics as projections. Do not require full event sourcing for every read path; current-state tables remain authoritative for efficient operations.
 
+### 23.4 Notifications
+
+Notifications are the outbox's consumer (`internal/notify`). A project has notification channels — a generic webhook (signed JSON), a Slack incoming webhook (Block Kit), or a Discord webhook — each subscribed to a list of event types from a fixed catalog of types the system actually emits; an entry may narrow `task.status_changed` to one target status (`task.status_changed:done`). Defaults favour what a team acts on: someone blocked by or converging on another's work, a newly detected conflict, work paused on a conflict, territory freed for someone who was waiting, stalls and lost leases, merges, tasks done or failed, budget levels, and usage-limit warnings. Channels are managed by maintainers and up.
+
+**Relay.** conductord runs a relay goroutine (beside the scheduler, awaited on shutdown). Each pass claims up to a batch of due, undelivered outbox rows in projects that have a channel, with `FOR UPDATE SKIP LOCKED` and a committed hold (`next_attempt_at` moved past the pass's lifetime) rather than a transaction held across HTTP calls, so replicas split the backlog and a crashed relay's rows come due again. Each claimed event is sent to every channel that subscribes to it and existed when it occurred; channels are sent to in parallel up to a bound, each channel's events in order, every request under a timeout. Per-(event, channel) state in `notification_deliveries` makes a retry go only to the channels that have not had it. Delivery is at least once; receivers deduplicate by event id.
+
+**Failure.** Backoff belongs to the channel, because what fails is the endpoint: a failed send sets the channel's `retry_after` (base doubled per consecutive failure, capped), and its queued events wait for it instead of each being tried. An event is given up for a channel after a number of failed attempts, after a 4xx refusal (other than 408 and 429), or once it is older than the notification window; the row is then marked delivered so retention treats it normally. Outbox rows of projects without a channel are never claimed and are bounded by the undelivered retention cap, as before.
+
+**Privacy.** A channel is project-wide and its receiver is outside every access check, so an event leaves only through `coord.ProjectEvents` applied for a project observer with no relation to the work — never the owner's or the actor's view — and then narrower: an event about a private task carries only what happened (status, phase, outcome), rendered as "a private task", with no ref, title, objective, or paths, and none of the territory the dashboard shows members. Message text is built from that narrowed payload alone.
+
+**Credentials and network.** URLs and webhook secrets are sealed under the server's secret key (§25, OPERATIONS.md) and never returned after creation. Webhook requests carry `X-Conductor-Timestamp` and `X-Conductor-Signature: sha256=HMAC(secret, timestamp "." body)`, so a receiver can reject forgeries and replays. Destinations must be `https` and public: the dialer refuses loopback, private, link-local, CGNAT and other non-public addresses on the address actually connected to, after DNS, connects without an HTTP proxy (whose address would be the one checked), and follows no redirects. Operators can allow private networks and plain HTTP explicitly. With an explicit forward proxy (`--notify-proxy`) the dialer reaches only the proxy, so the destination name is resolved and every address checked before the proxy is asked to connect (no CONNECT to a private target is ever sent); the residual risk is that the proxy resolves the name itself and may get a different answer.
+
+**Conflict events.** Three events exist for the coordination wedge. `conflict.blocked`: an intent check or start-work refused by territory another principal's task holds (aggregate: the holding task; payload: the requester, the holder's ref and the contested resources). `conflict.suggest_join`: a check or start pointed at similar work in flight (aggregate: the similar task; no similarity score, which would be an oracle against private intent). `conflict.detected`: a new edge of medium severity or worse in the merge-risk graph (aggregate: the edge; payload: both refs, kind, severity, suggestion, contested resources, and shared paths under `changed_paths`, which follows summary visibility), written at the narrower of the two tasks' visibilities. None carries the requester's summary or either task's title. Polling must not flood: `conflict_alerts` holds what was announced, written in the event's own transaction — one `blocked`/`suggest_join` per (requester, task, outcome) per 15-minute window, one `detected` per conflict while it stays open or acknowledged — so restarts and replicas agree, as with budget and stall alerts (§27.1).
+
 ---
 
 ## 24. Collaboration and authorization
@@ -1800,6 +1926,44 @@ Reviewer: Claude reviewer attempt 9
 
 Repository access remains an independent requirement. Conductor must not grant access to code merely because a user can see project presence.
 
+What each role may do in this build, beyond reading (every member, `runner` included, can read
+what an `observer` can):
+
+- **Membership.** `project_admin` and above invite and remove members and change roles. Privilege
+  never flows upward: nobody grants, changes, or removes a role above their own (a
+  `project_admin` cannot create, demote, or remove an `org_admin`), and the last administrator
+  cannot be removed or demoted. Inviting a handle that names a **new** account creates it and
+  returns its first token, once. Inviting an **existing** account adds the membership and returns
+  no token — the person keeps their own credentials — because a token works in every project its
+  principal belongs to, so minting one for an existing account would hand the inviter that
+  account. Re-inviting a member is a `409`; a role changes only through
+  `PATCH /v1/projects/{project}/members/{handle}` (`conductor member role`).
+- **Execution** (`claim-next`, lease heartbeat, progress, result, scope expansion, release,
+  attempt route/state/brief, runner snapshot and registration) accepts `contributor` and above,
+  and the `runner` role. A runner identity can therefore claim and execute queued work without a
+  contributor's right to file, edit, or move other people's tasks.
+- **Lease authority.** Acting on a lease — release, expand scope, hand off, heartbeat, report
+  progress, finish — requires being the lease's holder principal, or `maintainer` and above (to
+  take back a stuck task; recorded in the audit log). The fencing epoch proves a holder is
+  current; it never proved *who* the caller was, and the server no longer fills in someone
+  else's lease for a caller who omits `lease_id`. An attempt's brief is for the session
+  executing it (its sponsor, executor, or the lease holder), the task's owner, or a maintainer
+  when the task is not private.
+- **Moving a task by hand** (`POST /v1/tasks/{task}/transition`). A `maintainer` or above may
+  make any legal transition. Accepting verified work — into `review_required`, `merging`, or
+  `done` — is a review decision for a `reviewer` or a maintainer, never the author or executor
+  alone. Every other move belongs to the task's creator or the holder of its live lease, and
+  needs a `contributor`. The state machine (§9) still decides what is legal; these rules decide
+  who may ask. The rule is one function, `coord.Service.AuthorizeTransition`, which every
+  handler that changes a status on a principal's behalf calls; the control plane acting on its
+  own (`coord.SystemCaller`: the scheduler, merge reconciliation) is not subject to it.
+- **Editing a task** (`PATCH /v1/tasks/{task}`): its content — title, objective, acceptance
+  criteria, priority, labels — belongs to its creator, the holder of its live lease, or a
+  maintainer; its visibility to its creator or a maintainer only, so a lease holder working
+  someone else's private task cannot publish it (`coord.Service.AuthorizeTaskEdit`).
+
+Acting on someone else's task or lease is audited.
+
 ### 24.3 Field-level authorization
 
 A task contains fields with separate visibility:
@@ -1829,10 +1993,42 @@ Do not solve privacy only with task-level rows; enforce visibility at serializat
 
 ### 25.1 Authentication
 
-- Humans: OIDC through the organization's identity provider.
+- Humans: OIDC through the organization's identity provider, or GitHub (§25.7).
 - CLI/session adapters: short-lived device/session token scoped to one user and project.
 - Runners: mTLS or workload identity with short-lived JWTs.
 - AWS deployment: IAM roles for service accounts and instance profiles where practical.
+- The machine's owner, on the machine running the control plane: local sign-in. The first
+  principal bootstrapped on a daemon is recorded as its owner (`server_settings`). In
+  `local` security mode, `POST /v1/local/session` mints an ordinary bearer token for that
+  owner. It does so only for a request from loopback, with a loopback Host header (DNS
+  rebinding), a JSON body (cross-site forms), a same-origin `Origin` when present, and no
+  sign of a reverse proxy: not `--behind-proxy`, no forwarding headers, not HTTP/1.0. No other endpoint gains ambient authentication. `enhanced` mode
+  disables it and revokes the tokens it issued. A loopback-only daemon defaults to `local`;
+  a reachable one defaults to `enhanced`. Tightening is open to any project admin, loosening
+  only to the owner, and `--security-mode` pins either.
+
+Bearer tokens in this build:
+
+- A token is presented in the `Authorization` header. The SSE event stream alone also accepts
+  `?token=`, because a browser `EventSource` cannot set headers; everywhere else a token in the
+  URL is refused, since URLs end up in proxy logs and browser history.
+- Every token expires unless an administrator deliberately invites a service identity (a runner)
+  with no expiry. `POST /v1/tokens` and `/v1/tokens/reset` default to 90 days and cap a human's
+  token there; an organization's policy can lower both caps, and cap service tokens (§25.8). `conductord bootstrap` mints a 90-day token (`--token-ttl`) and revokes the
+  bootstrap token it printed before, so re-running bootstrap to recover a login retires the old one.
+- A token can be confined to one project (`POST /v1/tokens` with `project`). Every
+  project-scoped authorization goes through `coord.Authorize`, which treats any other project as
+  nonexistent; sessions and runners, authorized by owner, apply the scope themselves; listings
+  of projects are filtered to it. A scoped token reaches only routes that address a project or
+  a resource inside one, plus identity and read-only listings: never token administration, the
+  machine's security mode, or GitHub App setup. The runner mints one per attempt for the agent
+  it launches (§25.3).
+- Token creation, invite-minted tokens, bootstrap, runner registration, role changes, conflict
+  resolutions, and actions on other people's tasks and leases are written to the audit log; a
+  failed audit write is logged rather than dropped.
+- The failed-authentication throttle keys on the connection's peer address, or behind
+  `--behind-proxy` on the right-most `X-Forwarded-For` entry — the one the trusted proxy wrote.
+  The left-most entry is whatever the client sent.
 
 ### 25.2 Secrets
 
@@ -1854,6 +2050,28 @@ Autonomous attempts should run with:
 - restricted credentials;
 - optional container, bubblewrap, or Landlock isolation;
 - no access to other users' local chat stores.
+
+That is the target. What `conductor worker` does today is narrower, and it matters to anyone
+running one:
+
+- **There is no sandbox.** The harness and the required checks run as the runner's own user,
+  with that user's file access — `~/.ssh`, `~/.aws`, `~/.conductor/credentials` included.
+- **A repository's Conductor config is executable code.** The harness `command`, `arg_template`,
+  and `mcp_servers` in `.conductor/project.yaml` are run by the worker, and the project's
+  `required_checks` run as `sh -c` in the worktree the agent just edited (so an edited `Makefile`
+  runs too). Run a worker only against repositories, and with members, you trust to run code on
+  that machine. The worker takes its repository from `--repo` or the checkout it is started in;
+  the path registered on the control plane is only a fallback, and is announced.
+- **Environments are cleaned.** A harness inherits the runner's environment minus Conductor's
+  credentials (`DATABASE_URL`, `CONDUCTOR_TOKEN`, every `CONDUCTOR_*` secret, Postgres
+  passwords); it keeps its own model API key. A check gets a stricter environment with anything
+  credential-shaped removed: tokens, keys, passwords, cloud and model-provider settings, the SSH
+  agent (`harness.SanitizeEnv`). This is a blocklist, so it narrows exposure; it does not
+  contain a hostile check.
+- **The agent never sees the operator's token.** For each attempt the runner mints a token
+  confined to the project that expires shortly after the attempt's timeout, writes the agent's
+  MCP config into a private `0700` directory outside the worktree (the worktree is committed
+  with `git add -A`), and revokes the token when the attempt ends.
 
 ### 25.4 Prompt injection and untrusted tool output
 
@@ -1887,6 +2105,194 @@ For team or hosted use:
 - per-tenant dedupe HMAC keys;
 - audit of administrative reads.
 
+The dedupe key is stored in the `organizations` table, so a database dump or backup carries it,
+and with it anyone can confirm a guess about a private intent by recomputing its fingerprint
+(intents are kept even when they never became tasks). Set `CONDUCTOR_DEDUPE_SECRET` on every
+process that opens the database and the key actually used becomes
+`HMAC-SHA256(secret, stored key)`, so the database alone no longer suffices. It is optional
+because setting or changing it changes every fingerprint computed afterwards: open work filed
+before the change stops deduplicating against work filed after it until it closes. Note what it
+does not protect: a private task's title and objective are themselves stored in plaintext, so a
+dump already reveals filed private work; the secret protects the intents that were only checked.
+Client-supplied fingerprints are still accepted as-is (§12.2); they gain a client nothing,
+because no API returns another principal's fingerprint to compare against.
+
+Read paths that do not return a `privacy.TaskView` apply the same rules
+(`internal/coord/visibility.go`): domain events (`GET …/events` and the SSE stream) are shown at
+the narrower of the visibility they were written with and their task's current visibility —
+territory only for another member's private task, summary fields from `team_summary`, commits,
+paths, and check results from `team_artifacts`, and an attempt's spend only to its sponsor; a
+handoff bundle, a task's validation results, and its policy-decision rationale follow the task's
+visibility; an attempt's changed paths and worktree path are shown to others from
+`team_summary` up (`privacy.ProjectAttempt`; the same tier as in events); lease ids and fencing epochs appear on a task card only for the lease holder. Server
+faults return `internal error` with a request id, and the detail goes to the server log.
+
+### 25.7 Single sign-on
+
+Humans can sign in through an OpenID Connect provider (Google, Okta, Entra, Auth0, Keycloak,
+…) or GitHub's OAuth flow (`conductord --sso-provider`, `internal/sso`, `internal/api/sso.go`).
+SSO is a **token issuer, not a second authentication path**: a successful sign-in mints an
+ordinary bearer token named `sso:<provider>` (12 hours by default, `--sso-token-ttl`, capped at
+90 days like every human token), and the API authenticates it exactly like any other. Roles,
+project scopes, enhanced security mode, the failed-authentication throttle and revocation apply
+unchanged; local sign-in is untouched, and SSO works in both security modes.
+
+**Flow.** `GET /v1/sso/{provider}/start` creates a sign-in with a random state, nonce and PKCE
+(S256) verifier, stores it in `sso_logins` (state hashed; Postgres, so any replica can finish a
+sign-in another began) and redirects to the provider. The redirect URI is
+`<public URL>/v1/sso/<provider>/callback`, built from configuration and never from the request,
+and is the one URL registered with the provider. The callback consumes the state once (an
+`UPDATE … RETURNING`, so a replay finds nothing, on any replica), redeems the code, verifies the
+identity, maps it to a principal and attaches a one-time ticket (two minutes, hashed) to the
+sign-in. The ticket goes back in a URL fragment and is exchanged for the token at
+`POST /v1/sso/redeem`. The CLI (`conductor login --sso`) runs the same flow with a loopback
+listener on `127.0.0.1:<random port>` (RFC 8252): the provider redirects to conductord, which
+holds the client secret, and conductord forwards the ticket to the loopback address.
+
+**Verification.** ID tokens are verified with the standard library: RS256 or ES256 only (`none`
+and HMAC refused before a key is consulted), a key from the issuer's JWKS matching `kid` and
+type (refetched at most every 30 seconds on an unknown `kid`, which is what rotation looks like,
+and hourly otherwise), `iss` equal to the configured issuer and to the discovery document's,
+`aud` containing the client id and `azp` equal to it when present, `exp`/`iat`/`nbf` with two
+minutes of skew, the nonce from this sign-in, and `email_verified` true. GitHub has no ID token:
+the identity is GitHub's answer for the access token just redeemed — the numeric user id, the
+verified primary address from `/user/emails`, and active membership of an allowed organization.
+Providers that do not assert `email_verified` are refused, because an unverified address is
+exactly what an account takeover would supply — with one explicit exception, below. GitHub sign-ins
+ask for `read:org` and also report the account's active organizations and its teams
+(`org/team-slug`), which organization policy (§25.8) admits by and maps to roles; an OIDC
+provider's groups come from its configured claim (`groups-claim`, default `groups`).
+
+**Microsoft Entra ID.** Entra issues no `email_verified` claim, so without help it cannot sign
+anyone in. A provider may list `trust-email-domain=` domains; then a token without a verified
+email is accepted when (1) the provider's issuer is one tenant's,
+`https://login.microsoftonline.com/<tenant-id>/v2.0` with the tenant's GUID — `common`,
+`organizations`, `consumers` and domain-named tenants are refused at startup, because through them
+any tenant's administrator decides what the claims say; (2) the token's `tid` is that tenant;
+(3) it is not a guest (`idp` naming another issuer, or `acct` 1); and (4) its `upn`, else
+`preferred_username`, else `email` is an address in a listed domain, which becomes the identity's
+address. The UPN comes first because Entra lets a tenant use a UPN suffix only after proving it
+owns the domain, whereas `email` is an attribute a tenant administrator can set to anything. What
+this trusts: the tenant's administrators, who could already sign in as any of its accounts, not to
+put an address in a listed domain on an account it does not belong to. What it does not do: trust
+any other tenant, any guest, or any address outside the listed domains; and a token that does
+assert `email_verified` is still taken at its word. Linking by address (below) still needs an
+address an administrator registered.
+
+**Identity mapping.** An external account is named by issuer and subject (GitHub: instance URL
+and user id), never by email: `external_identities` is unique on (issuer, subject) and on
+(principal, issuer). A first sign-in links to the human principal whose administrator-registered
+address (`conductor member add --email`, `conductor sso email`) the provider verified, and only
+while that principal has no linked identity at all — decided in the insert itself. Further
+identities are linked by the signed-in principal (`conductor sso link`), which proves control
+of both accounts; a session from local sign-in cannot link. A principal with no project
+membership is refused, so removing someone from their last project is not undone by signing in.
+Without `--sso-auto-provision`, an unregistered address is refused; with it, a new account
+joins `--sso-default-project` as contributor, reviewer or observer, and every provider must
+then restrict who it admits (`domain=` or `org=`).
+
+**Threats and what answers them.**
+
+| Threat | Defence |
+|---|---|
+| Login CSRF: an attacker sends a victim the callback URL of the attacker's own sign-in | dashboard sign-ins are bound to the starting browser by an HttpOnly, SameSite=Lax cookie (`__Host-` and Secure over https); the callback and the redemption both require it |
+| A stolen or intercepted ticket (history, another local program catching the loopback redirect, a page steering the browser to the loopback port) | the ticket is single-use, two minutes, and redeemable only with the browser's cookie or the CLI's PKCE verifier, checked in the same statement that consumes it, so a failed attempt does not burn it |
+| Replayed callback, state or code | state is single-use and expires in ten minutes; the code is bound to the PKCE verifier and the nonce to the ID token |
+| Forged or substituted ID token | signature under the issuer's published key, `iss`/`aud`/`azp`/time checks; an algorithm-confusion token (`none`, HS256) is refused |
+| Mix-up between providers | each provider has its own callback path, and a state is accepted only on the path of the provider it was issued for |
+| Open redirect | `next` admits a same-origin path only; the CLI's redirect must be `http://127.0.0.1` or `http://[::1]` with a port |
+| Account takeover by email | linking by address needs an address an administrator registered and the provider verified, and never attaches to a principal that already has an identity; setting someone's address, or unlinking them, needs an administrator of every project they belong to |
+| A second IdP account taking over a principal | unique (principal, issuer); first-sign-in linking only to principals with no identity; adding identities needs the existing login |
+| Brute force and flooding | callback and redemption failures count against the authentication throttle; unauthenticated sign-in starts are capped (10 000 in flight) and expired rows are pruned |
+| A secret on the command line | client secrets are read only from `CONDUCTOR_SSO_<NAME>_CLIENT_SECRET`, a named variable, or a file; `client-secret=` is refused |
+| Enhanced mode bypass | SSO never mints a `local:` token, and an `sso:` token is an ordinary credential that enhanced mode does not need to revoke |
+
+What it does not defend against: a compromised identity provider, or a compromised mailbox at
+an address an administrator registered, signs in as that principal — that is what delegating
+authentication means. The PKCE verifier and nonce of a sign-in in flight are stored in plaintext
+for up to ten minutes; they are useless without the authorization code and the client secret.
+Revoking someone at the provider does not end their current `sso:` token; it expires within the
+token TTL, and `conductor sso unlink` or `conductor member remove` ends it at once.
+
+### 25.8 Organization administration
+
+An organization's administrators — principals holding `org_admin` in any of its projects — manage
+it through `/v1/admin` and the dashboard's Admin area. Roles stay per project; there is no
+separate organization membership. `conductord bootstrap` makes the first principal of a new
+organization its `org_admin` (and, asked for no role, never changes an existing member's).
+
+**Policy.** One document per organization (`org_policies`, `internal/admin.Policy`), validated as
+a whole on every change and audited by the names of the settings changed (never their values):
+require-SSO; allowed email domains and GitHub organizations; account provisioning (default project
+and role, contributor at most, and only with a domain or organization restriction); group → role
+rules with a ceiling (default maintainer; `org_admin` is never mappable); caps on human and service
+token lifetimes and the single sign-on session; feature flags; branding. A server's config file
+(`conductord --config`) can lock any of these for every organization: the lock is applied over the
+stored document whenever it is read, the API refuses to change a locked setting (403), and the
+dashboard shows it read-only. Each replica caches an organization's effective policy for five
+seconds.
+
+**Require-SSO** is enforced at authentication, on every request: a human principal's token is
+accepted only if it is named `sso:<provider>` (minted by a sign-in) or `sso:<provider>/<name>`
+(minted with such a token — capped at its parent's expiry, and revoked with it when the identity is
+unlinked; the `sso:` prefix cannot be chosen by a client), or `local:` (local sign-in, governed by
+the security mode). Other tokens are refused with `sso_required`, not revoked: refusal covers
+every way a token can come to exist (bootstrap, invite, older tokens), takes effect everywhere at
+once, and is reversible when the identity provider is down; deactivation is how access ends for
+good. Service principals are not people and keep their tokens. An invite of a person mints no
+token while the policy is on. Turning the policy on is refused from a session that did not itself
+come from single sign-on, so the administrator doing it has proved they can still sign in.
+
+**Sign-in hooks.** After the provider verifies an identity, the organization's admission rules
+apply (allowed domains; for GitHub, allowed organizations), a deactivated principal is refused, and
+a first sign-in matching no registered address is provisioned by the one organization whose policy
+provisions for it (several matching is a refusal). Group mapping then runs over the token's groups,
+GitHub teams and the principal's SCIM groups: it adds memberships and sets roles up to the ceiling,
+leaves any role above the ceiling and any runner role alone, never demotes a project's last
+administrator, never removes a membership, and audits each change (`member.role_mapped`).
+
+**Deactivation.** `principals.deactivated_at`. Deactivating revokes every token and sign-in in
+flight in one transaction, and token authentication refuses a deactivated principal whatever it
+holds. Memberships and history are kept, so reactivation restores access (through a new sign-in).
+Deactivating, or SCIM-deleting, a project's last active administrator is refused.
+
+**SCIM 2.0** (`/scim/v2`, RFC 7643/7644 core): `Users` (list with `eq` filters on `userName`,
+`externalId`, `id`, `emails.value`; get, create, replace, patch, delete), `Groups` (the same, plus
+member add/remove/replace in the shapes Okta and Entra send), `ServiceProviderConfig`, `Schemas`,
+`ResourceTypes`. It authenticates with an organization's SCIM token (`cdscim_…`, minted by an
+`org_admin`, stored as a SHA-256 hash, usable nowhere else) under the same failure throttle as
+other credentials, and reaches only that organization. Every human principal of the organization is
+a SCIM user, so a provider can find and adopt accounts that predate it; `userName` is the one the
+provider set, else the registered address, else the handle. SCIM grants no role: a created user
+joins the policy's default project with its default role, a `roles` attribute is ignored, and
+groups only feed mapping. `active=false` deactivates; DELETE also removes memberships, linked
+identities and group memberships and hides the principal from SCIM, keeping the row the audit log
+refers to.
+
+**Branding** is public (the sign-in page shows it): a display name, an accent color that must reach
+3:1 against the white surface (the text color on it is chosen for contrast), a plain-text sign-in
+banner, and a logo — PNG, JPEG or GIF by its own magic bytes, at most 64 KiB and 1024 pixels a side,
+never SVG — served with its sniffed type, `nosniff` and a sandboxing CSP. The dashboard applies the
+color through the CSSOM, which its strict CSP allows, and shows the logo as a `data:` image.
+
+**Audit.** `GET /v1/admin/audit` lists an organization's audit log filtered by actor, action (exact
+or a family) and time, and exports every matching record as JSON lines or CSV (cells starting with
+`=`, `+`, `-`, `@` are quoted so a spreadsheet does not run them); exports are themselves audited.
+`db.Store.SetAuditHook` sees each record after it is written — the seam for streaming the audit log
+to a notification channel or a SIEM.
+
+| Threat | Defence |
+|---|---|
+| A project administrator reaching organization settings | `/v1/admin` requires `org_admin` in the caller's organization; project-scoped tokens are refused |
+| Locking everyone out with require-SSO | refused unless a provider is configured and the change comes from an SSO session; the config file or one SQL statement turns it off, and refused tokens work again |
+| A token minted to outlive the SSO session | derived tokens are capped at the parent's expiry and named under it; `sso:` names are reserved |
+| A group or SCIM granting administration | the ceiling never includes `org_admin`; SCIM grants only the policy's default role (contributor at most) |
+| Deprovisioning stranding a project | deactivation and SCIM deletion refuse a project's last administrator |
+| A deactivated person keeping access | tokens revoked in the same transaction, and authentication refuses the principal regardless |
+| A logo or banner carrying script | the logo is sniffed and never SVG, served with `nosniff` and `sandbox`; the banner and name are rendered as text |
+| CSV injection in an audit export | formula-leading cells are prefixed with `'` |
+| A SCIM token used elsewhere | a separate table and prefix; the API refuses it, SCIM refuses API tokens |
+
 ---
 
 ## 26. Observability
@@ -1906,6 +2312,15 @@ For team or hosted use:
 - token/cost/capacity by role, model alias, project, and sponsor;
 - frontier-planner-to-worker token ratio;
 - worker utilization and provider rate-limit pressure.
+
+Implemented so far: conductord serves operational metrics in the Prometheus text format at
+`/metrics` (loopback only, or behind a bearer token) — HTTP requests and latency by route
+pattern, scheduler pass duration and errors, active, reclaimed and outage-extended leases,
+events written by type, retention deletions, GitHub polls and issue write-backs, event streams, and database pool
+statistics — from a small standard-library registry (`internal/metrics`) rather than the
+Prometheus client, per §4's dependency posture. `/v1/ready` reports database, schema
+version, scheduler and poller health. The product metrics above are still served by the API
+and dashboard rather than as series. docs/OPERATIONS.md lists every metric.
 
 ### 26.2 Tracing
 
@@ -1931,15 +2346,27 @@ Do not put raw prompts, source contents, or secrets in span attributes.
 
 Structured logs include IDs, transitions, durations, retry classes, and policy decisions. Full harness stdout is owner-private by default and may remain local. Team logs contain sanitized summaries.
 
+Every request carries an id (`X-Request-Id`, propagated when the caller sends a well-formed
+one) that appears in its access-log line, in error responses, and in any log line about
+it. The access log records method, route pattern, status, duration and principal — never a
+query string, header or body.
+
 ### 26.4 Dashboard views
 
-1. **Project board:** tasks, owners, states, dependencies, conflicts.
-2. **Live presence:** humans and agents currently active.
-3. **Conflict radar:** overlapping scopes and merge-risk graph.
-4. **Task detail:** task card, attempts, decisions, artifacts, checks.
-5. **Runner capacity:** hosts, harness versions, model availability, queues.
-6. **Cost and routing:** role/model/harness usage and escalations.
-7. **Policy audit:** why a task was routed, blocked, escalated, or required approval.
+The menu is the core loop; everything else is one level down.
+
+1. **Home:** can I start (a check before an edit, against live claims), who is on what, what is
+   contested, and what is waiting on me — one screen.
+2. **Tasks:** the board or list, with the task detail drawer (card, attempts, decisions, checks,
+   pull request and issue links).
+3. **People:** members, what each is working on, and their open sessions.
+4. **Settings:** you (tokens, appearance), this project (members, notification channels,
+   repository policy), security, privacy.
+5. **More:** conflict radar, fleet (runners and models), swarm, admission queue, usage and cost,
+   the event timeline, integrations. Swarm and the queue appear only when the organization turns
+   them on (§25.8); every area keeps its address either way.
+6. **Admin** (`org_admin` only): organization branding, authentication, provisioning, members and
+   roles, features, the audit log, and the effective server configuration.
 
 ---
 
@@ -1952,6 +2379,20 @@ Structured logs include IDs, transitions, durations, retry classes, and policy d
 - Mark expired attempts stale.
 - Requeue eligible tasks.
 - Rebuild presence and conflict projections from current rows/events.
+
+Reconciling must not mistake the outage itself for dead workers. Workers renew leases
+through the control plane, so while every replica is down none can, and a restart that
+simply reclaimed expired leases would fence off all in-flight work after any outage longer
+than the lease TTL. Each scheduler pass therefore stamps a heartbeat shared by all replicas;
+a gap longer than the normal pass interval is an outage, and open leases are extended by
+the gap before anything is reclaimed (once, under a row lock, however many replicas start
+together). The extension runs before a restarted process accepts requests, so a worker's
+first heartbeat after the outage succeeds. A worker that died while the control plane was
+up leaves no gap and is reclaimed on time.
+
+Shutdown is ordered too: background loops and long-lived streams end first, in-flight
+requests complete, and only then is the database pool closed, within a bounded grace
+period. docs/OPERATIONS.md covers both, and backup and restore.
 
 ### 27.2 Runner crash
 
@@ -2023,10 +2464,66 @@ session:
    state is empty) and reopens the conversations. The S3 client is SigV4-signed over the
    standard library — no vendor SDK, consistent with §4's dependency posture — and speaks to any
    S3-compatible endpoint. Only resume metadata is uploaded; the transcript never leaves the
-   harness's own store, exactly as in every other Conductor channel.
+   harness's own store, exactly as in every other Conductor channel. A plain `http://`
+   endpoint is refused unless `CONDUCTOR_BACKUP_S3_INSECURE` is set.
+
+   A bucket is writable by more parties than the machine, and a restored record names a
+   directory and a command, so the records are protected on both ends. With
+   `CONDUCTOR_CHECKPOINT_KEY` set they are sealed (the checkpoint AES-256-GCM format) and a
+   plaintext manifest is refused on pull (`--allow-unsealed` overrides). Whatever comes back is
+   sanitized: no argv, the harness's resume invocation recomputed locally, unknown harnesses and
+   odd wrap flags dropped, process ids cleared. And `conductor resume` shows what a record
+   restored from another machine would run, and where, and asks first (`--yes` answers).
 
 Recovery in all three cases is the same command: `conductor resume`, which reopens a saved
 record whose process is gone using the harness's own conversation-resume invocation.
+
+---
+
+### 27.8 Session portability
+
+§27.7 reopens a conversation where its harness keeps it: this machine, this login, this
+working directory. Three situations need the conversation somewhere else — the account hits
+its usage limit mid-task, the instance is reclaimed with the transcript on its disk, or one
+harness planned work another should finish — and `conductor checkpoint` covers them.
+
+A checkpoint is one file (gzip tar, `.ckpt`) with four layers: the harness's native
+transcript verbatim (Claude Code's per-session directory of subagent transcripts included),
+the working tree as a git bundle of unpushed commits plus a binary patch plus the untracked
+files, a harness-neutral `CONTINUATION.md` distilled from the conversation, and a manifest
+with a hash for every member. The same harness resumes the same conversation from the
+native layer — `claude --resume <path>`, `codex resume <id>`, `opencode import` — under
+whichever state directory (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME`) and so
+whichever login the user names; a different harness starts from the continuation.
+
+Checkpoints are taken by the `conductor wrap` sidecar on an interval and on the way down,
+by the Claude Code `Stop`/`PreCompact` hooks and the OpenCode `session.idle` plugin event
+for bare sessions, by `conductor sessions save all` (and so the shutdown hook), and by an
+agent's own `coord_checkpoint` call. Each dedupes on a content fingerprint.
+
+The privacy boundary (§6, §12.4) is unchanged: a checkpoint holds the conversation, so it
+is written only by the CLI on the user's machine, never by or through the control plane.
+`coord_checkpoint` is honoured only by the stdio gateway, which runs beside the harness;
+the HTTP gateway refuses it. A checkpoint leaves the machine only as a file the user moves,
+or sealed (AES-256-GCM under a passphrase) in the user's own bucket — `conductor checkpoint
+push` refuses plaintext. Beside the sealed bundle the bucket holds only an index entry (id,
+time, harness, size): the manifest names the conversation, the note, the working directory, and
+the machine, so it travels inside the ciphertext. `docs/PORTABILITY.md` has the format and
+per-harness mechanics.
+
+A checkpoint that arrives from elsewhere is untrusted input to a restore. Its identifiers
+(checkpoint id, harness, session id) must be plain identifiers before they become file names or
+arguments; members are size-capped before they are read; and the working tree is restored
+through `os.Root` with no symbolic link followed and nothing written under `.git`, because the
+tracked patch is applied first and can itself create the link a later file would be written
+through.
+
+Usage limits are what most often strand a session, so the sidecar also watches them
+(`docs/USAGE_LIMITS.md`): it reads each subscription login's rolling-window state from what
+the tool exposes locally, reports it under the principal's own name (`quota_snapshots`, read
+back only by that principal; project members see counts), raises `quota.warning` /
+`quota.exhausted` once per window per level, and at the critical threshold takes a checkpoint
+at once and prints the resume command for the login or harness with the most headroom.
 
 ---
 
@@ -2085,6 +2582,52 @@ Recommended properties:
 ### 28.3 Scaling model
 
 Stateless API replicas are safe when all claim operations are transactional in PostgreSQL. Scheduler replicas use leader election or `SKIP LOCKED`. Runner dispatch uses a durable queue/outbox. Presence is a projection and can tolerate eventual consistency; claims cannot.
+
+As built, conductord replicas share one database and need no leader election: scheduler
+steps use `SKIP LOCKED`, and everything else replicas must agree on is a row — the scheduler
+heartbeat (§27.1), the last budget alert level announced per project and the stalls already
+announced, the GitHub App's credentials (its secrets sealed with AES-256-GCM under a key kept
+outside the database, so a backup cannot act as the app) and pending setups, and the check
+run posted per commit. The one singleton
+duty, polling GitHub, runs under `pg_try_advisory_lock`, which Postgres releases if its
+holder dies. Two things stay per process: MCP HTTP sessions, which hold an agent's fence in
+memory and so need session affinity on `Mcp-Session-Id` at the load balancer, and the
+authentication failure limiter. Retention prunes events, audit, outbox, idempotency and
+usage rows on configurable windows, keeping each aggregate's newest event so sequence
+numbers continue. docs/OPERATIONS.md has the operator's view.
+
+### 28.4 Daemon-to-daemon peering
+
+Multiple control planes may form a **mesh**: each daemon holds a certificate signed by a
+shared mesh CA and is configured with the addresses of the peers it should reach. A peer
+link is mutual TLS — the daemon serves its mesh certificate and verifies the peer's
+against the mesh CA, which is the only root trusted for that role. The certificate is the
+daemon's mesh identity (DNS SAN or common name), so a link proves both reachability and
+who answered.
+
+The mesh carries **connectivity and identity only**. Each daemon probes its peers
+(`GET /v1/peer/info`, authenticated by client certificate, never by bearer token) and
+records an in-memory link table — state, round-trip time, failure reason, and the remote
+identity — exposed to project members via `GET /v1/peers` and `conductor peers`. Link
+state is a projection, like presence: recomputed on every probe, never a source of truth.
+
+Deliberately not replicated across the link: tasks, scopes, reservations, events, or any
+project data. A mesh certificate names a daemon, not a principal, so peer endpoints are a
+separate authentication channel from membership, and no peer handler may read project
+data without a resolved member. Cross-daemon coordination (federated conflict detection,
+work hand-off between meshes) is a future extension with this layer as its foundation.
+
+Peers may be discovered instead of hand-listed. `--peer-discover-dns <name>` resolves a
+DNS SRV record (RFC 2782) on every probe tick and treats each target as a peer candidate —
+the same bootstrap pattern a Kubernetes headless service or Consul's DNS interface uses for
+cluster join, so an operator publishes one shared record instead of teaching every daemon
+every other daemon's address. A discovered peer starts under a provisional name (its DNS
+target) and, on its first successful probe, adopts whatever identity its own certificate
+and `/v1/peer/info` report — the mesh CA is still the only source of trust, DNS only
+proposes an address to dial. `--peer` and `--peer-discover-dns` compose: discovery only
+adds entries, never removes or renames a hand-listed peer, so the two can be mixed and a
+transient resolver failure never drops an otherwise-reachable link. At least one of the two
+is required — the mesh still needs somewhere to start.
 
 ---
 

@@ -17,7 +17,15 @@ export default defineView({
     ]);
     return { sessions: (sessions && sessions.sessions) || [], caps: (caps && caps.sessions) || [], tasks: (tasks && tasks.tasks) || [] };
   },
-  draw({ sessions, caps, tasks }, ctx, { refresh, state }) {
+  draw(data, ctx, { refresh, state }) {
+    return sessionsBlock(data, ctx, refresh, state);
+  },
+});
+
+// sessionsBlock is the sessions table with its filter, shared by People (which is where the
+// dashboard shows sessions now) and this view, which /sessions no longer routes to but
+// other code may still import.
+export function sessionsBlock({ sessions, caps, tasks }, ctx, refresh, state) {
     state.filter = state.filter || 'live';
     const live = s => !s.closed_at && !['closed', 'stale'].includes(s.state);
     const list = sessions.filter(s => state.filter === 'all' ? true : state.filter === 'live' ? live(s) : !live(s));
@@ -74,11 +82,10 @@ export default defineView({
 
     return h('div', { class: 'stack' },
       h('div', { class: 'toolbar' },
-        segmented([{ value: 'live', label: 'Live' }, { value: 'closed', label: 'Closed' }, { value: 'all', label: 'All' }], state.filter, v => { state.filter = v; refresh(); }),
+        segmented([{ value: 'live', label: 'Live' }, { value: 'closed', label: 'Closed' }, { value: 'all', label: 'All' }], state.filter, v => { state.filter = v; refresh(); }, 'Which sessions'),
         h('div', { class: 'spacer' }), h('span', { class: 'muted' }, `${sessions.filter(live).length} live · ${sessions.length} total`)),
-      card({ flush: true, body: tbl, footer: 'A session advertises what it runs; the catalog decides what that is worth. A model the catalog does not know is still usable, just never offered tier-gated work.' }));
-  },
-});
+      card({ title: 'Sessions', flush: true, body: tbl, footer: 'A session advertises what it runs; the catalog decides what that is worth. A model the catalog does not know is still usable, just never offered tier-gated work.' }));
+}
 
 async function assignTaskDirect(ctx, ref, sessionID) {
   try {

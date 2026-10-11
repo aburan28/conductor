@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // Assignments are offers of work to a specific live session (DESIGN.md §7.7).

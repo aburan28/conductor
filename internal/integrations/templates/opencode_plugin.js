@@ -55,7 +55,7 @@ export const ConductorPlugin = async ({ $, directory, worktree } = {}) => {
         if (!EDIT_TOOLS.has(tool) && !/edit|write|patch/.test(tool)) return;
         const file = editPath(output && output.args);
         if (!file) return;
-        const r = await runConductor($, cwd, ["hook", "pre-tool", "--tool", tool, "--path", file]);
+        const r = await runConductor($, cwd, ["hook", "pre-tool", "--auto-reserve", "--tool", tool, "--path", file]);
         if (r.code === 2) {
           blocked = (r.stderr || "another session holds this file").trim();
         }
@@ -70,6 +70,15 @@ export const ConductorPlugin = async ({ $, directory, worktree } = {}) => {
       try {
         if (event && event.type === "session.created") {
           await runConductor($, cwd, ["hook", "session-start"]);
+        }
+        // Portability: checkpoint the conversation and working tree each time the agent
+        // finishes a turn, so it can be resumed elsewhere. Rate-limited and skipped when
+        // nothing changed; local only (CONDUCTOR_CHECKPOINT=off disables it).
+        if (event && event.type === "session.idle") {
+          const sid = event.properties && event.properties.sessionID;
+          const args = ["checkpoint", "capture", "--harness", "opencode", "--reason", "hook"];
+          if (sid) args.push("--session", String(sid));
+          await runConductor($, cwd, args);
         }
       } catch (_) {
         // never let a coordination hiccup surface as an editor error

@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/privacy"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/privacy"
 )
 
 // `conductor sessions save all` reads GET /v1/projects/{project}/sessions. Unlike presence,

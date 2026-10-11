@@ -11,6 +11,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -281,4 +282,23 @@ func Query(pairs ...string) string {
 		return ""
 	}
 	return "?" + values.Encode()
+}
+
+// LocalSession is what POST /v1/local/session returns.
+type LocalSession struct {
+	Token     string    `json:"token"`
+	Handle    string    `json:"handle"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// LocalSignIn asks a control plane on this machine for a token for its owner, without one.
+// It works only from loopback, against a daemon in local security mode; anything else is an
+// *APIError explaining why (code local_login_disabled, not_local, or no_owner).
+func LocalSignIn(ctx context.Context, endpoint, clientName string) (LocalSession, error) {
+	var out LocalSession
+	err := New(endpoint, "").Post(ctx, "/v1/local/session", map[string]string{"client": clientName}, &out)
+	if err == nil && out.Token == "" {
+		err = errors.New("the control plane returned no token")
+	}
+	return out, err
 }

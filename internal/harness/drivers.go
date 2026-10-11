@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // HarnessConfig lets an operator override how a harness is invoked without a code change.
@@ -24,6 +24,17 @@ type HarnessConfig struct {
 	ArgTemplate []string `yaml:"arg_template" json:"arg_template"`
 	// StdinInstruction sends the task card on stdin rather than as an argument.
 	StdinInstruction *bool `yaml:"stdin_instruction" json:"stdin_instruction"`
+	// MCPServers are extra MCP servers the runner merges into the generated config for an
+	// attempt this harness drives. The conductor server is added last and wins, so nothing
+	// here can displace the agent's own coordination channel.
+	MCPServers map[string]MCPServer `yaml:"mcp_servers" json:"mcp_servers"`
+}
+
+// MCPServer is one stdio MCP server entry, in the shape an mcp.json already uses.
+type MCPServer struct {
+	Command string            `yaml:"command" json:"command"`
+	Args    []string          `yaml:"args" json:"args,omitempty"`
+	Env     map[string]string `yaml:"env" json:"env,omitempty"`
 }
 
 // NewClaudeDriver drives Claude Code in headless mode.
@@ -82,10 +93,12 @@ func NewCodexDriver(cfg HarnessConfig) *ProcessDriver {
 		command = "codex"
 	}
 	return &ProcessDriver{
-		Kind:             "codex",
-		Command:          command,
-		VersionArgs:      []string{"--version"},
-		Adapt:            genericAdapter,
+		Kind:        "codex",
+		Command:     command,
+		VersionArgs: []string{"--version"},
+		// Codex's stream is typed (thread/turn/item events); the generic adapter read any
+		// type containing "complete" as the end of the run, which every item.completed is.
+		NewAdapt:         newCodexAdapter,
 		StdinInstruction: stdinDefault(cfg, true),
 		Caps: Capabilities{
 			Kind: "codex", SupportsMCP: true, SupportsJSON: true, SupportsEffort: true,

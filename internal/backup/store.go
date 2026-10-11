@@ -2,6 +2,7 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -191,4 +192,64 @@ func isTrue(s string) bool {
 		return true
 	}
 	return false
+}
+
+// Checkpoints are the one artifact this store carries that contains a conversation, so they
+// travel sealed (internal/checkpoint.Seal) and the store refuses an unsealed one. They are
+// keyed by checkpoint id rather than by machine, because moving between machines is their
+// purpose: a bundle pushed from a laptop is pulled onto a workstation under the same key.
+//
+//	<prefix>/checkpoints/<id>.json   an index entry, in the clear: id, time, harness, size
+//	<prefix>/checkpoints/<id>.ckpt   the sealed bundle, manifest included
+//
+// The index entry is deliberately not the manifest. A manifest carries the harness's title
+// for the conversation, the note, the working directory, the repository, and the machine
+// name: no transcript, but plenty about what someone was doing, which is content.
+
+// ErrUnsealed is returned when a caller tries to push a plaintext checkpoint.
+var ErrUnsealed = errors.New("refusing to upload an unsealed checkpoint; set CONDUCTOR_CHECKPOINT_KEY")
+
+// PutCheckpoint uploads a sealed bundle and its index entry (checkpoint.IndexEntry).
+func (s *Store) PutCheckpoint(ctx context.Context, id string, index, sealed []byte, isSealed func([]byte) bool) error {
+	if isSealed != nil && !isSealed(sealed) {
+		return ErrUnsealed
+	}
+	if err := s.s3.Put(ctx, s.checkpointKey(id, ".ckpt"), sealed, "application/octet-stream"); err != nil {
+		return err
+	}
+	return s.s3.Put(ctx, s.checkpointKey(id, ".json"), index, "application/json")
+}
+
+// GetCheckpoint downloads a sealed bundle. ErrNotFound when there is none.
+func (s *Store) GetCheckpoint(ctx context.Context, id string) ([]byte, error) {
+	return s.s3.Get(ctx, s.checkpointKey(id, ".ckpt"))
+}
+
+// GetCheckpointManifest downloads a checkpoint's index entry. ErrNotFound when there is none.
+func (s *Store) GetCheckpointManifest(ctx context.Context, id string) ([]byte, error) {
+	return s.s3.Get(ctx, s.checkpointKey(id, ".json"))
+}
+
+// ListCheckpoints returns the ids of every checkpoint under the prefix, sorted.
+func (s *Store) ListCheckpoints(ctx context.Context) ([]string, error) {
+	keys, err := s.s3.List(ctx, s.prefix+"/checkpoints/")
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for _, k := range keys {
+		if strings.HasSuffix(k, ".json") {
+			ids = append(ids, strings.TrimSuffix(k[strings.LastIndex(k, "/")+1:], ".json"))
+		}
+	}
+	return ids, nil
+}
+
+// CheckpointLocation is the s3 URI checkpoints live under, for display.
+func (s *Store) CheckpointLocation() string {
+	return fmt.Sprintf("s3://%s/%s/checkpoints/", s.s3.cfg.Bucket, s.prefix)
+}
+
+func (s *Store) checkpointKey(id, ext string) string {
+	return s.prefix + "/checkpoints/" + sanitizeMachine(id) + ext
 }

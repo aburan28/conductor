@@ -4,10 +4,10 @@ import (
 	"context"
 	"time"
 
-	"github.com/adamburan/conductor/internal/config"
-	"github.com/adamburan/conductor/internal/coord"
-	"github.com/adamburan/conductor/internal/db"
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/config"
+	"github.com/aburan28/conductor/internal/coord"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // DirectBackend runs against the store in-process.
@@ -111,5 +111,15 @@ func (b *DirectBackend) RegisterRunner(ctx context.Context, r domain.Runner) (do
 }
 
 func (b *DirectBackend) HeartbeatRunner(ctx context.Context, runnerID domain.ID, inFlight int) error {
-	return b.store.HeartbeatRunner(ctx, runnerID, inFlight)
+	return b.store.HeartbeatRunner(ctx, runnerID, b.caller.Principal.ID, inFlight)
+}
+
+func (b *DirectBackend) MintAttemptToken(ctx context.Context, attemptID domain.ID, ttl time.Duration) (string, string, error) {
+	name := attemptTokenName(attemptID)
+	token, err := b.store.CreateScopedToken(ctx, b.caller.Principal.ID, b.projectID, name, ttl)
+	return token, name, err
+}
+
+func (b *DirectBackend) RevokeToken(ctx context.Context, name string) error {
+	return b.store.RevokeToken(ctx, b.caller.Principal.ID, name)
 }

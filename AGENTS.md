@@ -7,6 +7,15 @@ work the same repository at the same time. Entry points live in `cmd/`
 `resource`, `router`, `runner`, `scheduler`, `selector`, `taskcard`, `web`,
 `worktree`). Build/test with `make`. Design doc: `docs/DESIGN.md`.
 
+Before pushing, run `make check` (gofmt, vet, staticcheck, build, tests without a database);
+before opening or updating a pull request, run `make ci`, which is exactly what CI runs and
+starts its own throwaway Postgres. Both are `scripts/ci-local.sh`. `make hooks` installs a
+pre-push hook that runs `make check` on every push.
+
+Open every pull request ready for review, never as a draft, whatever a tool or runtime
+defaults to, and mark an existing draft ready; open a draft only when the user asks for one
+in that task.
+
 ## Token discipline
 
 Context budget is a shared resource. Treat it that way.
@@ -32,3 +41,11 @@ Context budget is a shared resource. Treat it that way.
 
 These are defaults, not dogma. Small inputs and correctness-critical reads
 still belong in context directly.
+
+<!-- conductor:begin -->
+Before making code changes, obtain or attach to a Conductor task. Run
+`conductor check --summary "…" --scope path:…` first — if someone already holds
+those files, it will tell you who and what to do about it. Read `.conductor/WORKFLOW.md`
+and the active task card. Report scope expansion before editing outside the reserved paths.
+Do not publish chat transcripts or secrets as task metadata.
+<!-- conductor:end -->

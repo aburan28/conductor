@@ -7,9 +7,15 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/privacy"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/metrics"
+	"github.com/aburan28/conductor/internal/privacy"
 )
+
+// eventsWritten counts events inserted. It counts at insert time, so an event whose
+// transaction later rolls back is still counted; the rate, not the exact total, is the signal.
+var eventsWritten = metrics.Default.NewCounter("conductor_events_written_total",
+	"Domain events written, by event type.", "type")
 
 // eventSpec is one event to append. Payloads pass through the privacy allowlist before they
 // are stored, so an event type that carries an unexpected key is narrowed at the boundary
@@ -27,6 +33,12 @@ type eventSpec struct {
 // Being in the same transaction as the state change is the point (DESIGN.md §23.3): an event
 // that describes a claim that did not commit would drive dashboards and integrations into a
 // state the ledger never had.
+//
+// The consumer of outbox_events is the notifications relay (internal/notify): it claims the
+// undelivered rows of projects that have a notification channel, sends them, and sets
+// delivered_at. Retention (Store.Prune) bounds the table: delivered rows go after the event
+// retention window, and undelivered rows — those of projects with no channel, which the relay
+// never claims — after a longer cap.
 func appendEvents(ctx context.Context, tx pgx.Tx, orgID, projectID, actor domain.ID, specs ...eventSpec) error {
 	for _, spec := range specs {
 		payload, dropped := privacy.SanitizeEventPayload(spec.payload)
@@ -86,7 +98,10 @@ func insertEventWithSequence(
 				 WHERE aggregate_type = $1 AND aggregate_id = $2::uuid
 				 ORDER BY sequence_number DESC LIMIT 1`,
 				spec.aggregateType, spec.aggregateID); err == nil {
-				return sp.Commit(ctx)
+				if err = sp.Commit(ctx); err == nil {
+					eventsWritten.Inc(spec.eventType)
+				}
+				return err
 			}
 		}
 		_ = sp.Rollback(ctx)

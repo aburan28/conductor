@@ -254,7 +254,7 @@ func vllmPullHint(vllm []string) string {
 func dbUnit(o Options) string {
 	return fmt.Sprintf(`[Unit]
 Description=Conductor — postgres (control-plane database)
-Documentation=https://github.com/adamburan/conductor
+Documentation=https://github.com/aburan28/conductor
 After=network-online.target
 Wants=network-online.target
 
@@ -294,7 +294,7 @@ func planeUnit(o Options) string {
 	}
 	return fmt.Sprintf(`[Unit]
 Description=Conductor — control plane (conductord)
-Documentation=https://github.com/adamburan/conductor
+Documentation=https://github.com/aburan28/conductor
 After=%s
 Wants=network-online.target
 %s
@@ -333,7 +333,7 @@ func vllmUnit(o Options, variant string) string {
 	}
 	return fmt.Sprintf(`[Unit]
 Description=Conductor — local vLLM (%s) for OpenCode
-Documentation=https://github.com/adamburan/conductor
+Documentation=https://github.com/aburan28/conductor
 After=network-online.target
 Wants=network-online.target
 

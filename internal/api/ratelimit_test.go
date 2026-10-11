@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -100,13 +101,37 @@ func TestClientKeyIgnoresForwardedHeaderUnlessBehindProxy(t *testing.T) {
 	}
 }
 
-func TestClientKeyTakesLeftmostForwardedEntry(t *testing.T) {
+// The left-most entry is whatever the client sent; only the right-most was written by the
+// trusted proxy. Keying on the left-most let a client pick a fresh throttle bucket per
+// request by prefixing an address of its own, so this used to assert the opposite.
+func TestClientKeyTakesRightmostForwardedEntry(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/v1/whoami", nil)
 	r.RemoteAddr = "10.0.0.5:44321"
-	// A proxy appends as it forwards, so the original client is left-most.
-	r.Header.Set("X-Forwarded-For", " 1.2.3.4 , 10.0.0.1")
+	r.Header.Set("X-Forwarded-For", " 6.6.6.6 , 1.2.3.4 ")
 	if got := clientKey(r, true); got != "1.2.3.4" {
-		t.Errorf("clientKey = %q, want 1.2.3.4", got)
+		t.Errorf("clientKey = %q, want the proxy-appended 1.2.3.4", got)
+	}
+	// Several headers form one list; the last element of the last header is the proxy's.
+	r.Header.Set("X-Forwarded-For", "6.6.6.6")
+	r.Header.Add("X-Forwarded-For", "7.7.7.7, 1.2.3.4")
+	if got := clientKey(r, true); got != "1.2.3.4" {
+		t.Errorf("clientKey over several headers = %q, want 1.2.3.4", got)
+	}
+}
+
+// A client that rotates a spoofed prefix must still land in one bucket and get throttled.
+func TestSpoofedForwardedPrefixDoesNotEscapeTheLimiter(t *testing.T) {
+	l := newAuthLimiter()
+	for i := 0; i < authFailureBudget+1; i++ {
+		r := httptest.NewRequest(http.MethodGet, "/v1/whoami", nil)
+		r.RemoteAddr = "10.0.0.5:44321"
+		r.Header.Set("X-Forwarded-For", fmt.Sprintf("203.0.113.%d, 1.2.3.4", i))
+		l.fail(clientKey(r, true))
+	}
+	r := httptest.NewRequest(http.MethodGet, "/v1/whoami", nil)
+	r.Header.Set("X-Forwarded-For", "198.51.100.77, 1.2.3.4")
+	if ok, _ := l.allow(clientKey(r, true)); ok {
+		t.Error("a rotating spoofed X-Forwarded-For prefix escaped the failure throttle")
 	}
 }
 
