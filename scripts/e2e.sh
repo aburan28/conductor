@@ -26,14 +26,22 @@ PROJECT="demo-$SUFFIX"
 SERVER_PID=""
 MESH_PIDS=""
 cleanup() {
+  local status=$?
   [[ -n "$SERVER_PID" ]] && kill "$SERVER_PID" 2>/dev/null || true
   [[ -n "$MESH_PIDS" ]] && kill $MESH_PIDS 2>/dev/null || true
-  rm -rf "$WORK"
+  if [[ "$status" -eq 0 ]]; then
+    rm -rf "$WORK"
+  else
+    echo "end-to-end failed; diagnostics retained in $WORK" >&2
+  fi
 }
 trap cleanup EXIT
 
 step() { printf '\n\033[1m── %s\033[0m\n' "$*"; }
 note() { printf '   %s\n' "$*"; }
+
+# Unresponsive HTTP must not consume the whole CI budget. Override locally if needed.
+curl() { command curl --connect-timeout 3 --max-time "${CONDUCTOR_E2E_HTTP_TIMEOUT:-15}" "$@"; }
 
 for binary in conductord conductor; do
   [[ -x "$BIN/$binary" ]] || { echo "missing $BIN/$binary — run: make build" >&2; exit 1; }
@@ -81,10 +89,10 @@ note "--no-login leaves the machine alone (bob authenticates via env vars)"
 "$BIN/conductord" --addr "127.0.0.1:$PORT" >"$WORK/conductord.log" 2>&1 &
 SERVER_PID=$!
 for _ in $(seq 1 40); do
-  curl -sf "$ENDPOINT/v1/health" >/dev/null 2>&1 && break
+  curl --max-time 1 -sf "$ENDPOINT/v1/health" >/dev/null 2>&1 && break
   sleep 0.25
 done
-curl -sf "$ENDPOINT/v1/health" >/dev/null || { echo "control plane did not start" >&2; cat "$WORK/conductord.log" >&2; exit 1; }
+curl --max-time 1 -sf "$ENDPOINT/v1/health" >/dev/null || { echo "control plane did not start" >&2; cat "$WORK/conductord.log" >&2; exit 1; }
 note "listening on $ENDPOINT"
 
 alice() { CONDUCTOR_ENDPOINT=$ENDPOINT CONDUCTOR_TOKEN=$ALICE_TOKEN CONDUCTOR_PROJECT=$PROJECT "$BIN/conductor" "$@"; }
@@ -368,7 +376,7 @@ MESH_A="https://127.0.0.1:$MESH_PORT"
 # land before the other one listens. Wait out one probe interval rather than sampling once.
 PEERS=""
 for _ in $(seq 1 30); do
-  PEERS=$(curl -sf --cacert "$MESH_CERTS/ca.pem" -H "Authorization: Bearer $ALICE_TOKEN" "$MESH_A/v1/peers" || true)
+  PEERS=$(curl --max-time 1 -sf --cacert "$MESH_CERTS/ca.pem" -H "Authorization: Bearer $ALICE_TOKEN" "$MESH_A/v1/peers" || true)
   echo "$PEERS" | grep -q '"state": *"up"' && break
   sleep 0.5
 done
