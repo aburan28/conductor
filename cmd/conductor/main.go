@@ -135,6 +135,8 @@ func runCommand(ctx context.Context, name string, args []string) error {
 		return cmdSessions(ctx, args)
 	case "backup":
 		return cmdBackup(ctx, args)
+	case "storage":
+		return cmdStorage(ctx, args)
 	case "checkpoint":
 		return cmdCheckpoint(ctx, args)
 	case "security":

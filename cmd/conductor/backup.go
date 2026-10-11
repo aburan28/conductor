@@ -10,9 +10,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aburan28/conductor/internal/awscreds"
 	"github.com/aburan28/conductor/internal/backup"
 	"github.com/aburan28/conductor/internal/checkpoint"
 	"github.com/aburan28/conductor/internal/localstate"
+	"github.com/aburan28/conductor/internal/storage"
 )
 
 // Off-host backup of this machine's resume records.
@@ -35,8 +37,21 @@ import (
 // whatever comes back is sanitized and marked as restored (sanitizeRestored), so `conductor
 // resume` relaunches only a known harness's own resume invocation, and asks first.
 
-// backupKey is the passphrase that seals backups: the checkpoint passphrase, reused.
-func backupKey() string { return os.Getenv("CONDUCTOR_CHECKPOINT_KEY") }
+// sealEnv is the environment the seal passphrase is read from. A test replaces it.
+var sealEnv = awscreds.Default
+
+// backupKey is the passphrase that seals backups: the checkpoint passphrase, reused. The read
+// runs under ctx, so a shutdown bound covers the Keychain. An error means a passphrase is
+// configured but cannot be read; the caller must stop rather than go on without it.
+func backupKey(ctx context.Context) (string, error) {
+	return storage.SealPassphrase(ctx, sealEnv())
+}
+
+// openSessionStore opens the bucket for session records, honouring storage.json and the
+// CONDUCTOR_BACKUP_S3_* variables (docs/STORAGE.md).
+func openSessionStore() (*backup.Store, bool, error) {
+	return storage.OpenStore(awscreds.Default(), storage.UseSessions)
+}
 
 // errUnsealedBackup is a plaintext manifest pulled while a passphrase is configured: either
 // an old backup, or one someone replaced to strip the seal.
@@ -69,15 +84,16 @@ func cmdBackup(ctx context.Context, args []string) error {
 	}
 }
 
-// openBackup builds the configured Store, or explains that backup is not configured.
-func openBackup() (*backup.Store, error) {
-	store, enabled, err := backup.FromEnv(os.Getenv)
+// openBackup opens the bucket for one use (storage.UseSessions or UseCheckpoints), or
+// explains that it is not configured.
+func openBackup(use string) (*backup.Store, error) {
+	store, enabled, err := storage.OpenStore(awscreds.Default(), use)
 	if err != nil {
 		return nil, err
 	}
 	if !enabled {
-		return nil, errors.New("off-host backup is not configured. Set CONDUCTOR_BACKUP_S3_BUCKET " +
-			"(and AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY, plus CONDUCTOR_BACKUP_S3_REGION) to enable it")
+		return nil, fmt.Errorf("no bucket is configured for %s (or %s are turned off for it). "+
+			"Choose one with `conductor storage set`, or set CONDUCTOR_BACKUP_S3_BUCKET", use, use)
 	}
 	return store, nil
 }
@@ -100,7 +116,7 @@ Flags:
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	store, err := openBackup()
+	store, err := openBackup(storage.UseSessions)
 	if err != nil {
 		return err
 	}
@@ -128,7 +144,11 @@ func pushRecords(ctx context.Context, store *backup.Store, at time.Time) (int, e
 	if err != nil {
 		return 0, err
 	}
-	if key := backupKey(); key != "" {
+	key, err := backupKey(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if key != "" {
 		if data, err = checkpoint.Seal(data, key); err != nil {
 			return 0, err
 		}
@@ -180,7 +200,7 @@ Flags:
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	store, err := openBackup()
+	store, err := openBackup(storage.UseSessions)
 	if err != nil {
 		return err
 	}
@@ -210,11 +230,16 @@ func pullRecordsWith(ctx context.Context, store *backup.Store, force, allowUnsea
 	if err != nil {
 		return 0, err
 	}
-	key := backupKey()
+	key, err := backupKey(ctx)
+	if err != nil {
+		return 0, err
+	}
 	switch {
 	case checkpoint.IsSealed(data):
 		if key == "" {
-			return 0, errors.New("the backup in S3 is sealed; set CONDUCTOR_CHECKPOINT_KEY to the passphrase it was pushed with")
+			return 0, errors.New("the backup in S3 is sealed, but no checkpoint passphrase is configured: set " +
+				"CONDUCTOR_CHECKPOINT_KEY to the passphrase it was pushed with (on macOS, the Keychain item " +
+				"dev.conductor.seal/default works too)")
 		}
 		if data, err = checkpoint.Unseal(data, key); err != nil {
 			return 0, fmt.Errorf("backup: %w", err)
@@ -300,7 +325,7 @@ func backupStatus(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	store, enabled, err := backup.FromEnv(os.Getenv)
+	store, enabled, err := openSessionStore()
 	if err != nil {
 		return err
 	}
@@ -308,9 +333,9 @@ func backupStatus(ctx context.Context, args []string) error {
 		if *asJSON {
 			return emit(map[string]any{"enabled": false})
 		}
-		fmt.Println("Off-host backup: not configured.")
-		fmt.Println("Enable it by setting CONDUCTOR_BACKUP_S3_BUCKET, CONDUCTOR_BACKUP_S3_REGION,")
-		fmt.Println("and AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY. Then `conductor backup push`.")
+		fmt.Println("Off-host backup: not configured, or sessions are turned off for the bucket.")
+		fmt.Println("Choose a bucket with `conductor storage set` (see `conductor storage show`),")
+		fmt.Println("then `conductor backup push`.")
 		return nil
 	}
 	snaps, err := store.ListSnapshots(ctx)
@@ -338,7 +363,7 @@ func backupStatus(ctx context.Context, args []string) error {
 // best-effort and tightly bounded: a shutdown must not wait on the network, and a machine
 // with no backup configured does nothing at all.
 func backupOnShutdown(_ localstate.Record) {
-	store, enabled, err := backup.FromEnv(os.Getenv)
+	store, enabled, err := openSessionStore()
 	if err != nil || !enabled {
 		return
 	}
@@ -353,7 +378,7 @@ func backupOnShutdown(_ localstate.Record) {
 // A failure is reported but never fails the save: the local records are already written, which
 // is what makes the machine itself resumable.
 func maybeBackupAfterSave(ctx context.Context) {
-	store, enabled, err := backup.FromEnv(os.Getenv)
+	store, enabled, err := openSessionStore()
 	if err != nil || !enabled {
 		return
 	}
@@ -371,7 +396,7 @@ func maybeRestoreBeforeResume(ctx context.Context) {
 	if err != nil || len(local) > 0 {
 		return
 	}
-	store, enabled, err := backup.FromEnv(os.Getenv)
+	store, enabled, err := openSessionStore()
 	if err != nil || !enabled {
 		return
 	}

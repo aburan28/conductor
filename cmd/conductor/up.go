@@ -298,7 +298,10 @@ func ensurePostgresContainer(port, password string) error {
 		}
 		return nil
 	}
-	if !strings.Contains(string(out), "No such object") {
+	// Docker 29 prints "error: no such object"; earlier CLIs print "Error: No such object"
+	// or "No such container". A case-sensitive match treats the missing container as a
+	// fatal inspect failure and never recreates it.
+	if !dockerNotFound(string(out)) {
 		return fmt.Errorf("docker inspect conductor-db: %v\n%s", err, out)
 	}
 	if password == "" {
@@ -315,6 +318,16 @@ func ensurePostgresContainer(port, password string) error {
 		return fmt.Errorf("docker run conductor-db: %v\n%s", err, out)
 	}
 	return nil
+}
+
+// dockerNotFound reports a Docker CLI "not found" error. The spelling and capitalization
+// differ across CLI versions: "No such object", "no such object", "No such container",
+// and "no such volume".
+func dockerNotFound(output string) bool {
+	low := strings.ToLower(output)
+	return strings.Contains(low, "no such object") ||
+		strings.Contains(low, "no such container") ||
+		strings.Contains(low, "no such volume")
 }
 
 // warnIfPublished tells the operator when an existing conductor-db container publishes its

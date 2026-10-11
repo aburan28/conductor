@@ -3,15 +3,19 @@ package backup
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/aburan28/conductor/internal/backup/s3fake"
 )
 
 // fakeS3 is an in-memory, path-style S3 that records the requests it receives, so the client's
@@ -48,6 +52,7 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		body, ok := f.obj[key]
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `<Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message></Error>`)
 			return
 		}
 		_, _ = w.Write(body)
@@ -315,5 +320,174 @@ func TestPlainHTTPEndpointNeedsInsecure(t *testing.T) {
 	}
 	if err := testClient(srv).Put(context.Background(), "k", []byte("x"), "text/plain"); err != nil {
 		t.Errorf("Put over http with Insecure: %v", err)
+	}
+}
+
+// A missing bucket is a 404 too, with the code NoSuchBucket. It is an error, not "nothing to
+// restore", and a missing key is still ErrNotFound.
+func TestMissingBucketIsAnErrorAndMissingKeyIsNotFound(t *testing.T) {
+	fake := s3fake.New("real-bucket")
+	defer fake.Close()
+	u, _ := url.Parse(fake.URL)
+	ctx := context.Background()
+	typo := New(S3Config{Bucket: "typo-bucket", Region: "us-east-1", AccessKey: "AK", SecretKey: "SK",
+		Endpoint: "http://" + u.Host, PathStyle: true, Insecure: true})
+	if _, err := typo.Get(ctx, "conductor/machines/m/sessions.json"); err == nil || errors.Is(err, ErrNotFound) ||
+		!strings.Contains(err.Error(), "NoSuchBucket") {
+		t.Fatalf("a missing bucket read as %v; want a NoSuchBucket error", err)
+	}
+	real := New(S3Config{Bucket: "real-bucket", Region: "us-east-1", AccessKey: "AK", SecretKey: "SK",
+		Endpoint: "http://" + u.Host, PathStyle: true, Insecure: true})
+	if _, err := real.Get(ctx, "conductor/machines/m/sessions.json"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a missing key = %v; want ErrNotFound", err)
+	}
+}
+
+// A GET returns the object whole up to the 128 MiB cap, and an object over it is an error, never
+// a silently cut-off prefix.
+type zeros struct{}
+
+func (zeros) Read(p []byte) (int, error) { clear(p); return len(p), nil }
+
+func TestGetRefusesAnObjectOverTheCap(t *testing.T) {
+	const limit = 128 << 20
+	for _, size := range []int64{limit, limit + 1} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+			_, _ = io.CopyN(w, zeros{}, size)
+		}))
+		body, err := testClient(srv).Get(context.Background(), "sessions/big.ckpt")
+		srv.Close()
+		if size == limit && (err != nil || int64(len(body)) != limit) {
+			t.Fatalf("an object of exactly the cap: %d bytes, %v; want all %d", len(body), err, limit)
+		}
+		if size > limit && err == nil {
+			t.Fatalf("an object of %d bytes was accepted; want an error over the %d-byte cap", size, limit)
+		}
+	}
+}
+
+// deadlineTransport records the deadline each request carries and answers 200 with a small body.
+type deadlineTransport struct {
+	deadline time.Time
+	set      bool
+}
+
+func (d *deadlineTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	d.deadline, d.set = r.Context().Deadline()
+	return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{},
+		Body: io.NopCloser(strings.NewReader("ok")), Request: r}, nil
+}
+
+// The client used to carry a fixed 30 s Timeout, which bounds a whole exchange, body included,
+// so a large checkpoint on a slow link failed. Each request now carries its own deadline: a floor
+// of 30 s plus its size at the slowest rate assumed, 256 KiB/s.
+func TestRequestDeadlineScalesWithTheBody(t *testing.T) {
+	c := New(S3Config{Bucket: "b", Region: "us-east-1", AccessKey: "AK", SecretKey: "SK",
+		Endpoint: "http://127.0.0.1:1", PathStyle: true, Insecure: true})
+	if c.http.Timeout != 0 {
+		t.Fatalf("the client's own timeout is %v; it bounds whole transfers", c.http.Timeout)
+	}
+	tr := &deadlineTransport{}
+	c.http.Transport = tr
+	ctx := context.Background()
+
+	start := time.Now()
+	if err := c.Put(ctx, "k", make([]byte, 64<<20), "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+	if !tr.set {
+		t.Fatal("an upload carried no deadline")
+	}
+	const wantPut = 30*time.Second + 256*time.Second // 64 MiB at 256 KiB/s, plus the floor
+	if got := tr.deadline.Sub(start); got < wantPut-5*time.Second || got > wantPut+5*time.Second {
+		t.Fatalf("a 64 MiB upload has a deadline %v away; want about %v", got, wantPut)
+	}
+
+	// A download's size is not known until it arrives, so it is allowed the largest object.
+	start = time.Now()
+	if _, err := c.Get(ctx, "k"); err != nil {
+		t.Fatal(err)
+	}
+	if !tr.set {
+		t.Fatal("a download carried no deadline")
+	}
+	const wantGet = 30*time.Second + 512*time.Second // 128 MiB at 256 KiB/s, plus the floor
+	if got := tr.deadline.Sub(start); got < wantGet-5*time.Second || got > wantGet+5*time.Second {
+		t.Fatalf("a download has a deadline %v away; want about %v", got, wantGet)
+	}
+}
+
+// slowBody streams its bytes in small pieces with a pause between them, like a slow link, and
+// fails if the request's context ends before it is read to the end.
+type slowBody struct {
+	ctx  context.Context
+	left int
+}
+
+func (b *slowBody) Read(p []byte) (int, error) {
+	if err := b.ctx.Err(); err != nil {
+		return 0, err
+	}
+	if b.left == 0 {
+		return 0, io.EOF
+	}
+	time.Sleep(20 * time.Millisecond)
+	n := min(len(p), 4096, b.left)
+	clear(p[:n])
+	b.left -= n
+	return n, nil
+}
+
+// The response body of a GET is read after the call has its headers, so the request's deadline
+// must stay live until the body is read. A slow body must arrive whole.
+func TestSlowDownloadArrivesWhole(t *testing.T) {
+	c := New(S3Config{Bucket: "b", Region: "us-east-1", AccessKey: "AK", SecretKey: "SK",
+		Endpoint: "http://127.0.0.1:1", PathStyle: true, Insecure: true})
+	c.http.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{},
+			Body: io.NopCloser(&slowBody{ctx: r.Context(), left: 64 << 10}), Request: r}, nil
+	})
+	body, err := c.Get(context.Background(), "k")
+	if err != nil || len(body) != 64<<10 {
+		t.Fatalf("slow download = %d bytes, %v; want all 65536", len(body), err)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// A listing of more than one page (the server returns 1000 keys at most) is followed to its end.
+// List used to read the first page and ignore IsTruncated.
+func TestListFollowsEveryPage(t *testing.T) {
+	fake := s3fake.New("conductor-test")
+	defer fake.Close()
+	const n = 1005
+	for i := 0; i < n; i++ {
+		fake.Put(fmt.Sprintf("sessions/snap-%05d.json", i), []byte("x"))
+	}
+	fake.Put("other/ignored.json", []byte("x"))
+	u, _ := url.Parse(fake.URL)
+	c := New(S3Config{Bucket: "conductor-test", Region: "us-east-1", AccessKey: "AK", SecretKey: "SK",
+		Endpoint: "http://" + u.Host, PathStyle: true, Insecure: true})
+	keys, err := c.List(context.Background(), "sessions/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != n || keys[0] != "sessions/snap-00000.json" || keys[n-1] != fmt.Sprintf("sessions/snap-%05d.json", n-1) {
+		t.Fatalf("List returned %d keys (first %q, last %q); want all %d", len(keys), keys[0], keys[len(keys)-1], n)
+	}
+}
+
+// A server that keeps answering with the same continuation token must not make List loop.
+func TestListStopsOnARepeatedToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `<ListBucketResult><IsTruncated>true</IsTruncated>`+
+			`<NextContinuationToken>same</NextContinuationToken><Contents><Key>a</Key></Contents></ListBucketResult>`)
+	}))
+	defer srv.Close()
+	if keys, err := testClient(srv).List(context.Background(), ""); err == nil {
+		t.Fatalf("a repeating listing returned %v; want an error", keys)
 	}
 }
