@@ -866,7 +866,7 @@ into whatever you drive:
 ```bash
 conductor integrate claude        # Claude Code: .mcp.json + PreToolUse/SessionStart hooks
 conductor integrate cursor        # Cursor: .cursor/mcp.json + a rules file
-conductor integrate codex         # Codex: ~/.codex/config.toml
+conductor integrate codex         # Codex: ~/.codex/config.toml + .codex/hooks.json (apply_patch checked) + AGENTS.md
 conductor integrate opencode      # OpenCode: opencode.json + a pre-tool plugin
 conductor integrate all           # every tool this machine has
 ```
@@ -874,6 +874,11 @@ conductor integrate all           # every tool this machine has
 Also supported: `windsurf`, `vscode`, `zed`, `gemini`. Each merges into the tool's own config
 without disturbing anything else already there, and `--print` shows exactly what it would write
 before it writes it. `conductor doctor` reports which tools are connected.
+
+Codex edits files through `apply_patch`, so its pre-edit hook checks every file a patch adds,
+updates, deletes or moves, and blocks the patch if any one of them is held. Codex runs a
+project's `.codex/hooks.json` only once the project is trusted, so accept its trust prompt the
+first time it opens the repository.
 
 Every write is idempotent and never puts a bearer token into a project file that could be
 committed: stdio configs need no token (the `conductor-mcp` binary reads your saved login), and
@@ -1037,6 +1042,21 @@ non-destructive:
    library) and works against any S3-compatible store — real S3, MinIO, R2 — via
    `CONDUCTOR_BACKUP_S3_ENDPOINT`. As everywhere else, only coordination metadata travels:
    how to reopen a session, never a transcript. `CONDUCTOR_BACKUP=off` disables it.
+
+**One bucket, configured once.** `conductor storage set` writes `~/.conductor/storage.json`,
+which backup, checkpoints, and the database archive all read, and which the macOS app's
+Settings → Storage pane edits. It signs in to the bucket three ways: an access key (secret
+kept in the macOS Keychain), a profile from `~/.aws` (static keys, IAM Identity Center SSO,
+an assumed role, or `credential_process`), or the environment (AWS_* variables, web
+identity, the ECS task role, the EC2 instance role through IMDSv2). Credentials that expire
+are refreshed. `conductor storage test` signs in and round-trips a probe object, step by
+step. The `CONDUCTOR_BACKUP_S3_*` variables above still work and take precedence. See
+[docs/STORAGE.md](docs/STORAGE.md).
+
+```bash
+conductor storage set --bucket my-team-conductor --region us-east-1 --auth profile --profile dev
+conductor storage test
+```
 
 Wrapped sessions stay honest with the team while paused: the sidecar keeps heartbeating as
 `waiting_for_input`, so presence shows a parked session that is not offered work, rather than

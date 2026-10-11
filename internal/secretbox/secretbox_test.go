@@ -1,6 +1,7 @@
 package secretbox
 
 import (
+	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
@@ -33,7 +34,16 @@ func TestSealRoundTrip(t *testing.T) {
 	if _, err := k.Open(sealed, "something_else"); err == nil {
 		t.Error("a value opened under another purpose")
 	}
-	tampered := sealed[:len(sealed)-2] + "AA"
+	// Flip one bit of the decoded tag. Overwriting the last base64 characters instead is
+	// sometimes no change at all: the final character carries padding bits the decoder
+	// ignores, so about one run in 1024 the "tampered" value was the original.
+	body := sealed[strings.LastIndex(sealed, ".")+1:]
+	raw, err := base64.RawURLEncoding.DecodeString(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw[len(raw)-1] ^= 1
+	tampered := strings.TrimSuffix(sealed, body) + base64.RawURLEncoding.EncodeToString(raw)
 	if _, err := k.Open(tampered, "github_app"); err == nil {
 		t.Error("a tampered value opened")
 	}

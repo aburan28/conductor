@@ -59,7 +59,8 @@ func cmdHook(ctx context.Context, args []string) error {
 
 // hookInput is the subset of a tool's hook payload this command reads. It is deliberately
 // tiny: there is no field for file content or tool arguments beyond a path, so they cannot be
-// decoded even by accident.
+// decoded even by accident. The one exception is a patch (Codex's apply_patch), whose file
+// paths exist only inside the patch text: its header lines are read and the rest discarded.
 type hookInput struct {
 	SessionID     string `json:"session_id"`
 	Cwd           string `json:"cwd"`
@@ -71,10 +72,49 @@ type hookInput struct {
 		NotebookPath  string `json:"notebook_path"`
 		Path          string `json:"path"`
 	} `json:"tool_input"`
+	// patchPaths are the files a patch touches, filled by readHookInput for patch tools.
+	patchPaths []string
 }
 
-func (h hookInput) path() string {
-	return firstNonEmptyString(h.ToolInput.FilePath, h.ToolInput.FilePathCamel, h.ToolInput.NotebookPath, h.ToolInput.Path)
+// paths are the files the tool is about to modify: the one path an edit names, or every file
+// a patch adds, updates, deletes, or moves to.
+func (h hookInput) paths() []string {
+	if p := firstNonEmptyString(h.ToolInput.FilePath, h.ToolInput.FilePathCamel, h.ToolInput.NotebookPath, h.ToolInput.Path); p != "" {
+		return []string{p}
+	}
+	return h.patchPaths
+}
+
+// isPatchTool reports whether a tool carries its edits as a patch rather than a path.
+func isPatchTool(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "apply_patch", "patch":
+		return true
+	}
+	return false
+}
+
+// patchHeaders are the apply_patch lines that name a file; every other line is content.
+var patchHeaders = []string{"*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: "}
+
+// patchFilePaths extracts the file paths from an apply_patch body, in order, without
+// duplicates. Only header lines are examined.
+func patchFilePaths(patch string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, line := range strings.Split(patch, "\n") {
+		line = strings.TrimRight(line, "\r")
+		for _, h := range patchHeaders {
+			if p, ok := strings.CutPrefix(line, h); ok {
+				if p = strings.TrimSpace(p); p != "" && !seen[p] {
+					seen[p] = true
+					out = append(out, p)
+				}
+				break
+			}
+		}
+	}
+	return out
 }
 
 // readHookInput decodes the hook payload from stdin when one was piped in.
@@ -92,6 +132,27 @@ func readHookInput(r io.Reader, isTerminal bool) (hookInput, error) {
 	}
 	if err := json.Unmarshal(body, &in); err != nil {
 		return in, fmt.Errorf("hook input is not JSON: %w", err)
+	}
+	if isPatchTool(in.ToolName) {
+		// The patch text is decoded only here, only for a patch tool, and only its file
+		// paths outlive this function.
+		var raw struct {
+			ToolInput json.RawMessage `json:"tool_input"`
+		}
+		if json.Unmarshal(body, &raw) == nil {
+			var patch struct {
+				Command string `json:"command"`
+				Input   string `json:"input"`
+				Patch   string `json:"patch"`
+			}
+			var text string
+			if json.Unmarshal(raw.ToolInput, &patch) == nil {
+				text = firstNonEmptyString(patch.Command, patch.Input, patch.Patch)
+			} else {
+				_ = json.Unmarshal(raw.ToolInput, &text) // some harnesses pass the patch bare
+			}
+			in.patchPaths = patchFilePaths(text)
+		}
 	}
 	return in, nil
 }
@@ -209,6 +270,7 @@ func hookPreTool(ctx context.Context, args []string) error {
 	requireClaim := fs.Bool("require-claim", false, "block edits from a session that holds no task")
 	autoReserve := fs.Bool("auto-reserve", true, "reserve a file under the session's claim the first time it is edited outside the claimed scope (=false only reports it)")
 	asJSON := fs.Bool("json", false, "print the decision and verdict to stderr")
+	harness := fs.String("harness", "claude", "harness that fired the hook, which decides the output shape (claude, codex)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -218,17 +280,25 @@ func hookPreTool(ctx context.Context, args []string) error {
 		return failOpen(*strict, err.Error())
 	}
 	tool := firstNonEmptyString(*toolFlag, in.ToolName)
-	path := firstNonEmptyString(*pathFlag, in.path())
-	if !isEditTool(tool) || path == "" {
+	paths := in.paths()
+	if *pathFlag != "" {
+		paths = []string{*pathFlag}
+	}
+	if !isEditTool(tool) || len(paths) == 0 {
 		return nil
 	}
 	cwd := in.Cwd
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
-	rel, ok := repoRelative(cwd, path)
-	if !ok {
-		return nil // not inside a repository Conductor knows about
+	var rels []string
+	for _, p := range paths {
+		if rel, ok := repoRelative(cwd, p); ok {
+			rels = append(rels, rel)
+		}
+	}
+	if len(rels) == 0 {
+		return nil // nothing inside a repository Conductor knows about
 	}
 
 	creds := client.LoadCredentials()
@@ -253,50 +323,62 @@ func hookPreTool(ctx context.Context, args []string) error {
 			"`conductor task claim --next`), then edit.")
 	}
 
-	var decision coord.IntentDecision
-	err = api.Post(ctx, "/v1/projects/"+ref+"/intents/check", map[string]any{
-		"summary":      "edit " + rel,
-		"scopes":       []domain.ScopeRequest{{Resource: "path:" + rel, Mode: domain.ModeWriteExclusive}},
-		"exclude_task": excludeTask,
-	}, &decision)
-	if err != nil {
-		return failOpen(*strict, "could not check "+rel+" with Conductor: "+err.Error())
-	}
-
-	verdict := judgePreTool(decision, selfHandle(ctx, api, creds))
-	if *asJSON {
-		_ = json.NewEncoder(os.Stderr).Encode(map[string]any{"decision": decision, "verdict": verdict})
-	}
-	if verdict.Block {
-		return blockEdit(verdict.Message)
+	// A patch can touch several files: every one is checked before any is reserved, and one
+	// blocked file blocks the whole patch, since the tool applies it all or nothing.
+	self := selfHandle(ctx, api, creds)
+	notes := []string{}
+	for _, rel := range rels {
+		var decision coord.IntentDecision
+		err = api.Post(ctx, "/v1/projects/"+ref+"/intents/check", map[string]any{
+			"summary":      "edit " + rel,
+			"scopes":       []domain.ScopeRequest{{Resource: "path:" + rel, Mode: domain.ModeWriteExclusive}},
+			"exclude_task": excludeTask,
+		}, &decision)
+		if err != nil {
+			return failOpen(*strict, "could not check "+rel+" with Conductor: "+err.Error())
+		}
+		verdict := judgePreTool(decision, self)
+		if *asJSON {
+			_ = json.NewEncoder(os.Stderr).Encode(map[string]any{"path": rel, "decision": decision, "verdict": verdict})
+		}
+		if verdict.Block {
+			return blockEdit(verdict.Message)
+		}
+		if verdict.Warning != "" {
+			notes = append(notes, verdict.Warning)
+		}
 	}
 
 	// The edit goes ahead. What remains is making it visible: an edit outside the claim's
 	// scope is scope expansion, and an edit with no claim at all is invisible to everyone.
-	notes := []string{}
-	if verdict.Warning != "" {
-		notes = append(notes, verdict.Warning)
-	}
 	if hasClaim {
-		if note := expandOwnScope(ctx, api, claim, rel, *autoReserve); note != "" {
-			notes = append(notes, note)
+		for _, rel := range rels {
+			if note := expandOwnScope(ctx, api, claim, rel, *autoReserve); note != "" {
+				notes = append(notes, note)
+			}
 		}
 	} else if note := unclaimedEditNote(sessionID, cwd); note != "" {
 		notes = append(notes, note)
 	}
 	if len(notes) > 0 {
 		// Exit 0 with a JSON body: the edit proceeds and the model sees the notes.
-		text := strings.Join(notes, " ")
-		out := map[string]any{"hookSpecificOutput": map[string]any{
-			"hookEventName":            "PreToolUse",
-			"permissionDecision":       "allow",
-			"permissionDecisionReason": text,
-			"additionalContext":        text,
-		}}
-		body, _ := json.Marshal(out)
-		fmt.Println(string(body))
+		fmt.Println(preToolNotes(*harness, strings.Join(notes, " ")))
 	}
 	return nil
+}
+
+// preToolNotes is the exit-0 body that lets an edit through with notes the model reads.
+// Claude Code takes an explicit allow with a reason; Codex accepts only additionalContext on
+// an allowed call and marks a hook that sends permissionDecision without updatedInput as
+// failed, so it gets the context alone.
+func preToolNotes(harness, text string) string {
+	specific := map[string]any{"hookEventName": "PreToolUse", "additionalContext": text}
+	if checkpoint.NormalizeHarness(harness) != "codex" {
+		specific["permissionDecision"] = "allow"
+		specific["permissionDecisionReason"] = text
+	}
+	body, _ := json.Marshal(map[string]any{"hookSpecificOutput": specific})
+	return string(body)
 }
 
 // claimFromEnv finds the claim this hook's session is working under: a runner-launched
@@ -609,6 +691,12 @@ func hookSessionStart(ctx context.Context, args []string) error {
 // hookSessionEnd closes a bare session's presence record. A session launched through
 // `conductor wrap` is closed by the wrapper itself and is left alone here.
 func hookSessionEnd(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("hook session-end", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	harness := fs.String("harness", "", "harness that fired the hook (default: claude, or CONDUCTOR_HARNESS)")
+	if fs.Parse(args) == nil && *harness != "" {
+		os.Setenv("CONDUCTOR_HARNESS", *harness)
+	}
 	// The transcript is complete now: the last checkpoint of this session, forced past the
 	// rate limit but still skipped when nothing changed.
 	hookCheckpointFromStdin(ctx, true)
