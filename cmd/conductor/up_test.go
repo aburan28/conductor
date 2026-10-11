@@ -166,6 +166,30 @@ func TestResolveDSNGeneratesAndPersistsAPassword(t *testing.T) {
 	}
 }
 
+func TestDockerNotFound(t *testing.T) {
+	for _, out := range []string{
+		"Error: No such object: conductor-db\n",
+		"error: no such object: conductor-db\n",
+		"Error: No such container: conductor-db\n",
+		"error: no such container: conductor-db\n",
+		"Error: No such volume: conductor-pgdata\n",
+		"error: no such volume: conductor_conductor-pgdata\n",
+	} {
+		if !dockerNotFound(out) {
+			t.Errorf("dockerNotFound(%q) = false, want true", out)
+		}
+	}
+	for _, out := range []string{
+		"",
+		"Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
+		"permission denied while trying to connect to the Docker daemon socket",
+	} {
+		if dockerNotFound(out) {
+			t.Errorf("dockerNotFound(%q) = true, want false", out)
+		}
+	}
+}
+
 func TestPublishedBeyondLoopback(t *testing.T) {
 	for in, want := range map[string]bool{
 		"":                   false,

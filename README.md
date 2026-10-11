@@ -862,7 +862,7 @@ into whatever you drive:
 ```bash
 conductor integrate claude        # Claude Code: .mcp.json + PreToolUse/SessionStart hooks
 conductor integrate cursor        # Cursor: .cursor/mcp.json + a rules file
-conductor integrate codex         # Codex: ~/.codex/config.toml
+conductor integrate codex         # Codex: ~/.codex/config.toml + .codex/hooks.json (apply_patch checked) + AGENTS.md
 conductor integrate opencode      # OpenCode: opencode.json + a pre-tool plugin
 conductor integrate all           # every tool this machine has
 ```
@@ -870,6 +870,11 @@ conductor integrate all           # every tool this machine has
 Also supported: `windsurf`, `vscode`, `zed`, `gemini`. Each merges into the tool's own config
 without disturbing anything else already there, and `--print` shows exactly what it would write
 before it writes it. `conductor doctor` reports which tools are connected.
+
+Codex edits files through `apply_patch`, so its pre-edit hook checks every file a patch adds,
+updates, deletes or moves, and blocks the patch if any one of them is held. Codex runs a
+project's `.codex/hooks.json` only once the project is trusted, so accept its trust prompt the
+first time it opens the repository.
 
 Every write is idempotent and never puts a bearer token into a project file that could be
 committed: stdio configs need no token (the `conductor-mcp` binary reads your saved login), and
