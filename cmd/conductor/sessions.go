@@ -40,7 +40,7 @@ var discoverSessions = localstate.Discover
 
 func cmdSessions(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: conductor sessions <save|list|discover|import|export|install-hook>")
+		return errors.New("usage: conductor sessions <save|list|discover|scan|install-scan|import|export|install-hook>")
 	}
 	sub, rest := args[0], args[1:]
 
@@ -53,6 +53,10 @@ func cmdSessions(ctx context.Context, args []string) error {
 		return sessionsExport(ctx, rest)
 	case "discover":
 		return sessionsDiscover(ctx, rest)
+	case "scan":
+		return sessionsScan(ctx, rest)
+	case "install-scan":
+		return sessionsInstallScan(ctx, rest)
 	case "import":
 		return sessionsImport(ctx, rest)
 	case "install-hook":
@@ -60,6 +64,194 @@ func cmdSessions(ctx context.Context, args []string) error {
 	default:
 		return fmt.Errorf("unknown sessions subcommand %q", sub)
 	}
+}
+
+func externalWorkspace(ctx context.Context, override string) (string, error) {
+	if override != "" {
+		return filepath.Abs(override)
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if root, err := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel").Output(); err == nil {
+		return strings.TrimSpace(string(root)), nil
+	}
+	return wd, nil
+}
+
+// scan refreshes owner-local metadata state. Schedulers call this command directly.
+func sessionsScan(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("sessions scan", flag.ExitOnError)
+	since := fs.Duration("since", 7*24*time.Hour, "look back this far; 0 scans all saved records")
+	workspace := fs.String("workspace", "", "repository whose project configs to include")
+	stateDir := fs.String("state-dir", os.Getenv("CONDUCTOR_STATE_DIR"), "Conductor local state directory")
+	status := fs.Bool("status", false, "show last stored scan without rescanning")
+	asJSON := fs.Bool("json", false, "print summary as JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || *since < 0 {
+		return errors.New("usage: conductor sessions scan [--since 168h] [--workspace path] [--status] [--json]")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	if *stateDir != "" {
+		*stateDir, err = filepath.Abs(*stateDir)
+		if err != nil {
+			return err
+		}
+	}
+	path := externalwork.InventoryPath(home, *stateDir)
+	var inv externalwork.Inventory
+	if *status {
+		inv, err = externalwork.LoadLatest(path)
+		if err != nil {
+			return err
+		}
+	} else {
+		root, e := externalWorkspace(ctx, *workspace)
+		if e != nil {
+			return e
+		}
+		cutoff := time.Time{}
+		if *since > 0 {
+			cutoff = time.Now().Add(-*since)
+		}
+		inv = externalwork.Scan(ctx, home, root, cutoff)
+		if err := externalwork.SaveLatest(path, inv); err != nil {
+			return err
+		}
+	}
+	count := map[string]int{}
+	for _, c := range inv.Candidates {
+		count[c.Source]++
+	}
+	summary := map[string]any{"scanned_at": inv.ScannedAt, "path": path, "total": len(inv.Candidates), "by_source": count, "warnings": inv.Warnings}
+	if *asJSON {
+		return emit(summary)
+	}
+	fmt.Printf("External work inventory: %s (%d saved records; running state unknown)\n", path, len(inv.Candidates))
+	for _, w := range inv.Warnings {
+		fmt.Fprintf(os.Stderr, "conductor: %s\n", w)
+	}
+	return nil
+}
+
+// install-scan uses a user-level OS timer; the Conductor server cannot inspect client files.
+func sessionsInstallScan(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("sessions install-scan", flag.ExitOnError)
+	interval := fs.Duration("interval", 15*time.Minute, "background scan cadence")
+	since := fs.Duration("since", 7*24*time.Hour, "saved session lookback")
+	workspace := fs.String("workspace", "", "repository whose project configs to include")
+	stateDir := fs.String("state-dir", os.Getenv("CONDUCTOR_STATE_DIR"), "Conductor local state directory")
+	install := fs.Bool("install", false, "write scheduler files")
+	activate := fs.Bool("activate", false, "enable scheduler after installation")
+	uninstall := fs.Bool("uninstall", false, "disable and remove scheduler files")
+	asJSON := fs.Bool("json", false, "machine-readable schedule plan")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || (*activate && !*install) || (*uninstall && (*install || *activate)) {
+		return errors.New("usage: conductor sessions install-scan [--interval 15m] [--install --activate | --uninstall]")
+	}
+	root, err := externalWorkspace(ctx, *workspace)
+	if err != nil {
+		return err
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	if *stateDir != "" {
+		*stateDir, err = filepath.Abs(*stateDir)
+		if err != nil {
+			return err
+		}
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	plan, err := externalwork.BuildSchedule(externalwork.ScheduleOptions{Exe: exe, Home: home, Workspace: root, StateDir: *stateDir, GOOS: runtime.GOOS, Interval: *interval, Since: *since})
+	if err != nil {
+		return err
+	}
+	if *uninstall {
+		if err := changeScanSchedule(ctx, plan, false); err != nil {
+			return err
+		}
+		for _, f := range plan.Files {
+			if err := os.Remove(f.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+		if runtime.GOOS == "linux" {
+			if out, err := exec.CommandContext(ctx, "systemctl", "--user", "daemon-reload").CombinedOutput(); err != nil {
+				return fmt.Errorf("systemctl daemon-reload: %w: %s", err, strings.TrimSpace(string(out)))
+			}
+		}
+		fmt.Println("Background scan removed.")
+		return nil
+	}
+	if *install {
+		for _, f := range plan.Files {
+			if err := os.MkdirAll(filepath.Dir(f.Path), 0o755); err != nil {
+				return err
+			}
+			if err := os.WriteFile(f.Path, []byte(f.Content), f.Mode); err != nil {
+				return err
+			}
+		}
+		if *activate {
+			if err := changeScanSchedule(ctx, plan, true); err != nil {
+				return err
+			}
+		}
+	}
+	if *asJSON {
+		return emit(map[string]any{"plan": plan, "installed": *install, "active": *activate})
+	}
+	for _, f := range plan.Files {
+		fmt.Printf("%s\n%s\n", f.Path, f.Content)
+	}
+	if *install && *activate {
+		fmt.Println("Background scan activated.")
+	} else if *install {
+		fmt.Println("Schedule installed; run again with --install --activate to enable it.")
+	}
+	return nil
+}
+
+func changeScanSchedule(ctx context.Context, p externalwork.SchedulePlan, enable bool) error {
+	run := func(name string, args ...string) error {
+		out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+	if p.Label != "" {
+		target := fmt.Sprintf("gui/%d", os.Getuid())
+		_ = exec.CommandContext(ctx, "launchctl", "bootout", target, p.Files[0].Path).Run()
+		if enable {
+			return run("launchctl", "bootstrap", target, p.Files[0].Path)
+		}
+		return nil
+	}
+	if enable {
+		if err := run("systemctl", "--user", "daemon-reload"); err != nil {
+			return err
+		}
+		if err := run("systemctl", "--user", "enable", "--now", p.Timer); err != nil {
+			return err
+		}
+		return run("systemctl", "--user", "start", p.Service)
+	}
+	_ = exec.CommandContext(ctx, "systemctl", "--user", "disable", "--now", p.Timer).Run()
+	return nil
 }
 
 // discover exports an owner-local metadata inventory. The export is deliberately distinct

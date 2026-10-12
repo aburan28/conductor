@@ -24,6 +24,33 @@ inventory is created with mode `0600` and refuses to overwrite an existing
 file. Treat it as private: it includes local paths and possibly Codex titles.
 Use `--since 0` to scan all saved records.
 
+## Periodic local scan
+
+The separate background scanner refreshes an owner-only inventory every 15
+minutes by default. Its scan reads the same metadata as `discover`; it does
+not import tasks or register live Conductor sessions. The latest inventory
+lives at `$CONDUCTOR_STATE_DIR/external-work/latest.json`, or
+`~/.conductor/external-work/latest.json` when that variable is unset. The
+directory is mode `0700`, the file is mode `0600`, and each refresh replaces
+the derived inventory atomically. It does not alter source transcripts or
+checkpoint copies.
+
+```sh
+conductor sessions scan --workspace /path/to/repository
+conductor sessions scan --status --json
+conductor sessions install-scan --workspace /path/to/repository --interval 15m
+conductor sessions install-scan --workspace /path/to/repository --interval 15m --install --activate
+conductor sessions install-scan --uninstall
+```
+
+`install-scan` previews a user-level macOS launchd agent or Linux systemd
+timer by default. `--install --activate` writes and enables that schedule,
+including one scan at login or activation. The schedule records an absolute
+path to the Conductor binary and the chosen workspace; keep that binary in a
+stable location. Its `--since` flag defaults to seven days and can be changed
+without changing the scan interval. Reinstall with new flags to change the
+cadence or workspace.
+
 The import command first previews the exact selected identifiers. `--apply`
 creates **private proposed review tasks**, never live Conductor sessions or
 ready work. Their titles are generic and their external references are stable
