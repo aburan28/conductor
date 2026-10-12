@@ -24,8 +24,9 @@ a token to find. The app makes it one thing:
 |---|---|
 | Sign in with no token on this machine | `POST /v1/local/session` (client `mac-app`), `GET /v1/local/status`, `conductor security` |
 | Every screen of a dashboard | the web dashboard, served by conductord, same-origin, no external requests |
-| Live updates | `GET /v1/projects/{p}/events/stream` (SSE) |
+| Live updates | `GET /v1/projects/{p}/events/stream` (SSE over HTTPS; WebSocket not required — see `docs/REMOTE_ACCESS.md`) |
 | Invite and join | `conductor invite` (link with the token in the fragment), `conductor join` |
+| Private remote reachability | Tailscale MagicDNS + `tailscale serve` (`conductor doctor` / invite hints; `docs/REMOTE_ACCESS.md`) |
 | Connect coding tools | `conductor integrate all --global` |
 | Pause and wake every agent terminal | `conductor pause`, `conductor resume` |
 | Portable sessions | `conductor checkpoint list / resume --account / --harness` |
@@ -195,6 +196,12 @@ The cairn recipe, unchanged where possible:
   macOS user accounts should run in enhanced mode. The app should detect a second
   console user and say so.
 - **Tailscale serve** needs the user's consent and tailnet policy. The app runs it only after
-  the user clicks, and shows how to stop sharing (`tailscale serve reset`).
+  the user clicks, and shows how to stop sharing (`tailscale serve reset`). Use MagicDNS as
+  `--public-url` / invite `--endpoint`. Overlay NAT traversal (including any STUN/TURN-like
+  relay) is Tailscale’s network, not a Conductor-owned relay — see
+  [REMOTE_ACCESS.md](REMOTE_ACCESS.md).
+- **SSE, not WebSocket**, for live updates: the same `events/stream` endpoint works over
+  Tailscale HTTPS; do not add a second transport in the app unless a future bidirectional
+  feature needs it ([REMOTE_ACCESS.md](REMOTE_ACCESS.md)).
 - **Other platforms**: the CLI already covers Linux. A Windows or Linux GUI would reuse the
   web view approach (Tauri or Electron) and is not planned.

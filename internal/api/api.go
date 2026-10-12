@@ -25,6 +25,7 @@ import (
 	"github.com/aburan28/conductor/internal/domain"
 	"github.com/aburan28/conductor/internal/notify"
 	"github.com/aburan28/conductor/internal/peer"
+	"github.com/aburan28/conductor/internal/secrets"
 )
 
 // Server holds the HTTP handlers.
@@ -55,6 +56,8 @@ type Server struct {
 	github *GitHub
 	// notify manages notification channels; nil serves their routes as not configured.
 	notify *notify.Notifier
+	// secrets is the project secret vault; nil serves its routes as not configured.
+	secrets *secrets.Vault
 	// ops is the operational surface: lifetime context, background work, streams (observe.go).
 	ops *opsState
 	// sso is single sign-on; it has no providers when none are configured (sso.go).
@@ -85,6 +88,8 @@ type Options struct {
 	GitHub *GitHub
 	// Notify manages notification channels (notify.go). Nil disables them.
 	Notify *notify.Notifier
+	// Secrets is the project secret vault (secrets.go). Nil disables it.
+	Secrets *secrets.Vault
 	// Ops configures metrics, request deadlines, stream caps and the server lifetime
 	// (observe.go).
 	Ops OpsOptions
@@ -115,6 +120,7 @@ func New(store *db.Store, svc *coord.Service, opts Options) *Server {
 		github:      opts.GitHub,
 		sso:         newSSOState(opts.SSO, opts.SelfEndpoint),
 		notify:      opts.Notify,
+		secrets:     opts.Secrets,
 		admin:       newAdminState(opts.Admin),
 	}
 	s.ops = newOpsState(store, s, opts.Ops)

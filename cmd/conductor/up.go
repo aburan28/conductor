@@ -47,7 +47,7 @@ func cmdUp(ctx context.Context, args []string) error {
 	addr := fs.String("addr", "", "listen address for a server started here (default: the endpoint's host:port)")
 	dsnFlag := fs.String("dsn", "",
 		"PostgreSQL connection string (default: $DATABASE_URL, else the one saved in ~/.conductor/database.url, else a new local database with a generated password)")
-	project := fs.String("project", "", "project slug when the database is bootstrapped fresh (default: directory name)")
+	project := fs.String("project", "", "project slug when the database is bootstrapped fresh (default: .conductor metadata.id, else this machine's sole project, else the directory name)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
