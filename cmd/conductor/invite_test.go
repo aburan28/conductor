@@ -124,14 +124,14 @@ func TestParseFriendlyDuration(t *testing.T) {
 
 func TestIsLoopbackEndpoint(t *testing.T) {
 	cases := map[string]bool{
-		"http://localhost:8080":              true,
-		"http://127.0.0.1:8080":              true,
-		"http://[::1]:8080":                  true,
-		"https://conductor.team":             false,
-		"https://laptop.tail1234.ts.net":     false, // MagicDNS is remote over the tailnet
-		"http://192.168.1.5:8080":            false,
-		"http://0.0.0.0:8080":                false, // all-interfaces bind is reachable, not loopback
-		"https://10.0.0.2":                   false,
+		"http://localhost:8080":          true,
+		"http://127.0.0.1:8080":          true,
+		"http://[::1]:8080":              true,
+		"https://conductor.team":         false,
+		"https://laptop.tail1234.ts.net": false, // MagicDNS is remote over the tailnet
+		"http://192.168.1.5:8080":        false,
+		"http://0.0.0.0:8080":            false, // all-interfaces bind is reachable, not loopback
+		"https://10.0.0.2":               false,
 	}
 	for in, want := range cases {
 		if got := isLoopbackEndpoint(in); got != want {
