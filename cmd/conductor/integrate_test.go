@@ -61,6 +61,9 @@ func TestWrapMCPArgsClaude(t *testing.T) {
 
 func TestWrapMCPArgsCodexAndMissingBinary(t *testing.T) {
 	t.Chdir(t.TempDir())
+	// Isolate from the developer's real ~/.codex so CodexConfigured stays false here.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", "")
 	restore := lookPath
 	defer func() { lookPath = restore }()
 
