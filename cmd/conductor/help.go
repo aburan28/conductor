@@ -251,8 +251,8 @@ Usage:
   conductor secrets set NAME                    paste a value on stdin (maintainers)
   conductor secrets get NAME                    print one value
   conductor secrets delete NAME
-  conductor secrets env [--format export|dotenv|json]
-                                                print shell exports for eval
+  conductor secrets env [--format export|dotenv|json|fish]
+                                                print shell exports for eval or source
   conductor secrets inject [--shell zsh|bash|fish]
                                                 add an rc snippet that eval's secrets env
   conductor secrets push claude|cursor          install into a local agent runtime

@@ -96,7 +96,12 @@ func TestValidateName(t *testing.T) {
 	if err := ValidateName("DATABASE_URL"); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateName("1bad"); err == nil {
-		t.Fatal("expected error")
+	for _, name := range []string{"1bad", "MY-API-KEY", "my.key", "export"} {
+		if err := ValidateName(name); err == nil {
+			t.Fatalf("expected error for %q", name)
+		}
+	}
+	if !ShellName("export") || !ShellName("DATABASE_URL") || ShellName("MY-API-KEY") || ShellName("my.key") {
+		t.Fatal("ShellName does not match portable identifiers")
 	}
 }

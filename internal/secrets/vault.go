@@ -37,7 +37,9 @@ func sealPurpose(projectID domain.ID) string {
 	return "conductor/project_secret/" + string(projectID)
 }
 
-var nameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]*$`)
+// Portable shell identifier. Dots and dashes are not valid in `export` / `set -gx`,
+// so a name that passed a looser check would abort `eval "$(conductor secrets env)"`.
+var nameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // Vault seals and opens project secrets.
 type Vault struct {
@@ -93,9 +95,20 @@ func ValidateName(name string) error {
 		return fmt.Errorf("%w: name is at most %d characters", domain.ErrInvalidArgument, MaxNameLen)
 	}
 	if !nameRe.MatchString(name) {
-		return fmt.Errorf("%w: name must look like an environment variable (A-Z, digits, _, ., -)", domain.ErrInvalidArgument)
+		return fmt.Errorf("%w: name must look like an environment variable (letters, digits, and _)", domain.ErrInvalidArgument)
+	}
+	// GET /v1/projects/{project}/secrets/export is the bulk plaintext route. A secret
+	// named "export" would be stored by POST but unreachable via GET-by-name.
+	if name == "export" {
+		return fmt.Errorf("%w: name %q is reserved", domain.ErrInvalidArgument, name)
 	}
 	return nil
+}
+
+// ShellName reports whether name is a portable shell identifier. "export" is a legal
+// identifier and is rejected separately by ValidateName because it shadows the HTTP route.
+func ShellName(name string) bool {
+	return nameRe.MatchString(name)
 }
 
 // HintFromValue returns a short non-secret reminder (last 4 runes when printable).

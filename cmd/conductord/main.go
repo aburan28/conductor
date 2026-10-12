@@ -833,16 +833,24 @@ func bootstrap(args []string) error {
 		*projectSlug = filepath.Base(repoPath)
 	}
 
+	// Attaching because the directory slug is missing (a Codex/Claude worktree with no
+	// project id) is not a re-bootstrap of that project's checkout. config.Load treats a
+	// missing .conductor bundle as defaults, so applying it would wipe the real config
+	// and point repo_path at a temporary worktree workers keep using after it is gone.
+	// Matching by slug or an explicit --project still refreshes both.
+	attachedByReuse := false
 	project, err := store.GetProjectBySlug(ctx, org.ID, *projectSlug)
 	if errors.Is(err, domain.ErrNotFound) && !explicitProject {
 		if members, listErr := store.ListProjectsFor(ctx, principal.ID); listErr != nil {
 			return fmt.Errorf("project: %w", listErr)
 		} else if len(members) == 1 {
 			project, err = members[0], nil
+			attachedByReuse = true
 		} else if sole, ok, soleErr := store.SoleProjectInOrg(ctx, org.ID); soleErr != nil {
 			return fmt.Errorf("project: %w", soleErr)
 		} else if ok {
 			project, err = sole, nil
+			attachedByReuse = true
 		}
 	}
 	if errors.Is(err, domain.ErrNotFound) {
@@ -856,7 +864,7 @@ func bootstrap(args []string) error {
 			RepoPath:        repoPath,
 			Config:          bundle.ProjectConfig(),
 		})
-	} else if err == nil {
+	} else if err == nil && !attachedByReuse {
 		err = store.UpdateProjectConfig(ctx, project.ID, bundle.ProjectConfig())
 		if err == nil {
 			err = store.SetProjectRepoPath(ctx, project.ID, repoPath)

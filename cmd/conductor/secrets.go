@@ -132,7 +132,7 @@ The value is sealed at rest under conductord's secret key. Maintainers only.
 	}
 	fmt.Printf("Stored %s (hint %s). Retrieve with MCP coord_get_secret or:\n", view.Name, view.Hint)
 	fmt.Printf("  conductor secrets get %s\n", view.Name)
-	fmt.Printf("  conductor secrets env | eval\n")
+	fmt.Println(`  eval "$(conductor secrets env)"`)
 	return nil
 }
 
@@ -216,7 +216,7 @@ func secretsDelete(ctx context.Context, args []string) error {
 func secretsEnv(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("secrets env", flag.ExitOnError)
 	project := fs.String("project", "", "project id or slug")
-	format := fs.String("format", "export", "export | dotenv | json")
+	format := fs.String("format", "export", "export | dotenv | json | fish")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -227,18 +227,41 @@ func secretsEnv(ctx context.Context, args []string) error {
 	switch *format {
 	case "json":
 		return emit(env)
-	case "dotenv":
+	case "export", "dotenv", "fish":
 		for _, name := range sortedMapKeys(env) {
-			fmt.Printf("%s=%s\n", name, shellSingleQuote(env[name]))
-		}
-	case "export":
-		for _, name := range sortedMapKeys(env) {
-			fmt.Printf("export %s=%s\n", name, shellSingleQuote(env[name]))
+			// A name that is not a shell identifier (stored before the tighter check)
+			// would make `eval` / `source` abort before the rest of the vault loads.
+			if !secrets.ShellName(name) {
+				fmt.Fprintf(os.Stderr, "warning: skipping secret %q; not a shell identifier\n", name)
+				continue
+			}
+			line, err := formatSecretLine(*format, name, env[name])
+			if err != nil {
+				return err
+			}
+			fmt.Print(line)
 		}
 	default:
-		return fmt.Errorf("unknown --format %q (want export, dotenv, or json)", *format)
+		return fmt.Errorf("unknown --format %q (want export, dotenv, json, or fish)", *format)
 	}
 	return nil
+}
+
+// formatSecretLine renders one secret for a shell. fish has no `export` and `source`
+// only accepts fish syntax, so it cannot reuse the bash/zsh lines.
+func formatSecretLine(format, name, value string) (string, error) {
+	quoted := shellSingleQuote(value)
+	switch format {
+	case "dotenv":
+		return fmt.Sprintf("%s=%s\n", name, quoted), nil
+	case "export":
+		return fmt.Sprintf("export %s=%s\n", name, quoted), nil
+	case "fish":
+		// `--` keeps a value that starts with '-' from being parsed as a set flag.
+		return fmt.Sprintf("set -gx %s -- %s\n", name, quoted), nil
+	default:
+		return "", fmt.Errorf("unknown --format %q (want export, dotenv, json, or fish)", format)
+	}
 }
 
 func fetchSecretEnv(ctx context.Context, project string) (map[string]string, error) {
@@ -317,7 +340,7 @@ func secretsInjectSnippet(shell, project string) string {
 	}
 	switch shell {
 	case "fish":
-		return fmt.Sprintf("# >>> %s >>>\n# Project secrets from Conductor (encrypted at rest; fetched at shell start).\nif type -q conductor\n  conductor secrets env%s | source\nend\n# <<< %s <<<\n",
+		return fmt.Sprintf("# >>> %s >>>\n# Project secrets from Conductor (encrypted at rest; fetched at shell start).\nif type -q conductor\n  conductor secrets env --format fish%s | source\nend\n# <<< %s <<<\n",
 			secretsRCMarker, projFlag, secretsRCMarker)
 	default:
 		return fmt.Sprintf("# >>> %s >>>\n# Project secrets from Conductor (encrypted at rest; fetched at shell start).\nif command -v conductor >/dev/null 2>&1; then\n  eval \"$(conductor secrets env%s)\"\nfi\n# <<< %s <<<\n",
