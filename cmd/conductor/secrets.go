@@ -250,15 +250,16 @@ func secretsEnv(ctx context.Context, args []string) error {
 // formatSecretLine renders one secret for a shell. fish has no `export` and `source`
 // only accepts fish syntax, so it cannot reuse the bash/zsh lines.
 func formatSecretLine(format, name, value string) (string, error) {
-	quoted := shellSingleQuote(value)
 	switch format {
 	case "dotenv":
-		return fmt.Sprintf("%s=%s\n", name, quoted), nil
+		return fmt.Sprintf("%s=%s\n", name, shellSingleQuote(value)), nil
 	case "export":
-		return fmt.Sprintf("export %s=%s\n", name, quoted), nil
+		return fmt.Sprintf("export %s=%s\n", name, shellSingleQuote(value)), nil
 	case "fish":
 		// `--` keeps a value that starts with '-' from being parsed as a set flag.
-		return fmt.Sprintf("set -gx %s -- %s\n", name, quoted), nil
+		// Fish single quotes still treat \\ and \' as escapes, so bash quoting
+		// would store a different value or fail to parse.
+		return fmt.Sprintf("set -gx %s -- %s\n", name, fishQuote(value)), nil
 	default:
 		return "", fmt.Errorf("unknown --format %q (want export, dotenv, json, or fish)", format)
 	}
