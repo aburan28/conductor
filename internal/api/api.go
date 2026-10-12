@@ -85,6 +85,8 @@ func New(store *db.Store, svc *coord.Service, opts Options) *Server {
 		peerStatus:  opts.PeerStatus,
 	}
 	s.routes()
+	s.mux.HandleFunc("POST /v1/projects/{project}/external-observations", s.authenticate(s.recordExternalObservation))
+	s.mux.HandleFunc("GET /v1/projects/{project}/external-observations", s.authenticate(s.listExternalObservations))
 	return s
 }
 

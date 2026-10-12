@@ -764,6 +764,33 @@ type PolicyDecision struct {
 	CreatedAt time.Time      `json:"created_at"`
 }
 
+// ExternalObservation is bounded coordination metadata supplied by an external
+// worker. It deliberately has no prompt, transcript, free-form message, or
+// evidence URI field. Evidence content stays in an owner-controlled store;
+// only its digest may appear in Conductor's shared audit view.
+type ExternalObservation struct {
+	ID             ID        `json:"id,omitempty"`
+	ProjectID      ID        `json:"project_id,omitempty"`
+	TaskID         ID        `json:"task_id,omitempty"`
+	AttemptID      ID        `json:"attempt_id,omitempty"`
+	EventID        string    `json:"event_id"`
+	Source         string    `json:"source"`
+	WorkerRunID    string    `json:"worker_run_id"`
+	SessionID      string    `json:"session_id,omitempty"`
+	TurnID         string    `json:"turn_id,omitempty"`
+	TriggerEventID string    `json:"trigger_event_id,omitempty"`
+	Kind           string    `json:"kind"`
+	Status         string    `json:"status,omitempty"`
+	RuleID         string    `json:"rule_id,omitempty"`
+	RuleVersion    string    `json:"rule_version,omitempty"`
+	Action         string    `json:"action,omitempty"`
+	ReasonCode     string    `json:"reason_code,omitempty"`
+	SourceRevision string    `json:"source_revision,omitempty"`
+	EvidenceSHA256 string    `json:"evidence_sha256,omitempty"`
+	ObservedAt     time.Time `json:"observed_at"`
+	CreatedAt      time.Time `json:"created_at,omitempty"`
+}
+
 type Event struct {
 	ID             ID             `json:"id"`
 	OrganizationID ID             `json:"organization_id"`
