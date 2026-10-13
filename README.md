@@ -1379,11 +1379,6 @@ Implemented and exercised by tests:
 
 Not built, and where the design says it goes:
 
-- **The macOS app.** Planned in [docs/MACOS_APP.md](docs/MACOS_APP.md): a menu bar app that
-  runs the daemon and a private Postgres for you, signs you in automatically, and shares
-  invites through Messages. Remote reachability for those invites is Tailscale-first
-  ([docs/REMOTE_ACCESS.md](docs/REMOTE_ACCESS.md)); the CLI already detects MagicDNS.
-
 - **Planner and reviewer services** (§14, §15.3). The contracts, validation rules, and
   `reviewer.*` routing are in place; nothing yet invokes a model to decompose an objective or
   review a diff.

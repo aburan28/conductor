@@ -181,7 +181,7 @@ The cairn recipe, unchanged where possible:
 | Phase | Delivers | Done when | State |
 |---|---|---|---|
 | 0. Groundwork (this repository) | local sign-in, `conductor security`, the GitHub App, Tailscale-aware invites, `--json` everywhere | merged (this PR) | done |
-| 1. Menu bar + supervisor | `ConductorKit`; launchd agents for the bundled Postgres and conductord; automatic sign-in; the menu bar popover from status + SSE; web-view window | a fresh Mac with no Docker opens the app and sees its dashboard with no terminal | implemented |
+| 1. Menu bar + supervisor | `ConductorKit`; launchd agents for the bundled Postgres and conductord; automatic sign-in; the menu bar popover from status + SSE; web-view window | a fresh Mac with no Docker opens the app and sees its dashboard with no terminal | builds and launches on a Mac (see below); launchd agents and the full first-run click-through still need one with Accessibility access |
 | 2. Onboarding | first-run flow; Connect tools; Invite with the share sheet and the Tailscale option; `conductor://join` | a second person joins from a texted link, and their Claude Code shows Conductor's MCP tools | implemented |
 | 3. Portability | Checkpoints window; usage-limit notification; continue under another account or harness | a session stopped by a limit continues under a second login in two clicks | implemented |
 | 4. GitHub | the GitHub sheet; check-run status per pull request in the popover | the app is created and installed from the sheet | implemented |
@@ -193,7 +193,21 @@ Restore from bucket on a new Mac.
 
 ### What has been verified, and what has not
 
-The implementation was written where no Mac was available. What could be checked there:
+The implementation was written where no Mac was available, then built and run once a Mac
+was: `swift build` (debug and the `Conductor` executable target) compiles cleanly with only
+the Command Line Tools, with one harmless warning (`SMAppService` `await` is a no-op on an
+older SDK than CI's — kept because CI's SDK needs it). The resulting binary, assembled by
+hand into a bundle with Sparkle's framework and the Go commands, launches as a real app:
+AppKit brings up its `MenuBarExtra` scene (confirmed through Control Center's scene
+messages), it restores its last window frame from `UserDefaults`, and its `APIClient` probes
+`127.0.0.1:<daemonPort>` exactly as documented — including, once a real `conductord` was
+started by hand against a local PostgreSQL, picking a different port to avoid it when the
+app's own first-run flow meant to start a second instance (expected: this smoke test could
+not click through onboarding to choose "attach" instead, since the environment has no
+Accessibility access for UI automation). `swift test` itself could not run here: this
+machine has only the Command Line Tools, and the macOS `XCTest.framework` ships with Xcode,
+not with them — CI's `macos-latest` runner has Xcode, which is why the test job lives there
+and not in a Command Line Tools-only check. Before that, what could be checked without a Mac:
 
 - `ConductorKit`, which holds all the logic (plists, supervisor, API and SSE clients,
   decoders for every `--json` the app reads, storage settings, join links, AWS profiles),
@@ -209,15 +223,19 @@ The implementation was written where no Mac was available. What could be checked
 - The SwiftUI sources were syntax-checked, and the app model type-checked against
   ConductorKit, but not compiled.
 
-What needs a Mac, and is left to the `macos-app` workflow and a person with one:
+What a later Mac session with Accessibility access (or the CI job) still needs to check:
 
-- compiling the `Conductor` target and `ConductorKeychainACL`'s Security calls, and the
-  first run of the app: launchd loading the agents, the window, the menu bar, the share
-  sheet, notifications, `conductor://` links, SMAppService;
+- launchd actually loading the three agents (this smoke test ran the binary directly, not
+  through `LaunchAgent.swift`'s plists);
+- the window, the share sheet, notifications, `conductor://` links, and clicking through
+  onboarding (its choice between "start a new instance" and "attach to one already running"
+  needs a click; this smoke test could only observe the headless default);
 - whether `/usr/bin/security` reads the shared Keychain items without a prompt (the item's
   partition list, which macOS added after access lists, could still make it ask);
 - the EnterpriseDB binaries running from inside the bundle, signed by the app, under the
-  hardened runtime.
+  hardened runtime;
+- `swift test`'s full suite (including `IntegrationTests` and `CONDUCTOR_TEST_KEYCHAIN=1`),
+  which needs Xcode's `XCTest.framework`, not just the Command Line Tools.
 
 What needs a Developer ID and an App Store Connect key, and has never run: Developer ID
 signing, notarization and stapling, a signed `.pkg`, and Sparkle updates (which also need
