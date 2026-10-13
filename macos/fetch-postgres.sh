@@ -95,10 +95,13 @@ STAGED="$WORK/unpacked/pgsql"
 # it was, and no VERSION marker that would make the next run skip the checks.
 if [ "$(uname -s)" = "Darwin" ]; then
     ARCHS="$(lipo -archs "$STAGED/bin/postgres")"
-    case " $ARCHS " in
-        *" arm64 "*" x86_64 "*|*" x86_64 "*" arm64 "*) ;;
-        *) die "bin/postgres holds only '$ARCHS'; the app needs arm64 and x86_64" ;;
-    esac
+    # Two separate checks, not one pattern for each order: "arm64 x86_64" and "x86_64 arm64"
+    # share their one middle space, so a single `*" arm64 "*" x86_64 "*|*" x86_64 "*" arm64 "*`
+    # pattern cannot match either order (each alternative needs its own copy of that space).
+    has_arch() { case " $1 " in *" $2 "*) return 0 ;; *) return 1 ;; esac; }
+    if ! has_arch "$ARCHS" arm64 || ! has_arch "$ARCHS" x86_64; then
+        die "bin/postgres holds only '$ARCHS'; the app needs arm64 and x86_64"
+    fi
     "$STAGED/bin/postgres" --version
 else
     echo "fetch-postgres: not on macOS, so the architectures and postgres --version are not checked"
