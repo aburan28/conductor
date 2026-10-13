@@ -49,6 +49,17 @@ Every release archive carries a GitHub build-provenance attestation:
 `gh attestation verify conductor_vX.Y.Z_linux_amd64.tar.gz --repo aburan28/conductor`.
 `conductor version` (or `--version` on any of the three binaries) says which build you have.
 
+### The macOS app
+
+`Conductor.app` (in [`macos/`](macos/README.md)) is the same three binaries plus a private
+PostgreSQL in one app: it runs the control plane and its database as launchd agents, signs
+you in without a token, puts who is live and what is contested in the menu bar, invites a
+teammate by text through the share sheet, and continues a session that hit its usage limit
+under another login. Settings → Storage points it at an S3 bucket that keeps the database,
+session backups and checkpoints ([docs/STORAGE.md](docs/STORAGE.md)). Build it with
+`macos/build.sh`; the plan, and what has been verified so far, is
+[docs/MACOS_APP.md](docs/MACOS_APP.md).
+
 ## Quickstart
 
 From the repository you want to coordinate:
@@ -1367,11 +1378,6 @@ Implemented and exercised by tests:
   with retries, through the same privacy projection as the API.
 
 Not built, and where the design says it goes:
-
-- **The macOS app.** Planned in [docs/MACOS_APP.md](docs/MACOS_APP.md): a menu bar app that
-  runs the daemon and a private Postgres for you, signs you in automatically, and shares
-  invites through Messages. Remote reachability for those invites is Tailscale-first
-  ([docs/REMOTE_ACCESS.md](docs/REMOTE_ACCESS.md)); the CLI already detects MagicDNS.
 
 - **Planner and reviewer services** (§14, §15.3). The contracts, validation rules, and
   `reviewer.*` routing are in place; nothing yet invokes a model to decompose an objective or
