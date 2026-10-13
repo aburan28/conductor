@@ -1052,6 +1052,15 @@ func cmdWrap(ctx context.Context, args []string) error {
 		"CONDUCTOR_PROJECT="+ref,
 		"CONDUCTOR_HARNESS="+tool,
 	)
+	// Project secrets from the encrypted vault (contributor+). Failure is non-fatal: a
+	// vault that is empty or unavailable must not block an interactive wrap.
+	if secretEnv, err := fetchSecretEnv(ctx, ref); err != nil {
+		fmt.Fprintf(os.Stderr, "conductor: project secrets not loaded into this session: %v\n", err)
+	} else if len(secretEnv) > 0 {
+		for _, name := range sortedMapKeys(secretEnv) {
+			cmd.Env = append(cmd.Env, name+"="+secretEnv[name])
+		}
+	}
 
 	// Token usage. The harness writes its own usage log as it runs; this sidecar reads that
 	// log — numbers, model, timestamp, nothing else — and reports hourly buckets, so the

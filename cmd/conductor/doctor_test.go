@@ -29,6 +29,7 @@ func fakeDoctorEnv(clientVersion string) doctorEnv {
 		portOpen:   func(string, string) bool { return false },
 		dockerUp:   func() bool { return false },
 		getenv:     func(string) string { return "" },
+		tailscale:  func(context.Context) (string, bool) { return "", false },
 		clientVers: clientVersion,
 	}
 }
@@ -127,6 +128,40 @@ func TestDoctorListsDisabledHarnesses(t *testing.T) {
 	printDoctor(&buf, out)
 	if !strings.Contains(buf.String(), "codex") {
 		t.Errorf("printed report omits codex:\n%s", buf.String())
+	}
+}
+
+func TestDoctorReportsTailscaleAdviceOnLoopback(t *testing.T) {
+	env := fakeDoctorEnv("v0.3.0")
+	env.tailscale = func(context.Context) (string, bool) { return "laptop.tail1234.ts.net", true }
+	out := collectDoctor(context.Background(), client.Credentials{Endpoint: "http://127.0.0.1:8721"}, "", env)
+	if out.Tailscale != "laptop.tail1234.ts.net" {
+		t.Fatalf("tailscale = %q", out.Tailscale)
+	}
+	if !strings.Contains(out.TailscaleAdvice, "tailscale serve --bg 8721") ||
+		!strings.Contains(out.TailscaleAdvice, "https://laptop.tail1234.ts.net") ||
+		!strings.Contains(out.TailscaleAdvice, "REMOTE_ACCESS") {
+		t.Fatalf("advice = %q", out.TailscaleAdvice)
+	}
+	var buf bytes.Buffer
+	printDoctor(&buf, out)
+	if !strings.Contains(buf.String(), "tailscale") || !strings.Contains(buf.String(), "share") {
+		t.Fatalf("printed report missing Tailscale share hint:\n%s", buf.String())
+	}
+
+	// A non-loopback endpoint still reports the MagicDNS name, but needs no serve advice.
+	out = collectDoctor(context.Background(), client.Credentials{Endpoint: "https://conductor.team"}, "", env)
+	if out.Tailscale != "laptop.tail1234.ts.net" || out.TailscaleAdvice != "" {
+		t.Fatalf("remote endpoint: tailscale=%q advice=%q", out.Tailscale, out.TailscaleAdvice)
+	}
+}
+
+func TestDoctorTailscaleNotInstalled(t *testing.T) {
+	env := fakeDoctorEnv("v0.3.0")
+	env.tailscale = func(context.Context) (string, bool) { return "", false }
+	out := collectDoctor(context.Background(), client.Credentials{Endpoint: "http://127.0.0.1:1"}, "", env)
+	if out.Tailscale != "not installed" {
+		t.Fatalf("tailscale = %q", out.Tailscale)
 	}
 }
 

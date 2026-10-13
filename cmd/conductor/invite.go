@@ -54,6 +54,10 @@ are in — no flags to copy, no token to paste separately.
   conductor invite rachel --role maintainer --expires 7d
   conductor invite ci-runner --role runner --expires never --endpoint https://conductor.team
 
+When this machine's control plane is on loopback, prefer Tailscale MagicDNS as --endpoint
+(and as conductord --public-url) so teammates reach the dashboard and MCP over your
+private tailnet — see docs/REMOTE_ACCESS.md.
+
 The link contains a bearer token: send it over a channel you trust, exactly as you would a
 password. It is shown once and stored only as a hash.
 
@@ -121,14 +125,24 @@ Flags:
 
 	link := joinLink(joinEndpoint, ref, result.Token)
 	loopback := isLoopbackEndpoint(joinEndpoint)
+	tsDNS, tsOK := detectTailscale(ctx)
+	port := listenPort(joinEndpoint)
 
 	if *asJSON {
-		return emit(map[string]any{
+		out := map[string]any{
 			"handle": result.Handle, "role": result.Role, "created": result.Created,
 			"endpoint": joinEndpoint, "project": ref, "token": result.Token,
 			"expires_at": result.ExpiresAt, "join_url": link,
 			"endpoint_reachable": !loopback,
-		})
+		}
+		if tsOK {
+			out["tailscale_dns"] = tsDNS
+			out["suggested_endpoint"] = "https://" + tsDNS
+			out["serve_command"] = "tailscale serve --bg " + port
+			out["public_url_hint"] = "https://" + tsDNS
+			out["mcp_url"] = "https://" + tsDNS + "/mcp"
+		}
+		return emit(out)
 	}
 
 	fmt.Printf("Invited %s as %s on %s.\n\n", result.Handle, result.Role, ref)
@@ -147,27 +161,40 @@ Flags:
 Warning: this link points at %s, which only reaches your own machine. A teammate on
 another computer cannot use it.
 `, joinEndpoint)
-		if ts, ok := detectTailscale(ctx); ok {
-			// The easy way to let someone across town in: publish the loopback daemon to the
-			// tailnet only, with Tailscale terminating TLS. Local sign-in stays local — requests
-			// arriving through the tailnet name are not from localhost and need the token.
+		if tsOK {
+			// Publish the loopback daemon to the tailnet only; Tailscale terminates TLS.
+			// Local sign-in stays local — requests through the MagicDNS name need the token.
 			fmt.Fprintf(os.Stderr, `
-Tailscale is running on this machine (%s). To let them in over your tailnet:
+Tailscale is running on this machine (%s). To let them in over your private tailnet:
 
   tailscale serve --bg %s
   conductor invite %s --endpoint https://%s
 
-If they are not on your tailnet, share this machine with them from the Tailscale admin
-console first; nothing becomes reachable from the public internet.
-`, ts, listenPort(joinEndpoint), handle, ts)
+Use the MagicDNS name as the control plane's public URL (SSO, GitHub webhooks,
+dashboard and MCP links):
+
+  conductord … --public-url https://%s
+  # or: export CONDUCTOR_PUBLIC_URL=https://%s
+
+Remote MCP over the same URL: https://%s/mcp
+Stop sharing with: tailscale serve reset
+If they are not on your tailnet, share this machine from the Tailscale admin console
+first; nothing becomes reachable from the public internet.
+See docs/REMOTE_ACCESS.md.
+`, tsDNS, port, handle, tsDNS, tsDNS, tsDNS, tsDNS)
 		} else {
 			fmt.Fprintf(os.Stderr, `Expose the control plane and re-run with the address they can reach:
 
   tailscale serve --bg %s                     # simplest: your private tailnet only
   conductord --addr 0.0.0.0:8080 --tls-cert cert.pem --tls-key key.pem   # or --behind-proxy
   conductor invite %s --endpoint https://your-host
-`, listenPort(joinEndpoint), handle)
+
+See docs/REMOTE_ACCESS.md.
+`, port, handle)
 		}
+	} else if tsOK && strings.Contains(joinEndpoint, tsDNS) {
+		fmt.Fprintf(os.Stderr, "\nTailscale MagicDNS endpoint (%s). Teammates must be on your tailnet.\n"+
+			"Remote MCP: %s/mcp  ·  stop sharing: tailscale serve reset\n", tsDNS, strings.TrimRight(joinEndpoint, "/"))
 	}
 	fmt.Fprintln(os.Stderr, "\nThis link contains a bearer token. It is shown once and stored only as a hash.")
 	return nil
