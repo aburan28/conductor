@@ -45,6 +45,21 @@ async function runConductor($, cwd, args) {
   return { code: r.status === null ? 1 : r.status, stderr: r.stderr || "", stdout: r.stdout || "" };
 }
 
+async function observe(cwd, payload) {
+  // stdin keeps the hook payload out of process arguments and shell history.
+  // Do not hold OpenCode's tool event loop while a remote cache is unavailable.
+  const { spawn } = await import("node:child_process");
+  const child = spawn("conductor", ["hook", "memory-observe", "--harness", "opencode"], {
+    cwd: cwd || undefined,
+    stdio: ["pipe", "ignore", "ignore"],
+    timeout: 3000,
+  });
+  child.on("error", () => {});
+  child.stdin.on("error", () => {});
+  child.stdin.end(JSON.stringify(payload));
+  child.unref();
+}
+
 export const ConductorPlugin = async ({ $, directory, worktree } = {}) => {
   const cwd = worktree || directory || "";
   return {
@@ -66,10 +81,35 @@ export const ConductorPlugin = async ({ $, directory, worktree } = {}) => {
         throw new Error("Conductor blocked this edit: " + blocked);
       }
     },
+    "tool.execute.after": async (input, output) => {
+      try {
+        await observe(cwd, {
+          hook_event_name: "PostToolUse",
+          cwd,
+          session_id: input && input.sessionID,
+          tool_name: input && input.tool,
+          tool_use_id: input && input.callID,
+          tool_input: input && input.args,
+        });
+      } catch (_) {
+        // Memory is optional and cannot break a tool result.
+      }
+    },
+    "experimental.chat.system.transform": async (_input, output) => {
+      try {
+        const r = await runConductor($, cwd, ["memory", "context"]);
+        if (r.code === 0 && r.stdout && Array.isArray(output.system) && output.system.length > 0) {
+          // Keep one leading system block for OpenAI-compatible providers.
+          output.system[0] += "\n\n" + r.stdout.trim();
+        }
+      } catch (_) {
+        // Recall is best-effort.
+      }
+    },
     event: async ({ event } = {}) => {
       try {
         if (event && event.type === "session.created") {
-          await runConductor($, cwd, ["hook", "session-start"]);
+          await runConductor($, cwd, ["hook", "session-start", "--no-stdin"]);
         }
         // Portability: checkpoint the conversation and working tree each time the agent
         // finishes a turn, so it can be resumed elsewhere. Rate-limited and skipped when

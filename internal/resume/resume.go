@@ -28,9 +28,9 @@ type Action struct {
 // never signal the wrong process — is testable without signaling anything.
 const (
 	PlanViaWrap = "via-wrap" // signal the `conductor wrap` sidecar; it handles its child
-	PlanDirect  = "direct"  // signal the harness's process group ourselves
-	PlanReopen  = "reopen"  // process gone: open a terminal on the harness's resume invocation
-	PlanRunning = "running" // saved record whose process turned out to be alive: leave it be
+	PlanDirect  = "direct"   // signal the harness's process group ourselves
+	PlanReopen  = "reopen"   // process gone: open a terminal on the harness's resume invocation
+	PlanRunning = "running"  // saved record whose process turned out to be alive: leave it be
 )
 
 // Plan is the decision for one record; see the constants above.
