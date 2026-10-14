@@ -85,9 +85,9 @@ func accountsList(args []string) error {
 	}
 
 	type row struct {
-		Harness string `json:"harness"`
-		Name    string `json:"name"`
-		Active  bool   `json:"active"`
+		Harness     string     `json:"harness"`
+		Name        string     `json:"name"`
+		Active      bool       `json:"active"`
 		ExhaustedAt *time.Time `json:"exhausted_at,omitempty"`
 	}
 	var rows []row
