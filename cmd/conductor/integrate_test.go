@@ -61,8 +61,12 @@ func TestWrapMCPArgsClaude(t *testing.T) {
 
 func TestWrapMCPArgsCodexAndMissingBinary(t *testing.T) {
 	t.Chdir(t.TempDir())
-	// The wrapper must be tested without this developer machine's Codex MCP config.
-	t.Setenv("CODEX_HOME", t.TempDir())
+	// A user who already ran `conductor integrate codex` has conductor in
+	// ~/.codex/config.toml, and wrapMCPArgs then correctly mounts nothing.
+	// Point the config homes at an empty temp dir so the test sees a clean user.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
 	restore := lookPath
 	defer func() { lookPath = restore }()
 

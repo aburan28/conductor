@@ -243,6 +243,7 @@ export function installDemo(api) {
     if (m('v1/org')) return { organization: { id: 'org-demo', slug: 'demo', name: 'Demo' }, branding: { has_logo: false }, require_sso: false, is_org_admin: false,
       features: { queue: true, swarm: true, budget_sharing: true, mesh: true, local_models: true, checkpoints_by_account: true } };
     if ((mm = m('v1/projects/:p/intents/check')) && method === 'POST') return demoCheck(body);
+    if (m('v1/local/resume-all') && method === 'POST') return { switched: [], actions: [], resumed: 3, running: 1, failed: 0 };
     if (m('v1/tokens') && method === 'GET') return { tokens: D.tokens };
     if (m('v1/tokens') && method === 'POST') { const t = { name: (body && body.name) || 'demo', created_at: iso(Date.now()) }; D.tokens.unshift(t); return { name: t.name, token: 'cdt_demo_' + Math.random().toString(36).slice(2) }; }
     if ((mm = m('v1/tokens/:name')) && method === 'DELETE') { const t = D.tokens.find(x => x.name === mm.name); if (t) t.revoked_at = iso(Date.now()); return null; }

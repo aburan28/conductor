@@ -96,8 +96,28 @@ let stopStream = null;
 let current = null;      // { name, key, instance, root }
 let drawer = null;
 let router = null;
+let stopPolling = null;
+let stopKeys = null;
+let shellEpoch = 0;
 
 boot();
+
+// The native app changes only #project=… when its toolbar picker changes. A fragment
+// navigation does not rerun this module, so apply that project to the mounted view.
+window.addEventListener('hashchange', () => {
+  const fragment = new URLSearchParams(location.hash.replace(/^#/, ''));
+  if (fragment.has('token') || fragment.has('sso')) return;
+  const slug = fragment.get('project');
+  if (!slug || slug === store.get().project) return;
+  const mine = (store.get().projects || []).find(p => p.slug === slug);
+  if (!mine) return;
+  history.replaceState({}, '', location.pathname + location.search);
+  if (router) switchProject(slug);
+  else {
+    prefs.set('project', slug);
+    store.set({ project: slug, role: mine.role });
+  }
+});
 
 async function boot() {
   const s = store.get();
@@ -194,11 +214,22 @@ function showConnect(error, note, token) {
 }
 
 function signOut() {
-  if (stopStream) stopStream();
+  leave();
   prefs.del('token'); prefs.del('project'); prefs.del('handle'); prefs.del('role');
-  store.set({ token: '', project: '' });
+  store.set({ token: '', project: '', role: '', connection: 'idle', org: null });
   history.replaceState({}, '', '/');
   showConnect();
+}
+
+function leave() {
+  shellEpoch++;
+  if (stopStream) { stopStream(); stopStream = null; }
+  if (stopPolling) { stopPolling(); stopPolling = null; }
+  if (stopKeys) { stopKeys(); stopKeys = null; }
+  if (router) { router.stop(); router = null; }
+  if (drawer) { const d = drawer; drawer = null; d.close(); }
+  if (current && current.instance) current.instance.destroy();
+  current = null;
 }
 
 function ctx(extraParams = {}) {
@@ -227,8 +258,10 @@ const featureOn = item => !item.feature || !!(store.get().org && store.get().org
 const isOrgAdmin = () => !!(store.get().org && store.get().org.is_org_admin);
 
 async function loadOrg() {
+  const epoch = shellEpoch;
   let org = null;
   try { org = await api.get('/v1/org'); } catch (_) { org = null; }
+  if (epoch !== shellEpoch) return null;
   store.set({ org });
   applyBranding(org && org.branding);
   if (brandNameEl) renderBrand();
@@ -302,6 +335,8 @@ function baseName(route) {
 }
 
 function enter() {
+  leave();
+  const epoch = shellEpoch;
   const s = store.get();
   clear(app);
 
@@ -347,10 +382,11 @@ function enter() {
   // The organization decides the menu (features, admin) and the branding; the first page
   // waits for it so it does not render twice.
   loadOrg().finally(() => {
+    if (epoch !== shellEpoch) return;
     router.start(onRoute);
     startStream();
-    startPolling();
-    bindKeys();
+    stopPolling = startPolling();
+    stopKeys = bindKeys();
   });
   if (s.demo) toast('Demo mode: everything on this page is fixture data. Nothing talks to a server.', { kind: 'info', ttl: 6000 });
 }
@@ -457,13 +493,19 @@ function onEvent(e) {
 }
 
 function startPolling() {
-  setInterval(() => {
+  const offlineInterval = setInterval(() => {
     if (document.hidden || store.get().connection === 'live') return;
     refreshSoon();
   }, 15000);
   // Even when live, a gentle periodic refresh keeps relative timestamps honest.
-  setInterval(() => { if (!document.hidden) refreshSoon(); }, 60000);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshSoon(); });
+  const clockInterval = setInterval(() => { if (!document.hidden) refreshSoon(); }, 60000);
+  const onVisible = () => { if (!document.hidden) refreshSoon(); };
+  document.addEventListener('visibilitychange', onVisible);
+  return () => {
+    clearInterval(offlineInterval);
+    clearInterval(clockInterval);
+    document.removeEventListener('visibilitychange', onVisible);
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -520,7 +562,8 @@ function showShortcuts() {
 
 function bindKeys() {
   let pendingG = false;
-  document.addEventListener('keydown', ev => {
+  let clearPending = null;
+  const onKeyDown = ev => {
     const tag = (ev.target.tagName || '').toLowerCase();
     const typing = tag === 'input' || tag === 'select' || tag === 'textarea' || ev.target.isContentEditable;
     if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === 'k') { ev.preventDefault(); openCmd(); return; }
@@ -538,6 +581,12 @@ function bindKeys() {
       return;
     }
     if (ev.key.toLowerCase() === 'g') pendingG = true;
-    setTimeout(() => { pendingG = false; }, 900);
-  });
+    if (clearPending) clearTimeout(clearPending);
+    clearPending = setTimeout(() => { pendingG = false; clearPending = null; }, 900);
+  };
+  document.addEventListener('keydown', onKeyDown);
+  return () => {
+    document.removeEventListener('keydown', onKeyDown);
+    if (clearPending) clearTimeout(clearPending);
+  };
 }

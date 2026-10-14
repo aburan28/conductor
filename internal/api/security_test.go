@@ -429,7 +429,7 @@ func TestNoGETRouteLeaksAPrivateTask(t *testing.T) {
 	subst := map[string]string{
 		"{project}": h.project.ID, "{task}": started.TaskID, "{attempt}": started.AttemptID,
 		"{session}": session.ID, "{ticket}": ticket.ID, "{provider}": "google",
-		"{id}": string(h.alice.ID),
+		"{id}": string(h.alice.ID), "{name}": "does-not-exist",
 	}
 	routes := []string{
 		"/v1/whoami", "/v1/projects", "/v1/projects/{project}", "/v1/projects/{project}/members",
@@ -457,6 +457,10 @@ func TestNoGETRouteLeaksAPrivateTask(t *testing.T) {
 		"/scim/v2/Users", "/scim/v2/Users/{id}", "/scim/v2/Groups", "/scim/v2/Groups/{id}",
 		"/v1/projects/{project}/github/issues", "/v1/tasks/{task}/issue",
 		"/v1/projects/{project}/notifications",
+		// Project secrets: names/hints only on list/export; get returns a value but never
+		// task private markers. Walked so a new GET cannot skip the privacy check.
+		"/v1/projects/{project}/secrets", "/v1/projects/{project}/secrets/export",
+		"/v1/projects/{project}/secrets/{name}",
 		// The stream is read separately below; it never ends on its own.
 	}
 	assertRoutesCovered(t, append(routes, "/v1/projects/{project}/events/stream"))

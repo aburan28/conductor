@@ -81,7 +81,7 @@ export default defineView({
       { key: 'rtt_ms', label: 'Round trip', num: true, render: p => p.rtt_ms ? p.rtt_ms + ' ms' : '—' },
       { key: 'last_check', label: 'Checked', render: p => relTime(p.last_check), sort: p => new Date(p.last_check) },
       { key: 'last_error', label: 'Problem', render: p => p.last_error || '' },
-    ], rows: peers }) : empty('This daemon has no peers. Peering joins daemons on other machines into one view of the work.', 'conductord --peer-ca ca.pem --peer-cert me.pem --peer-key me.key --peer NAME=URL') }) : null;
+    ], rows: peers }) : empty('This daemon has no peer links. Peering reports another daemon’s identity and reachability; shared tasks require one control plane or replicas using the same PostgreSQL database.', 'See docs/REMOTE_ACCESS.md for tailnet and peer setup.') }) : null;
 
     return h('div', { class: 'stack', style: { gap: '20px' } }, kpis, modelsLive, sessionCard, runnersCard, peersCard, catalog);
   },

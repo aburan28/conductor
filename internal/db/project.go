@@ -127,6 +127,37 @@ func (s *Store) ListProjectsFor(ctx context.Context, principalID domain.ID) ([]d
 	return out, rows.Err()
 }
 
+// SoleProjectInOrg returns the organization's only project when there is exactly one.
+// Used by bootstrap so a solo machine reuses its project instead of minting another
+// from a worktree directory name.
+func (s *Store) SoleProjectInOrg(ctx context.Context, orgID domain.ID) (domain.Project, bool, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT `+projectColumns+`
+		  FROM projects p
+		 WHERE p.organization_id = $1::uuid
+		 ORDER BY p.created_at
+		 LIMIT 2`, orgID)
+	if err != nil {
+		return domain.Project{}, false, err
+	}
+	defer rows.Close()
+	var out []domain.Project
+	for rows.Next() {
+		p, err := scanProject(rows.Scan)
+		if err != nil {
+			return domain.Project{}, false, err
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return domain.Project{}, false, err
+	}
+	if len(out) != 1 {
+		return domain.Project{}, false, nil
+	}
+	return out[0], true, nil
+}
+
 func (s *Store) UpdateProjectConfig(ctx context.Context, id domain.ID, cfg domain.ProjectConfig) error {
 	body, err := marshalJSON(cfg)
 	if err != nil {

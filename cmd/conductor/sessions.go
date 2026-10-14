@@ -6,7 +6,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -14,6 +16,9 @@ import (
 	"time"
 
 	"github.com/aburan28/conductor/internal/checkpoint"
+	"github.com/aburan28/conductor/internal/client"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/externalwork"
 	"github.com/aburan28/conductor/internal/localstate"
 	"github.com/aburan28/conductor/internal/privacy"
 	"github.com/aburan28/conductor/internal/shutdownhook"
@@ -35,7 +40,7 @@ var discoverSessions = localstate.Discover
 
 func cmdSessions(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: conductor sessions <save|list|export|install-hook>")
+		return errors.New("usage: conductor sessions <save|list|discover|scan|install-scan|import|export|install-hook>")
 	}
 	sub, rest := args[0], args[1:]
 
@@ -46,11 +51,389 @@ func cmdSessions(ctx context.Context, args []string) error {
 		return sessionsList(ctx, rest)
 	case "export":
 		return sessionsExport(ctx, rest)
+	case "discover":
+		return sessionsDiscover(ctx, rest)
+	case "scan":
+		return sessionsScan(ctx, rest)
+	case "install-scan":
+		return sessionsInstallScan(ctx, rest)
+	case "import":
+		return sessionsImport(ctx, rest)
 	case "install-hook":
 		return sessionsInstallHook(ctx, rest)
 	default:
 		return fmt.Errorf("unknown sessions subcommand %q", sub)
 	}
+}
+
+func externalWorkspace(ctx context.Context, override string) (string, error) {
+	if override != "" {
+		return filepath.Abs(override)
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if root, err := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel").Output(); err == nil {
+		return strings.TrimSpace(string(root)), nil
+	}
+	return wd, nil
+}
+
+// scan refreshes owner-local metadata state. Schedulers call this command directly.
+func sessionsScan(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("sessions scan", flag.ExitOnError)
+	since := fs.Duration("since", 7*24*time.Hour, "look back this far; 0 scans all saved records")
+	workspace := fs.String("workspace", "", "repository whose project configs to include")
+	stateDir := fs.String("state-dir", os.Getenv("CONDUCTOR_STATE_DIR"), "Conductor local state directory")
+	status := fs.Bool("status", false, "show last stored scan without rescanning")
+	asJSON := fs.Bool("json", false, "print summary as JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || *since < 0 {
+		return errors.New("usage: conductor sessions scan [--since 168h] [--workspace path] [--status] [--json]")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	if *stateDir != "" {
+		*stateDir, err = filepath.Abs(*stateDir)
+		if err != nil {
+			return err
+		}
+	}
+	path := externalwork.InventoryPath(home, *stateDir)
+	var inv externalwork.Inventory
+	if *status {
+		inv, err = externalwork.LoadLatest(path)
+		if err != nil {
+			return err
+		}
+	} else {
+		root, e := externalWorkspace(ctx, *workspace)
+		if e != nil {
+			return e
+		}
+		cutoff := time.Time{}
+		if *since > 0 {
+			cutoff = time.Now().Add(-*since)
+		}
+		inv = externalwork.Scan(ctx, home, root, cutoff)
+		if err := externalwork.SaveLatest(path, inv); err != nil {
+			return err
+		}
+	}
+	count := map[string]int{}
+	for _, c := range inv.Candidates {
+		count[c.Source]++
+	}
+	summary := map[string]any{"scanned_at": inv.ScannedAt, "path": path, "total": len(inv.Candidates), "by_source": count, "warnings": inv.Warnings}
+	if *asJSON {
+		return emit(summary)
+	}
+	fmt.Printf("External work inventory: %s (%d saved records; running state unknown)\n", path, len(inv.Candidates))
+	for _, w := range inv.Warnings {
+		fmt.Fprintf(os.Stderr, "conductor: %s\n", w)
+	}
+	return nil
+}
+
+// install-scan uses a user-level OS timer; the Conductor server cannot inspect client files.
+func sessionsInstallScan(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("sessions install-scan", flag.ExitOnError)
+	interval := fs.Duration("interval", 15*time.Minute, "background scan cadence")
+	since := fs.Duration("since", 7*24*time.Hour, "saved session lookback")
+	workspace := fs.String("workspace", "", "repository whose project configs to include")
+	stateDir := fs.String("state-dir", os.Getenv("CONDUCTOR_STATE_DIR"), "Conductor local state directory")
+	install := fs.Bool("install", false, "write scheduler files")
+	activate := fs.Bool("activate", false, "enable scheduler after installation")
+	uninstall := fs.Bool("uninstall", false, "disable and remove scheduler files")
+	asJSON := fs.Bool("json", false, "machine-readable schedule plan")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || (*activate && !*install) || (*uninstall && (*install || *activate)) {
+		return errors.New("usage: conductor sessions install-scan [--interval 15m] [--install --activate | --uninstall]")
+	}
+	root, err := externalWorkspace(ctx, *workspace)
+	if err != nil {
+		return err
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	if *stateDir != "" {
+		*stateDir, err = filepath.Abs(*stateDir)
+		if err != nil {
+			return err
+		}
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	plan, err := externalwork.BuildSchedule(externalwork.ScheduleOptions{Exe: exe, Home: home, Workspace: root, StateDir: *stateDir, GOOS: runtime.GOOS, Interval: *interval, Since: *since})
+	if err != nil {
+		return err
+	}
+	if *uninstall {
+		if err := changeScanSchedule(ctx, plan, false); err != nil {
+			return err
+		}
+		for _, f := range plan.Files {
+			if err := os.Remove(f.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+		if runtime.GOOS == "linux" {
+			if out, err := exec.CommandContext(ctx, "systemctl", "--user", "daemon-reload").CombinedOutput(); err != nil {
+				return fmt.Errorf("systemctl daemon-reload: %w: %s", err, strings.TrimSpace(string(out)))
+			}
+		}
+		fmt.Println("Background scan removed.")
+		return nil
+	}
+	if *install {
+		for _, f := range plan.Files {
+			if err := os.MkdirAll(filepath.Dir(f.Path), 0o755); err != nil {
+				return err
+			}
+			if err := os.WriteFile(f.Path, []byte(f.Content), f.Mode); err != nil {
+				return err
+			}
+		}
+		if *activate {
+			if err := changeScanSchedule(ctx, plan, true); err != nil {
+				return err
+			}
+		}
+	}
+	if *asJSON {
+		return emit(map[string]any{"plan": plan, "installed": *install, "active": *activate})
+	}
+	for _, f := range plan.Files {
+		fmt.Printf("%s\n%s\n", f.Path, f.Content)
+	}
+	if *install && *activate {
+		fmt.Println("Background scan activated.")
+	} else if *install {
+		fmt.Println("Schedule installed; run again with --install --activate to enable it.")
+	}
+	return nil
+}
+
+func changeScanSchedule(ctx context.Context, p externalwork.SchedulePlan, enable bool) error {
+	run := func(name string, args ...string) error {
+		out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+	if p.Label != "" {
+		target := fmt.Sprintf("gui/%d", os.Getuid())
+		_ = exec.CommandContext(ctx, "launchctl", "bootout", target, p.Files[0].Path).Run()
+		if enable {
+			return run("launchctl", "bootstrap", target, p.Files[0].Path)
+		}
+		return nil
+	}
+	if enable {
+		if err := run("systemctl", "--user", "daemon-reload"); err != nil {
+			return err
+		}
+		if err := run("systemctl", "--user", "enable", "--now", p.Timer); err != nil {
+			return err
+		}
+		return run("systemctl", "--user", "start", p.Service)
+	}
+	_ = exec.CommandContext(ctx, "systemctl", "--user", "disable", "--now", p.Timer).Run()
+	return nil
+}
+
+// discover exports an owner-local metadata inventory. The export is deliberately distinct
+// from `sessions export`, which is Conductor's own registered-session history.
+func sessionsDiscover(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("sessions discover", flag.ExitOnError)
+	since := fs.Duration("since", 7*24*time.Hour, "look back this far for saved sessions; 0 scans all")
+	output := fs.String("output", "", "write private JSON inventory to a new file")
+	asJSON := fs.Bool("json", false, "print the inventory as JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || *since < 0 {
+		return errors.New("usage: conductor sessions discover [--since 168h] [--output new-file] [--json]")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	workspace, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	if root, err := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel").Output(); err == nil {
+		workspace = strings.TrimSpace(string(root))
+	}
+	cutoff := time.Time{}
+	if *since > 0 {
+		cutoff = time.Now().Add(-*since)
+	}
+	inv := externalwork.Scan(ctx, home, workspace, cutoff)
+	if *output != "" {
+		f, err := os.OpenFile(*output, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			return err
+		}
+		encodeErr := json.NewEncoder(f).Encode(inv)
+		closeErr := f.Close()
+		if encodeErr != nil {
+			return encodeErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+	}
+	if *asJSON {
+		return emit(inv)
+	}
+	for _, source := range []string{"codex", "claude", "cursor"} {
+		fmt.Printf("%s config files:\n", source)
+		for _, p := range inv.Configs[source] {
+			fmt.Printf("  %s\n", p)
+		}
+		if len(inv.Configs[source]) == 0 {
+			fmt.Println("  (none found)")
+		}
+	}
+	fmt.Printf("Saved sessions found: %d (running state unknown)\n", len(inv.Candidates))
+	for _, c := range inv.Candidates {
+		fmt.Printf("  %-43s %s %s\n", c.Ref(), c.UpdatedAt.Format(time.RFC3339), c.Title)
+	}
+	for _, w := range inv.Warnings {
+		fmt.Fprintf(os.Stderr, "conductor: %s\n", w)
+	}
+	if *output != "" {
+		fmt.Printf("Inventory written to %s (mode 0600)\n", *output)
+	}
+	return nil
+}
+
+// import creates review cards, never live session registrations. Even --apply leaves the
+// task proposed and private, so discovering a chat cannot dispatch work by accident.
+func sessionsImport(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("sessions import", flag.ExitOnError)
+	input := fs.String("input", "", "inventory written by sessions discover")
+	project := fs.String("project", "", "destination Conductor project")
+	apply := fs.Bool("apply", false, "create selected private proposed tasks")
+	asJSON := fs.Bool("json", false, "machine-readable preview/result")
+	pos, err := parseFlags(fs, args)
+	if err != nil {
+		return err
+	}
+	if *input == "" || len(pos) == 0 {
+		return errors.New("usage: conductor sessions import --input inventory.json [--project slug] <source:uuid>... [--apply]")
+	}
+	f, err := os.Open(*input)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	var inv externalwork.Inventory
+	dec := json.NewDecoder(io.LimitReader(f, 32<<20))
+	if err := dec.Decode(&inv); err != nil {
+		return err
+	}
+	if inv.Version != 1 {
+		return fmt.Errorf("unsupported inventory version %d", inv.Version)
+	}
+	chosen := make([]externalwork.Candidate, 0, len(pos))
+	seen := map[string]bool{}
+	for _, want := range pos {
+		if seen[want] {
+			continue
+		}
+		var matches []externalwork.Candidate
+		for _, c := range inv.Candidates {
+			if c.Ref() == want {
+				matches = append(matches, c)
+			}
+		}
+		if len(matches) != 1 {
+			return fmt.Errorf("%q matches %d inventory records; require exactly one", want, len(matches))
+		}
+		c := matches[0]
+		if !externalwork.ValidCandidate(c) {
+			return fmt.Errorf("invalid inventory candidate %q", want)
+		}
+		chosen = append(chosen, c)
+		seen[want] = true
+	}
+	if !*apply {
+		if *asJSON {
+			return emit(chosen)
+		}
+		for _, c := range chosen {
+			fmt.Printf("Would create private proposed task for %s (%s)\n", c.Ref(), c.RecordPath)
+		}
+		fmt.Println("Run again with --apply to create these review tasks.")
+		return nil
+	}
+	api, creds, err := mustClient()
+	if err != nil {
+		return err
+	}
+	ref, err := projectRef(*project, creds)
+	if err != nil {
+		return err
+	}
+	var existing struct {
+		Tasks []privacy.TaskView `json:"tasks"`
+	}
+	if err := api.Get(ctx, "/v1/projects/"+ref+"/tasks"+client.Query("limit", "100000"), &existing); err != nil {
+		return err
+	}
+	refs := map[string]bool{}
+	for _, t := range existing.Tasks {
+		refs[t.ExternalRef] = true
+	}
+	type result struct {
+		ExternalRef string `json:"external_ref"`
+		TaskRef     string `json:"task_ref,omitempty"`
+		Status      string `json:"status"`
+	}
+	results := make([]result, 0, len(chosen))
+	for _, c := range chosen {
+		if refs[c.Ref()] {
+			results = append(results, result{c.Ref(), "", "already imported"})
+			continue
+		}
+		if _, err := os.Stat(c.RecordPath); err != nil {
+			return fmt.Errorf("source for %s is no longer available: %w", c.Ref(), err)
+		}
+		var view privacy.TaskView
+		body := externalTaskBody(c)
+		if err := api.Post(ctx, "/v1/projects/"+ref+"/tasks", body, &view); err != nil {
+			return fmt.Errorf("import %s: %w", c.Ref(), err)
+		}
+		refs[c.Ref()] = true
+		results = append(results, result{c.Ref(), view.Ref, "created"})
+	}
+	if *asJSON {
+		return emit(results)
+	}
+	for _, r := range results {
+		fmt.Printf("%s: %s %s\n", r.ExternalRef, r.Status, r.TaskRef)
+	}
+	return nil
+}
+
+func externalTaskBody(c externalwork.Candidate) map[string]any {
+	title := fmt.Sprintf("Review %s session %s", strings.ToUpper(c.Source[:1])+c.Source[1:], c.ID[:8])
+	return map[string]any{"title": title, "objective": "Review the source session locally and define the remaining work before dispatch.", "external_ref": c.Ref(), "visibility": "private", "status": domain.TaskProposed, "scopes": []domain.ScopeRequest{}}
 }
 
 // ---------------------------------------------------------------------------
