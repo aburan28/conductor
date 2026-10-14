@@ -384,6 +384,20 @@ Example:
 		summary: "freeze every agent terminal on this machine; save how to revive them"},
 	{name: "resume", group: "Sessions and machines",
 		summary: "wake paused sessions, reopening any closed terminals"},
+	{name: "systemd", group: "Sessions and machines", subs: []string{"install", "pull-images", "status"},
+		summary: "user units for postgres + conductord (+ vLLM) with image pre-pulls",
+		topic: `conductor systemd — user units for postgres + conductord (+ vLLM)
+
+Usage:
+  conductor systemd install      write the user units (postgres, conductord, optional vLLM)
+  conductor systemd pull-images  pre-pull every image the units need
+  conductor systemd status       which unit images are cached locally
+
+Example:
+  conductor systemd install
+
+Run ` + "`conductor systemd <subcommand> -h`" + ` for its flags.
+`},
 	{name: "accounts", group: "Sessions and machines", subs: []string{"add", "list", "switch", "exhaust", "ok"},
 		summary: "harness login profiles: switch accounts when usage runs out",
 		topic: `conductor accounts — harness login profiles resume-all can switch between
@@ -417,6 +431,24 @@ Example:
   conductor sessions save all
 
 Run ` + "`conductor sessions <subcommand> -h`" + ` for its flags.
+`},
+	{name: "memory", group: "Sessions and machines", subs: []string{"configure", "disable", "status", "remember", "search", "timeline", "show", "forget", "context"},
+		summary: "private coding-session observations in your Redis or ElastiCache store",
+		topic: `conductor memory — private observations in an owner-selected Redis store
+
+Memory is off until configured. Records are encrypted locally before Redis receives them.
+Remote endpoints require verified TLS.
+
+Usage:
+  conductor memory configure --local
+  conductor memory configure --url-stdin [--cluster]
+  conductor memory status | disable
+  conductor memory remember < note.txt
+  conductor memory search WORDS | timeline ID | show ID | forget ID
+
+Example:
+  conductor memory configure --local
+  conductor memory search parser
 `},
 	{name: "checkpoint", group: "Sessions and machines",
 		subs:    []string{"capture", "list", "show", "resume", "export", "import", "push", "pull", "prune"},
@@ -567,7 +599,7 @@ Run ` + "`conductor sso <subcommand> -h`" + ` for its flags.
 		summary: "create the GitHub App, link a repo, sync its issues into tasks"},
 
 	// Other
-	{name: "hook", group: "Other", subs: []string{"pre-tool", "session-start", "session-end", "checkpoint"},
+	{name: "hook", group: "Other", subs: []string{"pre-tool", "session-start", "session-end", "checkpoint", "memory-observe", "memory-context"},
 		summary: "entry points for harness hooks (installed by conductor integrate)",
 		topic: `conductor hook — entry points a coding tool's hooks call
 
@@ -576,6 +608,7 @@ Codex, and other tools that support hooks.
 
 Usage:
   conductor hook pre-tool | session-start | session-end | checkpoint
+  conductor hook memory-observe | memory-context
 
 Example:
   conductor integrate claude    # installs the hooks
