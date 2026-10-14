@@ -64,6 +64,8 @@ type Server struct {
 	sso *ssoState
 	// admin is organization policy and the config file's locks (admin*.go).
 	admin *adminState
+	// localResume is the machine-local resume hook; nil disables the endpoint.
+	localResume func() (any, error)
 }
 
 type Options struct {
@@ -98,6 +100,10 @@ type Options struct {
 	// Admin configures organization policy: the config file's locks and the effective
 	// configuration the admin area shows (admin*.go).
 	Admin AdminOptions
+	// LocalResume is the machine-local, one-button reboot recovery: switch off
+	// exhausted harness accounts, then wake every paused or saved session. Nil
+	// disables the endpoint (e.g. for control planes not running on a laptop).
+	LocalResume func() (any, error)
 }
 
 func New(store *db.Store, svc *coord.Service, opts Options) *Server {
@@ -122,6 +128,7 @@ func New(store *db.Store, svc *coord.Service, opts Options) *Server {
 		notify:      opts.Notify,
 		secrets:     opts.Secrets,
 		admin:       newAdminState(opts.Admin),
+		localResume: opts.LocalResume,
 	}
 	s.ops = newOpsState(store, s, opts.Ops)
 	s.routes()
