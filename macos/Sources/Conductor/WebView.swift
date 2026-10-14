@@ -22,9 +22,13 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
     }
 
     func show(_ url: URL) {
+        let previous = origin
         origin = url
         failure = nil
-        if view.url?.host != url.host || view.url?.port != url.port {
+        // The toolbar changes only the project fragment for another project on this same
+        // server. Pass that navigation to the dashboard so its hashchange handler can switch
+        // its data and stream as well as the native menu bar.
+        if previous != url || view.url == nil {
             view.load(URLRequest(url: url))
         }
     }

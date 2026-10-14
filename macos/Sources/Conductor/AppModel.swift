@@ -102,8 +102,8 @@ final class AppModel: ObservableObject {
     func launch() async {
         token = try? secrets.read(service: KeychainNames.tokenService, account: settings.endpoint)
         if settings.isAttached {
-            phase = .running
             await connect()
+            phase = daemonUp ? .running : .failed("Could not reach \(settings.endpoint). Check the address and try again.")
             startTimer()
             return
         }
@@ -112,6 +112,14 @@ final class AppModel: ObservableObject {
             return
         }
         supervisor = makeSupervisor(binaries)
+        let ownsDaemon = FileManager.default.fileExists(atPath: paths.launchAgentPlist(LaunchAgents.daemonLabel).path)
+        let hasCluster = supervisor?.config.postgres?.isInitialized() ?? true
+        if !settings.onboardingComplete && !ownsDaemon && !hasCluster {
+            // A first launch must ask whether to join an existing Conductor before creating
+            // a second empty database. Starting locally remains an explicit onboarding choice.
+            phase = .idle
+            return
+        }
         let reading = await readStorage()
         storage = reading.show
         // A first run on a Mac whose bucket may hold this person's database: offer the restore,
@@ -183,8 +191,11 @@ final class AppModel: ObservableObject {
         stopStreaming()
         token = try? secrets.read(service: KeychainNames.tokenService, account: settings.endpoint)
         if settings.isAttached {
+            await supervisor?.uninstallAgents()
             supervisor = nil
             await connect()
+            phase = daemonUp ? .running : .failed("Could not reach \(settings.endpoint). Check the address and try again.")
+            if !daemonUp { problem = "Could not reach \(settings.endpoint)." }
             return
         }
         guard let binaries else { return }
@@ -621,6 +632,10 @@ final class AppModel: ObservableObject {
     }
 
     func finishOnboarding() {
+        guard daemonUp, signedIn, !projects.isEmpty else {
+            problem = "Connect to a working Conductor and sign in to a project before opening the dashboard."
+            return
+        }
         settings.onboardingComplete = true
         saveSettings()
     }

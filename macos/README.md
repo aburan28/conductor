@@ -1,7 +1,8 @@
 # Conductor for macOS
 
-`Conductor.app` runs the control plane, its database, and the dashboard as one Mac app:
-install, open, done. The plan and the reasons behind it are in
+`Conductor.app` can run the control plane, its database, and the dashboard as one Mac app.
+On a new installation it first asks whether to connect to an existing Conductor or start
+a new local control plane. The plan and the reasons behind it are in
 [docs/MACOS_APP.md](../docs/MACOS_APP.md); the storage settings it edits are
 [docs/STORAGE.md](../docs/STORAGE.md).
 
@@ -43,6 +44,12 @@ The app owns three launchd user agents, each a plain plist in `~/Library/LaunchA
 
 `launchctl print gui/$(id -u)/dev.conductor.daemon` shows one; their logs are in
 `~/Library/Logs/Conductor`.
+
+If this Mac already runs Conductor outside the app, choose **Connect to Existing** during
+onboarding and enter its base address, for example `https://127.0.0.1:8443`. The app then
+shows that control plane without starting a second database. Do not paste an invite link
+or token into the address field. **Start New on This Mac** creates a separate local
+control plane; use it only when that is the intended data store.
 
 ## Build
 

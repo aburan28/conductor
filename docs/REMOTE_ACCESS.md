@@ -1,7 +1,19 @@
 # Remote access
 
-How teammates reach a Conductor control plane that is not on their own machine. Prefer a
+How Conductor instances, workspaces, and coding agents connect across machines. Prefer a
 private overlay; do not punch holes in home NATs from Conductor itself.
+
+## Choose what needs to be shared
+
+| Goal | Connection | Where tasks live |
+|---|---|---|
+| Agents and workspaces on several hosts coordinate on the same projects | Point each CLI/MCP client at one Conductor endpoint over Tailscale Serve | The one control plane's PostgreSQL database |
+| Several `conductord` processes serve the same projects | Give every replica the same PostgreSQL DSN and server secret key (see [Operations](OPERATIONS.md#running-more-than-one-replica)) | Their shared PostgreSQL database |
+| Independent control planes see whether each other is reachable | Configure the mutual-TLS peer link over a raw tailnet TCP port | Each control plane keeps its own tasks; peering does not replicate them |
+
+MagicDNS names devices so clients can reach a known host. It does not discover Conductor
+projects or synchronize databases. Pick the first topology for agents in different tools
+and checkouts that need one task ledger.
 
 ## Recommended path: Tailscale (or Headscale)
 
@@ -11,8 +23,14 @@ private overlay; do not punch holes in home NATs from Conductor itself.
 2. Keep `conductord` on loopback (`127.0.0.1:<port>`). Publish only through Tailscale:
 
    ```bash
-   tailscale serve --bg 8080   # port must match conductord's --addr
+   tailscale serve --bg 8080   # plain HTTP backend on 127.0.0.1:8080
+   # If the loopback daemon itself serves HTTPS, as on this Mac's port 8443:
+   tailscale serve --bg https+insecure://127.0.0.1:8443
    ```
+
+   Use the command that matches the daemon's actual listener. In the second form,
+   `https+insecure` affects only Serve's connection to the loopback backend; clients
+   still use Tailscale's HTTPS endpoint.
 
 3. Use the machine's **MagicDNS** name as the public URL everywhere Conductor needs one:
 
@@ -37,7 +55,56 @@ same when the join URL would otherwise point at `127.0.0.1`.
 | Dashboard | `https://<magicdns>/` |
 | Join link | from `conductor invite … --endpoint https://<magicdns>` |
 | MCP (Streamable HTTP) | `https://<magicdns>/mcp` (or `/mcp/{project}`) |
-| SSO / GitHub webhooks | need `--public-url https://<magicdns>` on `conductord` |
+| SSO callbacks | need `--public-url https://<magicdns>` and a browser on the tailnet |
+| GitHub | a private tailnet URL is unreachable by GitHub webhooks; use Conductor's GitHub poller |
+
+On each agent host, join the same tailnet, verify that the MagicDNS name resolves, then
+save the endpoint and install the integration in each checkout:
+
+```bash
+conductor login --endpoint https://your-mac.tailnet.ts.net --token <your-own-token> --project <project>
+conductor integrate codex --transport http --endpoint https://your-mac.tailnet.ts.net
+conductor integrate claude --transport http --endpoint https://your-mac.tailnet.ts.net
+conductor integrate cursor --transport http --endpoint https://your-mac.tailnet.ts.net
+```
+
+Run only the integrations for tools in use. Give each agent its own Conductor token and
+project membership. `conductor peers` is a daemon link check; successful client login,
+MCP calls, conflict checks, and task claims verify the shared workflow.
+
+## Linking independent control planes
+
+The dashboard Serve route above terminates HTTPS at Tailscale. Conductor's peer route
+requires the daemons to exchange mesh client certificates during the TLS handshake, so
+the dashboard route cannot carry peer mutual TLS. Expose a separate raw TCP forward on
+each daemon host while keeping `conductord` bound to loopback:
+
+```bash
+# Run on each host; the daemon behind this port must serve its mesh certificate.
+tailscale serve --bg --tcp=8444 tcp://127.0.0.1:8443
+
+# On host A, name host B by its MagicDNS FQDN and raw-forward port.
+conductord --addr 127.0.0.1:8443 \
+  --peer-ca .conductor/certs/ca.pem \
+  --peer-cert .conductor/certs/host-a.your-tailnet.ts.net/cert.pem \
+  --peer-key .conductor/certs/host-a.your-tailnet.ts.net/key.pem \
+  --peer host-b.your-tailnet.ts.net=https://host-b.your-tailnet.ts.net:8444
+```
+
+Configure host B symmetrically. On a secure provisioning machine, run
+`scripts/gen-peer-certs.sh host-a.your-tailnet.ts.net host-b.your-tailnet.ts.net` to
+put each exact MagicDNS FQDN in its certificate DNS SAN. Certificates generated for
+short names alone will fail hostname verification at `*.ts.net`. Share the mesh CA
+certificate and each host's own certificate/key through a secure channel; keep the CA
+key off agent hosts.
+Allow the peer port in the tailnet access policy and confirm `conductor peers` reports
+`up` on both sides. Peer links report identity and reachability only. Use the shared
+database topology above when tasks must appear on every instance.
+
+`--peer-discover-dns` needs a DNS SRV record set. MagicDNS registers device names but
+does not create Conductor's SRV directory. Use explicit `--peer` entries or provide a
+separate DNS service for that SRV record; `mesh.internal` on one Mac is not automatically
+visible to other tailnet nodes.
 
 Local sign-in never applies through the MagicDNS name: those requests are remote and use
 the token in the invite link (see `docs/MACOS_APP.md`).

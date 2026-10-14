@@ -20,10 +20,10 @@ struct OnboardingView: View {
                     }
                 }
                 Spacer()
-                if current != .done {
-                    Button("Skip setup") { model.finishOnboarding() }
+                if current == .tools || current == .github {
+                    Button("Skip optional setup") { model.finishOnboarding() }
                         .buttonStyle(.link)
-                        .help("Go straight to the dashboard; Settings and the Conductor menu have every step")
+                        .help("Connect tools and GitHub later in Settings")
                 }
             }
             .padding(24)
@@ -74,6 +74,14 @@ private struct StepHeader: View {
 
 private struct ServicesStep: View {
     @EnvironmentObject var model: AppModel
+    @State private var existingEndpoint = ""
+
+    private var validEndpoint: Bool {
+        guard let url = URLComponents(string: existingEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)) else { return false }
+        return (url.scheme == "http" || url.scheme == "https") && url.host != nil
+            && url.user == nil && url.password == nil && url.query == nil && url.fragment == nil
+            && (url.path.isEmpty || url.path == "/")
+    }
 
     var body: some View {
         StepHeader(title: "Start Conductor",
@@ -93,6 +101,22 @@ private struct ServicesStep: View {
                     }
                 }
                 .padding(6)
+            }
+        } else if model.phase == .idle && !model.settings.isAttached {
+            Text("If you already use Conductor, connect to that server so your existing projects and tasks appear here.")
+                .font(.callout).foregroundStyle(.secondary)
+            TextField("Existing Conductor address", text: $existingEndpoint,
+                      prompt: Text("https://127.0.0.1:8443"))
+            Text("Use the server address only, without an invite token or project link.")
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Button("Connect to Existing") {
+                    model.settings.attachEndpoint = existingEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+                    model.saveSettings()
+                    Task { await model.restartServices() }
+                }
+                .disabled(!validEndpoint)
+                Button("Start New on This Mac") { Task { await model.restartServices() } }
             }
         } else {
             HStack(spacing: 10) {
