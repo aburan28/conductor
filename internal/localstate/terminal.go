@@ -47,7 +47,12 @@ func newLauncher() launcher {
 			// wedged launcher must fall through to the next one, not hang the loop.
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
-			out, err := exec.CommandContext(ctx, argv[0], argv[1:]...).CombinedOutput()
+			cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+			// Killing osascript is not always enough: Terminal.app can hold the
+			// output pipes open, and Wait would block on that forever. WaitDelay
+			// bounds the wait past the kill as well.
+			cmd.WaitDelay = 5 * time.Second
+			out, err := cmd.CombinedOutput()
 			if err != nil {
 				return fmt.Errorf("%s: %v: %s", filepath.Base(argv[0]), err,
 					strings.TrimSpace(string(out)))
