@@ -384,6 +384,25 @@ Example:
 		summary: "freeze every agent terminal on this machine; save how to revive them"},
 	{name: "resume", group: "Sessions and machines",
 		summary: "wake paused sessions, reopening any closed terminals"},
+	{name: "accounts", group: "Sessions and machines", subs: []string{"add", "list", "switch", "exhaust", "ok"},
+		summary: "harness login profiles: switch accounts when usage runs out",
+		topic: `conductor accounts — harness login profiles resume-all can switch between
+
+Usage:
+  conductor accounts add <harness> <name>          snapshot the harness's current login as <name>
+  conductor accounts list [harness]               profiles, which is active, and quota markers
+  conductor accounts switch <harness> <name>       make <name> the harness's live account
+  conductor accounts exhaust <harness> <name>      mark an account out of usage
+  conductor accounts ok <harness> <name>           mark an account usable again
+
+Harnesses: claude, codex, opencode. An account is added by logging in with the harness
+itself, then snapshotting; a quota marker makes resume-all prefer another account when
+waking sessions after a restart.
+
+Example:
+  conductor accounts add claude main
+
+Run ` + "`conductor accounts <subcommand> -h`" + ` for its flags.`},
 	{name: "sessions", group: "Sessions and machines", subs: []string{"save", "list", "export", "install-hook"},
 		summary: "keep agent sessions resumable past a closed terminal or reboot",
 		topic: `conductor sessions — keep agent sessions resumable on this machine
