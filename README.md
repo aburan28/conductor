@@ -1013,6 +1013,34 @@ fresh record — save again if it should survive the next reboot too. Saving is 
 touches nothing on the server; `conductor sessions export` is the other direction — the
 project's whole session history, everyone's, as a JSON file.
 
+### One button back — and onto a fresh account
+
+The dashboard's Overview page has a **Resume all sessions** button: one POST to
+`/v1/local/resume-all` does what `conductor resume` does — wake every paused or saved
+session on the machine, reopening the terminals a restart took away — after first moving any
+harness off an account that has run out of usage. The endpoint only exists on a control
+plane running on the machine with the terminals (`conductord` on the laptop); the sessions
+and the accounts it touches are that machine's.
+
+Accounts are named snapshots of a harness's own login, kept under `~/.conductor/accounts/`:
+
+```bash
+conductor accounts add claude main       # snapshot the login the harness is using now
+conductor accounts list                 # profiles, which is active, quota markers
+conductor accounts switch claude backup # make another account the live one
+conductor accounts exhaust claude main  # mark an account out of usage
+conductor accounts ok claude main       # window rolled over: usable again
+```
+
+Add accounts by logging in with the harness itself, then snapshotting — Conductor never
+performs a harness's login dance, it only moves credential files it can already read.
+Which account is live is read from the harness's own credential file, never tracked
+separately, so it cannot drift. `exhaust` drops a marker beside the profile; the
+resume-all button (and only it) avoids marked accounts when waking sessions — switching
+before resuming, because a harness reads its credentials at startup. Clear the marker with
+`ok` when the quota window rolls over. Nothing is sent anywhere: profiles live beside the
+machine's other local state, `0600`, like the credentials themselves.
+
 ### Surviving a shutdown, and the machine itself
 
 You should not have to remember to run `save` before a reboot. Three layers make a shutdown

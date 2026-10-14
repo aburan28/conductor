@@ -40,6 +40,7 @@ import (
 	"github.com/aburan28/conductor/internal/githubapp"
 	"github.com/aburan28/conductor/internal/notify"
 	"github.com/aburan28/conductor/internal/peer"
+	"github.com/aburan28/conductor/internal/resume"
 	"github.com/aburan28/conductor/internal/scheduler"
 	"github.com/aburan28/conductor/internal/secretbox"
 	"github.com/aburan28/conductor/internal/secrets"
@@ -576,6 +577,10 @@ func serve(args []string) error {
 		Ops:          ops,
 		SSO:          cfg.sso,
 		Admin:        cfg.admin,
+		// The one-button reboot recovery: this daemon runs on the laptop whose
+		// terminals hold the sessions, so the dashboard's resume-all button
+		// reaches the real machine.
+		LocalResume: func() (any, error) { return resume.AllFresh() },
 	})
 	if ghErr == nil {
 		ghErr = gh.Refresh(life)
