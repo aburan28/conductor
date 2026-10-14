@@ -1,6 +1,6 @@
 // Package secretbox seals small secrets that conductord stores in Postgres (the GitHub App's
-// private key and webhook secret) with AES-256-GCM under a key that is kept outside the
-// database.
+// private key and webhook secret, notification channel credentials, and project vault
+// secrets) with AES-256-GCM under a key that is kept outside the database.
 //
 // The point is that a database dump — a backup, a restored copy on a laptop, a replica
 // handed to someone for debugging — no longer carries credentials that let its holder act as

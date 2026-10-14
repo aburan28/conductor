@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,9 +12,29 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aburan28/conductor/internal/externalwork"
 	"github.com/aburan28/conductor/internal/localstate"
 	"github.com/aburan28/conductor/internal/privacy"
 )
+
+func TestExternalTaskBodyKeepsSourceMetadataLocal(t *testing.T) {
+	c := externalwork.Candidate{Source: "codex", ID: "12345678-1234-1234-1234-123456789abc", Title: "private conversation title", Cwd: "/private/work", RecordPath: "/private/work/transcript.jsonl"}
+	b, err := json.Marshal(externalTaskBody(c))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	for _, secret := range []string{c.Title, c.Cwd, c.RecordPath} {
+		if strings.Contains(s, secret) {
+			t.Fatalf("task body leaked local metadata: %s", secret)
+		}
+	}
+	for _, want := range []string{`"visibility":"private"`, `"status":"proposed"`, `"external_ref":"codex:12345678-1234-1234-1234-123456789abc"`} {
+		if !strings.Contains(s, want) {
+			t.Errorf("task body missing %s: %s", want, s)
+		}
+	}
+}
 
 // ---------------------------------------------------------------------------
 // sessions save — selection and the pause/resume decisions

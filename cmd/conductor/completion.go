@@ -64,7 +64,7 @@ _conductor() {
     case "${COMP_WORDS[1]} ${COMP_WORDS[2]}" in
 `)
 	for _, c := range commands {
-		for _, sub := range sortedKeys(c.nested) {
+		for _, sub := range sortedNestedKeys(c.nested) {
 			fmt.Fprintf(w, "      %q) nested=%q ;;\n", c.name+" "+sub, strings.Join(c.nested[sub], " "))
 		}
 	}
@@ -80,7 +80,7 @@ complete -o default -F _conductor conductor
 `)
 }
 
-func sortedKeys(m map[string][]string) []string {
+func sortedNestedKeys(m map[string][]string) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)
@@ -101,7 +101,7 @@ func writeFishCompletion(w io.Writer) {
 			}
 			fmt.Fprintf(w, "complete -c conductor -f -n '__fish_seen_subcommand_from %s' -a %s\n", c.name, sub)
 		}
-		for _, sub := range sortedKeys(c.nested) {
+		for _, sub := range sortedNestedKeys(c.nested) {
 			for _, word := range c.nested[sub] {
 				fmt.Fprintf(w, "complete -c conductor -f -n '__fish_seen_subcommand_from %s; and __fish_seen_subcommand_from %s' -a %s\n", c.name, sub, word)
 			}
