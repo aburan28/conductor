@@ -178,6 +178,10 @@ func (c *Client) Post(ctx context.Context, path string, body, out any) error {
 	return c.Do(ctx, http.MethodPost, path, body, out)
 }
 
+func (c *Client) Put(ctx context.Context, path string, body, out any) error {
+	return c.Do(ctx, http.MethodPut, path, body, out)
+}
+
 func (c *Client) Delete(ctx context.Context, path string, out any) error {
 	return c.Do(ctx, http.MethodDelete, path, nil, out)
 }

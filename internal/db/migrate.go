@@ -41,9 +41,14 @@ func KnownMigrations() []string {
 	}
 	var out []string
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql") {
-			out = append(out, strings.TrimSuffix(e.Name(), ".sql"))
+		name := e.Name()
+		// Skip macOS AppleDouble sidecars (._0001_init.sql) and anything that is not a
+		// real migration filename — go:embed's *.sql glob otherwise picks them up from
+		// volumes that store Finder metadata next to the SQL.
+		if e.IsDir() || !strings.HasSuffix(name, ".sql") || strings.HasPrefix(name, "._") {
+			continue
 		}
+		out = append(out, strings.TrimSuffix(name, ".sql"))
 	}
 	sort.Strings(out)
 	return out

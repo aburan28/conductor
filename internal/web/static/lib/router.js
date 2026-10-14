@@ -7,6 +7,8 @@ export function createRouter(routes) {
     return { ...r, re, keys };
   });
   let listener = () => {};
+  let onPopState = null;
+  let onClick = null;
 
   function match(pathname) {
     for (const r of compiled) {
@@ -30,16 +32,27 @@ export function createRouter(routes) {
   }
 
   function start(fn) {
+    stop();
     listener = fn;
-    window.addEventListener('popstate', () => listener(current()));
-    document.addEventListener('click', ev => {
+    onPopState = () => listener(current());
+    onClick = ev => {
       const a = ev.target.closest && ev.target.closest('a[data-link]');
       if (!a || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.button !== 0) return;
       ev.preventDefault();
       navigate(a.getAttribute('href'));
-    });
+    };
+    window.addEventListener('popstate', onPopState);
+    document.addEventListener('click', onClick);
     listener(current());
   }
 
-  return { match, current, navigate, start };
+  function stop() {
+    if (onPopState) window.removeEventListener('popstate', onPopState);
+    if (onClick) document.removeEventListener('click', onClick);
+    onPopState = null;
+    onClick = null;
+    listener = () => {};
+  }
+
+  return { match, current, navigate, start, stop };
 }
