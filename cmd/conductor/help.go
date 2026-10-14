@@ -393,6 +393,9 @@ Usage:
   conductor systemd pull-images  pre-pull every image the units need
   conductor systemd status       which unit images are cached locally
 
+Example:
+  conductor systemd install
+
 Run ` + "`conductor systemd <subcommand> -h`" + ` for its flags.
 `},
 	{name: "sessions", group: "Sessions and machines", subs: []string{"save", "list", "export", "install-hook"},
