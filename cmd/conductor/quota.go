@@ -565,7 +565,7 @@ func editStatusline(path, exe string, remove, dryRun bool) (bool, string, error)
 		if installed {
 			return false, "", nil
 		}
-		shim := shellQuote(exe) + " " + statuslineShimArg
+		shim := shellQuoteWord(exe) + " " + statuslineShimArg
 		if sl == nil {
 			sl = map[string]any{"type": "command"}
 		} else if t, _ := sl["type"].(string); t != "" && t != "command" {
@@ -600,7 +600,7 @@ func editStatusline(path, exe string, remove, dryRun bool) (bool, string, error)
 	return true, string(line), os.Rename(tmp, path)
 }
 
-func shellQuote(s string) string {
+func shellQuoteWord(s string) string {
 	if s != "" && !strings.ContainsAny(s, " \t'\"$`\\;&|<>()*?[]{}!#~") {
 		return s
 	}

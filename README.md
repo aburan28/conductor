@@ -49,6 +49,17 @@ Every release archive carries a GitHub build-provenance attestation:
 `gh attestation verify conductor_vX.Y.Z_linux_amd64.tar.gz --repo aburan28/conductor`.
 `conductor version` (or `--version` on any of the three binaries) says which build you have.
 
+### The macOS app
+
+`Conductor.app` (in [`macos/`](macos/README.md)) is the same three binaries plus a private
+PostgreSQL in one app: it runs the control plane and its database as launchd agents, signs
+you in without a token, puts who is live and what is contested in the menu bar, invites a
+teammate by text through the share sheet, and continues a session that hit its usage limit
+under another login. Settings → Storage points it at an S3 bucket that keeps the database,
+session backups and checkpoints ([docs/STORAGE.md](docs/STORAGE.md)). Build it with
+`macos/build.sh`; the plan, and what has been verified so far, is
+[docs/MACOS_APP.md](docs/MACOS_APP.md).
+
 ## Quickstart
 
 From the repository you want to coordinate:
@@ -741,16 +752,20 @@ fragment so it never reaches a server log. Text it; they run `conductor join "<l
 open it in a browser. `conductor join` then offers to connect every coding tool on their
 machine in one step (`--integrate` / `--no-integrate` to decide in advance).
 
-A link to `127.0.0.1` only reaches you. When Tailscale is running, `conductor invite` prints
-the two commands that let someone in over your tailnet, and nothing else:
+A link to `127.0.0.1` only reaches you. When Tailscale is running, `conductor invite` and
+`conductor doctor` print the commands that let someone in over your private tailnet:
 
 ```bash
 tailscale serve --bg 8080
 conductor invite brother --endpoint https://your-mac.tailnet.ts.net
+# also: conductord --public-url https://your-mac.tailnet.ts.net
+# remote MCP: https://your-mac.tailnet.ts.net/mcp
 ```
 
-Requests through the tailnet name are not local, so they need the token in the link; local
-sign-in stays yours.
+Requests through the MagicDNS name are not local, so they need the token in the link; local
+sign-in stays yours. Live updates stay on HTTPS + SSE (no WebSocket). NAT traversal for the
+overlay is Tailscale’s; Conductor does not run STUN/TURN. Full notes:
+[docs/REMOTE_ACCESS.md](docs/REMOTE_ACCESS.md).
 
 ### GitHub: a check on every pull request
 
@@ -997,6 +1012,34 @@ saved session you quit yourself is forgotten, as it should be, and a reopened on
 fresh record — save again if it should survive the next reboot too. Saving is per-machine and
 touches nothing on the server; `conductor sessions export` is the other direction — the
 project's whole session history, everyone's, as a JSON file.
+
+### One button back — and onto a fresh account
+
+The dashboard's Overview page has a **Resume all sessions** button: one POST to
+`/v1/local/resume-all` does what `conductor resume` does — wake every paused or saved
+session on the machine, reopening the terminals a restart took away — after first moving any
+harness off an account that has run out of usage. The endpoint only exists on a control
+plane running on the machine with the terminals (`conductord` on the laptop); the sessions
+and the accounts it touches are that machine's.
+
+Accounts are named snapshots of a harness's own login, kept under `~/.conductor/accounts/`:
+
+```bash
+conductor accounts add claude main       # snapshot the login the harness is using now
+conductor accounts list                 # profiles, which is active, quota markers
+conductor accounts switch claude backup # make another account the live one
+conductor accounts exhaust claude main  # mark an account out of usage
+conductor accounts ok claude main       # window rolled over: usable again
+```
+
+Add accounts by logging in with the harness itself, then snapshotting — Conductor never
+performs a harness's login dance, it only moves credential files it can already read.
+Which account is live is read from the harness's own credential file, never tracked
+separately, so it cannot drift. `exhaust` drops a marker beside the profile; the
+resume-all button (and only it) avoids marked accounts when waking sessions — switching
+before resuming, because a harness reads its credentials at startup. Clear the marker with
+`ok` when the quota window rolls over. Nothing is sent anywhere: profiles live beside the
+machine's other local state, `0600`, like the credentials themselves.
 
 ### Surviving a shutdown, and the machine itself
 
@@ -1371,10 +1414,6 @@ Implemented and exercised by tests:
   with retries, through the same privacy projection as the API.
 
 Not built, and where the design says it goes:
-
-- **The macOS app.** Planned in [docs/MACOS_APP.md](docs/MACOS_APP.md): a menu bar app that
-  runs the daemon and a private Postgres for you, signs you in automatically, and shares
-  invites through Messages.
 
 - **Planner and reviewer services** (§14, §15.3). The contracts, validation rules, and
   `reviewer.*` routing are in place; nothing yet invokes a model to decompose an objective or

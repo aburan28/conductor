@@ -27,6 +27,10 @@ cd "$(dirname "$0")/.."
 STATICCHECK_VERSION=v0.7.0
 GOVULNCHECK_VERSION=v1.7.0
 
+# A stalled package must fail promptly, both locally and on Actions. The workflow also
+# caps each job, since Go's deadline applies separately to each package.
+GO_TEST_TIMEOUT=${CI_GO_TEST_TIMEOUT:-5m}
+
 bold=$'\033[1m' red=$'\033[31m' green=$'\033[32m' dim=$'\033[2m' reset=$'\033[0m'
 [ -t 1 ] || { bold= red= green= dim= reset=; }
 
@@ -128,7 +132,7 @@ ensure_database() {
   # The integration tests skip themselves when they cannot reach a database, which would
   # turn a broken setup into a green run. CI fails on that; so does this.
   local out
-  out=$(go test ./internal/db/ -run TestConcurrentClaimsYieldExactlyOneLease -count=1 -v 2>&1) ||
+  out=$(go test ./internal/db/ -run TestConcurrentClaimsYieldExactlyOneLease -count=1 -timeout "$GO_TEST_TIMEOUT" -v 2>&1) ||
     { echo "$out" >&2; die "the database probe test failed"; }
   if grep -q -- "--- SKIP" <<<"$out"; then
     echo "$out" >&2
@@ -155,17 +159,17 @@ do_govulncheck()  { step "govulncheck"; go run "golang.org/x/vuln/cmd/govulnchec
 do_build()        { step "build";       make --no-print-directory build; }
 do_unit() {
   step "tests (no database)"
-  env -u DATABASE_URL go test ./... -count=1
+  env -u DATABASE_URL go test ./... -count=1 -timeout "$GO_TEST_TIMEOUT"
 }
 do_test() {
   ensure_database
   step "tests (Postgres)"
-  go test ./... -count=1
+  go test ./... -count=1 -timeout "$GO_TEST_TIMEOUT"
 }
 do_race() {
   ensure_database
   step "tests with the race detector"
-  go test -race ./... -count=1
+  go test -race ./... -count=1 -timeout "$GO_TEST_TIMEOUT"
 }
 do_e2e() {
   ensure_database

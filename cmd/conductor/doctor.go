@@ -38,17 +38,20 @@ type doctorReport struct {
 	VersionWarning string `json:"version_warning,omitempty"`
 	// Database is the control plane's own view of its database when it answers, and
 	// otherwise, for a control plane on this machine, whether anything listens at the DSN.
-	Database      string                 `json:"database"`
-	DatabaseOK    bool                   `json:"database_ok"`
-	Conductord    string                 `json:"conductord,omitempty"`
-	Git           string                 `json:"git,omitempty"`
-	Docker        string                 `json:"docker"`
-	Harnesses     []harness.Capabilities `json:"harnesses"`
-	Disabled      []harness.Capabilities `json:"disabled_harnesses,omitempty"`
-	Repository    string                 `json:"repository,omitempty"`
-	Integrations  []integrations.Status  `json:"integrations"`
-	loggedIn      bool
-	serverHealthy bool
+	Database   string `json:"database"`
+	DatabaseOK bool   `json:"database_ok"`
+	Conductord string `json:"conductord,omitempty"`
+	Git        string `json:"git,omitempty"`
+	Docker     string `json:"docker"`
+	// Tailscale is this machine's MagicDNS name when connected, or a short status when not.
+	Tailscale       string                 `json:"tailscale"`
+	TailscaleAdvice string                 `json:"tailscale_advice,omitempty"`
+	Harnesses       []harness.Capabilities `json:"harnesses"`
+	Disabled        []harness.Capabilities `json:"disabled_harnesses,omitempty"`
+	Repository      string                 `json:"repository,omitempty"`
+	Integrations    []integrations.Status  `json:"integrations"`
+	loggedIn        bool
+	serverHealthy   bool
 }
 
 // doctorEnv is everything doctor reads from the machine, so tests can supply a machine.
@@ -59,6 +62,7 @@ type doctorEnv struct {
 	portOpen   func(host, port string) bool
 	dockerUp   func() bool
 	getenv     func(string) string
+	tailscale  func(context.Context) (string, bool)
 	clientVers string
 }
 
@@ -73,6 +77,7 @@ func realDoctorEnv() doctorEnv {
 		portOpen:   portOpen,
 		dockerUp:   dockerAvailable,
 		getenv:     os.Getenv,
+		tailscale:  detectTailscale,
 		clientVers: version.Version(),
 	}
 }
@@ -159,6 +164,7 @@ func collectDoctor(ctx context.Context, creds client.Credentials, repoRoot strin
 	default:
 		out.Docker = "not installed"
 	}
+	out.Tailscale, out.TailscaleAdvice = doctorTailscale(ctx, out.Endpoint, env)
 
 	// Which coding tools on this machine are wired to Conductor, and how.
 	home, _ := os.UserHomeDir()
@@ -166,6 +172,31 @@ func collectDoctor(ctx context.Context, creds client.Credentials, repoRoot strin
 		Root: repoRoot, Home: home, Getenv: env.getenv,
 	})
 	return out
+}
+
+// doctorTailscale reports Tailscale reachability for remote invites. MagicDNS is the
+// recommended --public-url / invite --endpoint when the control plane is on loopback.
+func doctorTailscale(ctx context.Context, endpoint string, env doctorEnv) (status, advice string) {
+	probe := env.tailscale
+	if probe == nil {
+		probe = detectTailscale
+	}
+	if name, ok := probe(ctx); ok {
+		status = name
+		if isLoopbackEndpoint(endpoint) {
+			port := listenPort(endpoint)
+			advice = fmt.Sprintf(
+				"share over your tailnet: tailscale serve --bg %s && "+
+					"conductor invite <handle> --endpoint https://%s "+
+					"(set conductord --public-url https://%s for SSO, GitHub webhooks, and dashboard/MCP links; see docs/REMOTE_ACCESS.md)",
+				port, name, name)
+		}
+		return status, advice
+	}
+	if lookOK(env.lookPath, "tailscale") {
+		return "installed, but not connected", ""
+	}
+	return "not installed", ""
 }
 
 func lookOK(lookPath func(string) (string, error), name string) bool {
@@ -297,6 +328,11 @@ func printDoctor(w io.Writer, out doctorReport) {
 		"not found next to conductor or on PATH (needed to run a control plane here)"))
 	fmt.Fprintf(w, "  %-12s %s\n", "git", orMissing(out.Git, "not found (required)"))
 	fmt.Fprintf(w, "  %-12s %s\n", "docker", out.Docker+" (only needed when no Postgres is reachable)")
+	fmt.Fprintf(w, "  %-12s %s\n", "tailscale", orMissing(out.Tailscale,
+		"not installed (optional: private remote access; docs/REMOTE_ACCESS.md)"))
+	if out.TailscaleAdvice != "" {
+		fmt.Fprintf(w, "  %-12s %s\n", "share", out.TailscaleAdvice)
+	}
 
 	fmt.Fprintf(w, "\nHarnesses\n%s", harness.Describe(out.Harnesses))
 	for _, c := range out.Disabled {

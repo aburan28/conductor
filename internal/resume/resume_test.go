@@ -1,4 +1,4 @@
-package main
+package resume
 
 import (
 	"strings"
@@ -6,6 +6,31 @@ import (
 
 	"github.com/aburan28/conductor/internal/localstate"
 )
+
+func TestPlan(t *testing.T) {
+	paused := localstate.Record{Status: localstate.StatusPaused}
+	pausedSaved := localstate.Record{Status: localstate.StatusPaused, Saved: true}
+	saved := localstate.Record{Status: localstate.StatusSaved, Saved: true}
+	cases := []struct {
+		name                  string
+		rec                   localstate.Record
+		wrapLive, harnessLive bool
+		want                  string
+	}{
+		{"paused under a live wrap: wake via sidecar", paused, true, true, PlanViaWrap},
+		{"paused bare: SIGCONT directly", paused, false, true, PlanDirect},
+		{"paused, terminal gone: reopen", paused, false, false, PlanReopen},
+		{"paused and saved, terminal gone: reopen", pausedSaved, false, false, PlanReopen},
+		{"saved, process gone: reopen", saved, false, false, PlanReopen},
+		{"saved but alive again: never signal it", saved, false, true, PlanRunning},
+		{"saved but its wrap is alive: never signal it", saved, true, false, PlanRunning},
+	}
+	for _, tc := range cases {
+		if got := Plan(tc.rec, tc.wrapLive, tc.harnessLive); got != tc.want {
+			t.Errorf("%s: got %s, want %s", tc.name, got, tc.want)
+		}
+	}
+}
 
 func TestRelaunchArgv(t *testing.T) {
 	cases := []struct {

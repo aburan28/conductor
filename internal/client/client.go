@@ -79,15 +79,22 @@ func caPoolFrom(path string) (*x509.CertPool, error) {
 
 // APIError carries a structured failure from the control plane.
 type APIError struct {
-	Status  int             `json:"-"`
-	Code    string          `json:"code"`
-	Message string          `json:"error"`
-	Body    json.RawMessage `json:"-"`
+	Status    int             `json:"-"`
+	Code      string          `json:"code"`
+	Message   string          `json:"error"`
+	RequestID string          `json:"request_id"`
+	Body      json.RawMessage `json:"-"`
 }
 
 func (e *APIError) Error() string {
 	if e.Code != "" {
+		if e.RequestID != "" {
+			return fmt.Sprintf("%s (%d %s, request %s)", e.Message, e.Status, e.Code, e.RequestID)
+		}
 		return fmt.Sprintf("%s (%d %s)", e.Message, e.Status, e.Code)
+	}
+	if e.RequestID != "" {
+		return fmt.Sprintf("request failed: %d (request %s)", e.Status, e.RequestID)
 	}
 	return fmt.Sprintf("request failed: %d", e.Status)
 }
@@ -169,6 +176,10 @@ func (c *Client) Get(ctx context.Context, path string, out any) error {
 
 func (c *Client) Post(ctx context.Context, path string, body, out any) error {
 	return c.Do(ctx, http.MethodPost, path, body, out)
+}
+
+func (c *Client) Put(ctx context.Context, path string, body, out any) error {
+	return c.Do(ctx, http.MethodPut, path, body, out)
 }
 
 func (c *Client) Delete(ctx context.Context, path string, out any) error {

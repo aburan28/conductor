@@ -40,8 +40,10 @@ import (
 	"github.com/aburan28/conductor/internal/githubapp"
 	"github.com/aburan28/conductor/internal/notify"
 	"github.com/aburan28/conductor/internal/peer"
+	"github.com/aburan28/conductor/internal/resume"
 	"github.com/aburan28/conductor/internal/scheduler"
 	"github.com/aburan28/conductor/internal/secretbox"
+	"github.com/aburan28/conductor/internal/secrets"
 	"github.com/aburan28/conductor/internal/sso"
 	"github.com/aburan28/conductor/internal/version"
 	"github.com/aburan28/conductor/internal/web"
@@ -559,6 +561,7 @@ func serve(args []string) error {
 		SecretKey: secretKey, Network: cfg.notifyNetwork, DashboardURL: dashboardURL,
 		Poll: cfg.notifyPoll, Logger: logger,
 	})
+	vault := secrets.New(store, secretKey)
 	server := api.New(store, svc, api.Options{
 		Logger:       logger,
 		Web:          web.Handler(),
@@ -570,9 +573,14 @@ func serve(args []string) error {
 		LocalLogin:   api.LocalLoginOptions{DefaultMode: defaultMode, ForcedMode: cfg.securityMode},
 		GitHub:       gh,
 		Notify:       notifier,
+		Secrets:      vault,
 		Ops:          ops,
 		SSO:          cfg.sso,
 		Admin:        cfg.admin,
+		// The one-button reboot recovery: this daemon runs on the laptop whose
+		// terminals hold the sessions, so the dashboard's resume-all button
+		// reaches the real machine.
+		LocalResume: func() (any, error) { return resume.AllFresh() },
 	})
 	if ghErr == nil {
 		ghErr = gh.Refresh(life)
@@ -751,7 +759,7 @@ func bootstrap(args []string) error {
 	fs := flag.NewFlagSet("bootstrap", flag.ExitOnError)
 	dsn := fs.String("dsn", envOr("DATABASE_URL", ""), "PostgreSQL connection string")
 	orgSlug := fs.String("org", "default", "organization slug")
-	projectSlug := fs.String("project", "", "project slug (defaults to the repository directory name)")
+	projectSlug := fs.String("project", "", "project slug (default: .conductor/project.yaml metadata.id, else this machine's sole project, else the directory name). Pass explicitly to create or attach to another project")
 	handle := fs.String("principal", envOr("USER", "operator"), "principal handle")
 	repo := fs.String("repo", ".", "path to the repository this project coordinates")
 	role := fs.String("role", "", "role to grant the principal (default: org_admin for the first principal of a new organization, "+
@@ -764,6 +772,12 @@ func bootstrap(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	explicitProject := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "project" {
+			explicitProject = true
+		}
+	})
 	if *tokenTTL < 0 {
 		return errors.New("--token-ttl cannot be negative")
 	}
@@ -786,9 +800,6 @@ func bootstrap(args []string) error {
 	repoPath, err := filepath.Abs(*repo)
 	if err != nil {
 		return err
-	}
-	if *projectSlug == "" {
-		*projectSlug = filepath.Base(repoPath)
 	}
 
 	// Idempotent: re-running bootstrap should mint a fresh token, not fail because the org
@@ -817,7 +828,36 @@ func bootstrap(args []string) error {
 		return fmt.Errorf("load policy: %w", err)
 	}
 
+	// Default is one project per machine/org. Prefer the stable id from project.yaml so a
+	// Codex/Claude worktree does not mint a second project named after its directory.
+	// An explicit --project still creates or attaches to that slug on purpose.
+	if *projectSlug == "" {
+		*projectSlug = strings.TrimSpace(bundle.Project.Metadata.ID)
+	}
+	if *projectSlug == "" {
+		*projectSlug = filepath.Base(repoPath)
+	}
+
+	// Attaching because the directory slug is missing (a Codex/Claude worktree with no
+	// project id) is not a re-bootstrap of that project's checkout. config.Load treats a
+	// missing .conductor bundle as defaults, so applying it would wipe the real config
+	// and point repo_path at a temporary worktree workers keep using after it is gone.
+	// Matching by slug or an explicit --project still refreshes both.
+	attachedByReuse := false
 	project, err := store.GetProjectBySlug(ctx, org.ID, *projectSlug)
+	if errors.Is(err, domain.ErrNotFound) && !explicitProject {
+		if members, listErr := store.ListProjectsFor(ctx, principal.ID); listErr != nil {
+			return fmt.Errorf("project: %w", listErr)
+		} else if len(members) == 1 {
+			project, err = members[0], nil
+			attachedByReuse = true
+		} else if sole, ok, soleErr := store.SoleProjectInOrg(ctx, org.ID); soleErr != nil {
+			return fmt.Errorf("project: %w", soleErr)
+		} else if ok {
+			project, err = sole, nil
+			attachedByReuse = true
+		}
+	}
 	if errors.Is(err, domain.ErrNotFound) {
 		project, err = store.CreateProject(ctx, db.CreateProjectParams{
 			OrganizationID:  org.ID,
@@ -829,7 +869,7 @@ func bootstrap(args []string) error {
 			RepoPath:        repoPath,
 			Config:          bundle.ProjectConfig(),
 		})
-	} else if err == nil {
+	} else if err == nil && !attachedByReuse {
 		err = store.UpdateProjectConfig(ctx, project.ID, bundle.ProjectConfig())
 		if err == nil {
 			err = store.SetProjectRepoPath(ctx, project.ID, repoPath)
