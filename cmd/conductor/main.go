@@ -20,7 +20,6 @@ import (
 	"github.com/aburan28/conductor/internal/client"
 )
 
-
 func main() {
 	if len(os.Args) < 2 {
 		printShortHelp(os.Stderr)
