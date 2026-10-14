@@ -49,6 +49,8 @@ const serveUsage = `conductor serve — start a local vLLM endpoint for OpenCode
   conductor serve flash stop
   conductor serve status
   conductor serve smoke
+  conductor serve qwen pull           pull this variant's image now
+  ./scripts/serve-local.sh pull-all   pull every variant's image now
 
 Then:
   conductor wrap opencode --model vllm/qwen3.8-27b
@@ -111,7 +113,7 @@ func serveVariantAliases() map[string]string {
 
 func knownServeArg(arg string) bool {
 	switch strings.ToLower(arg) {
-	case "status", "stop", "smoke", "pull", "start", "serve", "-h", "--help":
+	case "status", "stop", "smoke", "pull", "pull-all", "start", "serve", "-h", "--help":
 		return true
 	}
 	_, ok := serveVariantAliases()[strings.ToLower(arg)]
