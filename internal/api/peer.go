@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/peer"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/peer"
 )
 
 // peerAuth guards the /v1/peer/* surface. It is a separate channel from authenticate on

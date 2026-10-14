@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/adamburan/conductor/internal/peer"
+	"github.com/aburan28/conductor/internal/peer"
 )
 
 // cmdPeers reports the daemon-to-daemon mesh: which peers this control plane dials, and

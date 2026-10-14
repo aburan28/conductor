@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/resource"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/resource"
 )
 
 // Scope drift is the normal case, not an exception: an agent discovers mid-task that it needs

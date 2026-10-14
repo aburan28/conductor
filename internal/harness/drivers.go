@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // HarnessConfig lets an operator override how a harness is invoked without a code change.
@@ -93,10 +93,12 @@ func NewCodexDriver(cfg HarnessConfig) *ProcessDriver {
 		command = "codex"
 	}
 	return &ProcessDriver{
-		Kind:             "codex",
-		Command:          command,
-		VersionArgs:      []string{"--version"},
-		Adapt:            genericAdapter,
+		Kind:        "codex",
+		Command:     command,
+		VersionArgs: []string{"--version"},
+		// Codex's stream is typed (thread/turn/item events); the generic adapter read any
+		// type containing "complete" as the end of the run, which every item.completed is.
+		NewAdapt:         newCodexAdapter,
 		StdinInstruction: stdinDefault(cfg, true),
 		Caps: Capabilities{
 			Kind: "codex", SupportsMCP: true, SupportsJSON: true, SupportsEffort: true,

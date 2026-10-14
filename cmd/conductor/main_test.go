@@ -4,7 +4,7 @@ import (
 	"flag"
 	"testing"
 
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // Regression test for a silent wrong-result bug: the stdlib flag package stops parsing at the

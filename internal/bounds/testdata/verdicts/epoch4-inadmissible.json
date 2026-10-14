@@ -1,0 +1,152 @@
+{
+  "schema": "ecbench.verdict/v1",
+  "verdict_id": "ECVD1h0774f035af70",
+  "challenge_id": "ECCH1h91fd655dfb54",
+  "epoch": 4,
+  "domain_id": "ECDOM1ha1f283af3a5d",
+  "session": {
+    "dir": "testdata/fixture-sessions/epoch4",
+    "session_id": "ECS1hfixture000004",
+    "spec_id": "ECSP1hfixture00004",
+    "expected_spec_id": "ECSP1hfixture00ff",
+    "spec_matches": false,
+    "status": "complete",
+    "binary_sha256": null,
+    "git_commit": null,
+    "env_class_id": "fixture",
+    "levels": {
+      "L0": 96
+    }
+  },
+  "audit": {
+    "ok": true,
+    "problems": [],
+    "records": 96,
+    "verified_records": 96,
+    "replays": 12,
+    "replays_reproduced": 12,
+    "replay_all": true,
+    "files": {}
+  },
+  "incumbent": {
+    "arm": "incumbent",
+    "method_id": "ECM1h87f6341629c3",
+    "method": "bsgs.negation",
+    "params": {},
+    "bound_id": "ECBND1he8163c29cc39"
+  },
+  "candidate": {
+    "arm": "candidate",
+    "method_id": "ECM1hefea4e0ebe79",
+    "method": "rho.negation",
+    "params": {},
+    "bound_id": null
+  },
+  "control": {
+    "arm": "incumbent-aa",
+    "ratio": 1.0,
+    "ci95": [
+      1.0,
+      1.0
+    ]
+  },
+  "acceptance": {
+    "axes": [
+      "ops",
+      "memory"
+    ],
+    "min_sizes": 4,
+    "min_runs_per_size": 8,
+    "require_audit": true,
+    "require_replay_all": true,
+    "uncharged_tolerance": 0.05
+  },
+  "axes": [
+    {
+      "axis": "ops",
+      "known": true,
+      "incumbent_mean": 1.1,
+      "candidate_mean": 1.47,
+      "ratio_candidate_over_incumbent": 1.33,
+      "ci95": [
+        1.21,
+        1.47
+      ],
+      "ci_method": "cluster",
+      "pairs": 96,
+      "verdict": "worse",
+      "decides": true
+    },
+    {
+      "axis": "memory",
+      "known": true,
+      "incumbent_mean": 0.5,
+      "candidate_mean": 0.034,
+      "ratio_candidate_over_incumbent": 0.07,
+      "ci95": [
+        0.06,
+        0.08
+      ],
+      "ci_method": "cluster",
+      "pairs": 96,
+      "verdict": "better",
+      "decides": true
+    }
+  ],
+  "per_curve": [],
+  "stages": [],
+  "fits": {
+    "incumbent": {
+      "alpha": 0.49,
+      "alpha_ci95": [
+        0.31,
+        0.64
+      ],
+      "scaling_claim": false,
+      "sizes": 4,
+      "ratio_to_floor": {
+        "value": 1.1,
+        "ci95": [
+          0.9900000000000001,
+          1.2100000000000002
+        ],
+        "ci_method": "cluster"
+      }
+    },
+    "candidate": {
+      "alpha": 0.51,
+      "alpha_ci95": [
+        0.33,
+        0.66
+      ],
+      "scaling_claim": false,
+      "sizes": 4,
+      "ratio_to_floor": {
+        "value": 1.4630000000000003,
+        "ci95": [
+          1.3167000000000002,
+          1.6093000000000004
+        ],
+        "ci_method": "cluster"
+      }
+    },
+    "exponent_moved": false
+  },
+  "accounting": {
+    "incumbent_unpriced": [],
+    "candidate_unpriced": [],
+    "bounded": false,
+    "uncharged_ratio": null,
+    "tolerance": 0.05,
+    "uncharged_shift": false
+  },
+  "incumbent_drift": null,
+  "outcome": "inadmissible",
+  "advances_on": [],
+  "regresses_on": [],
+  "level_moved": null,
+  "reasons": [
+    "the session's spec is not the challenge's spec for epoch 4"
+  ],
+  "statement": "FIXTURE: hand-written for conductor's internal/bounds tests, following the ecbench.verdict/v1 field set; the figures are invented and this is not a measured verdict. inadmissible: the session's spec is not the challenge's spec for epoch 4. The paired ratio rho.negation / bsgs.negation = 1.3300 [1.210, 1.470] is reported for information only."
+}

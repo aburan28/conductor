@@ -7,7 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 const attemptColumns = `
@@ -261,7 +261,8 @@ func (s *Store) CountActiveAttempts(ctx context.Context, projectID, sponsor doma
 	return n, err
 }
 
-// SpendSince totals attempt cost in a window, for budget enforcement.
+// SpendSince totals attempt cost in a window, for budget enforcement. The scheduler runs it
+// for every budgeted project on every tick; attempts_project_created (0007) serves it.
 func (s *Store) SpendSince(ctx context.Context, projectID domain.ID, interval string) (float64, error) {
 	var total float64
 	err := s.pool.QueryRow(ctx, `

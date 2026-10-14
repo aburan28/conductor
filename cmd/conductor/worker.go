@@ -10,13 +10,13 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/adamburan/conductor/internal/client"
-	"github.com/adamburan/conductor/internal/config"
-	"github.com/adamburan/conductor/internal/coord"
-	"github.com/adamburan/conductor/internal/db"
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/harness"
-	"github.com/adamburan/conductor/internal/runner"
+	"github.com/aburan28/conductor/internal/client"
+	"github.com/aburan28/conductor/internal/config"
+	"github.com/aburan28/conductor/internal/coord"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/harness"
+	"github.com/aburan28/conductor/internal/runner"
 )
 
 // cmdWorker runs the execution plane on this machine.
@@ -94,14 +94,21 @@ Flags:
 		return fmt.Errorf("reading project: %w", err)
 	}
 
+	// The repository is chosen on this machine before the server is asked: --repo, then the
+	// checkout the worker was started in. The project's registered path is the last resort,
+	// and is announced, because .conductor/project.yaml in whatever directory this resolves to
+	// is executable configuration — its harness commands run here — and a path that came from
+	// the control plane is a path someone else chose.
 	repoPath := *repo
-	if repoPath == "" {
-		repoPath = snap.Project.RepoPath
-	}
 	if repoPath == "" {
 		if root, err := config.FindRoot("."); err == nil {
 			repoPath = root
 		}
+	}
+	if repoPath == "" && snap.Project.RepoPath != "" {
+		repoPath = snap.Project.RepoPath
+		logger.Warn("using the repository path registered on the control plane; pass --repo to choose it yourself",
+			"repo", repoPath)
 	}
 	if repoPath == "" {
 		return errors.New("no repository path: pass --repo, or register one with `conductord bootstrap --repo …`")
@@ -153,7 +160,6 @@ Flags:
 		HarnessPref:         selected,
 		PermissionMode:      *permission,
 		MCPEndpoint:         creds.Endpoint,
-		MCPToken:            creds.Token,
 		HarnessMCPServers:   harnessMCPServers(harnessCfgs),
 		MaxTurns:            *maxTurns,
 		AttemptTimeout:      *timeout,

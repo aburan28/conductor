@@ -7,18 +7,22 @@ import { openModal, confirmModal } from '../components/modal.js';
 import { toast, toastError } from '../components/toast.js';
 import { fmtDate, relTime } from '../lib/format.js';
 import { prefs } from '../lib/store.js';
+import { loadNotifications, notificationsCard } from './notifications-card.js';
 
 export default defineView({
   title: 'Settings',
   async load(ctx) {
-    const [project, members, tokens] = await settle([
+    const [project, members, tokens, security, notifications] = await settle([
       ctx.api.get(ctx.api.project(ctx.project)),
       ctx.api.get(ctx.api.project(ctx.project, '/members')),
       ctx.api.get('/v1/tokens'),
+      ctx.api.get('/v1/security'),
+      // Channels are a maintainer's to manage; nobody else is asked for them.
+      ['maintainer', 'project_admin', 'org_admin'].includes(ctx.role) ? loadNotifications(ctx) : Promise.resolve(null),
     ]);
-    return { project, members: (members && members.members) || [], tokens: (tokens && tokens.tokens) || [] };
+    return { project, members: (members && members.members) || [], tokens: (tokens && tokens.tokens) || [], security, notifications };
   },
-  draw({ project, members, tokens }, ctx, { refresh }) {
+  draw({ project, members, tokens, security, notifications }, ctx, { refresh }) {
     const cfg = (project && project.config) || {};
     const canAdmin = ['maintainer', 'project_admin', 'org_admin'].includes(ctx.role);
 
@@ -35,13 +39,19 @@ export default defineView({
     const invite = () => {
       const handle = h('input', { type: 'text', placeholder: 'rachel', required: true });
       const role = h('select', {}, ['contributor', 'maintainer', 'reviewer', 'observer', 'project_admin'].map(r => h('option', { value: r }, r)));
-      openModal({ title: 'Add a member', body: h('div', { class: 'form' }, h('label', { class: 'field' }, 'Handle', handle), h('label', { class: 'field' }, 'Role', role), h('div', { class: 'hint' }, 'Their token is shown once. Send it over a private channel.')),
+      openModal({ title: 'Add a member', body: h('div', { class: 'form' }, h('label', { class: 'field' }, 'Handle', handle), h('label', { class: 'field' }, 'Role', role), h('div', { class: 'hint' }, 'A new account\'s token is shown once; send it over a private channel. An existing account is added without one.')),
         actions: [{ label: 'Cancel' }, { label: 'Add member', kind: 'primary', onClick: async close => {
           if (!handle.value.trim()) { handle.focus(); return false; }
           try {
             const out = await ctx.api.post(ctx.api.project(ctx.project, '/members'), { handle: handle.value.trim(), role: role.value });
             close();
-            openModal({ title: `Token for ${handle.value.trim()}`, body: h('div', { class: 'stack' }, h('div', { class: 'token-reveal' }, out.token || '(no token returned)'), snippet(`conductor login --endpoint ${ctx.origin} --token ${out.token || 'cdt_…'} --project ${ctx.project}`), h('div', { class: 'notice warn' }, 'Shown once. It is stored only as a hash.')), actions: [{ label: 'Done' }] });
+            // An existing account is added without a token: it keeps its own login.
+            if (!out.token) {
+              openModal({ title: `Added ${out.handle || handle.value.trim()}`, body: h('div', { class: 'stack' }, h('div', { class: 'notice' }, out.note || 'Added to the project. No token was minted.'), snippet(`conductor login --project ${ctx.project}`)), actions: [{ label: 'Done' }] });
+              refresh();
+              return;
+            }
+            openModal({ title: `Token for ${handle.value.trim()}`, body: h('div', { class: 'stack' }, h('div', { class: 'token-reveal' }, out.token), snippet(`conductor login --endpoint ${ctx.origin} --token ${out.token} --project ${ctx.project}`), h('div', { class: 'notice warn' }, 'Shown once. It is stored only as a hash.')), actions: [{ label: 'Done' }] });
             refresh();
           } catch (err) { toastError(err, 'Could not add member'); return false; }
         } }] });
@@ -50,7 +60,7 @@ export default defineView({
       if (!await confirmModal({ title: `Remove ${m.handle}?`, message: 'Their tokens are revoked and their live sessions lose access.', confirmLabel: 'Remove', kind: 'danger' })) return;
       try { await ctx.api.del(ctx.api.project(ctx.project, '/members/' + encodeURIComponent(m.handle))); toast(`Removed ${m.handle}`); refresh(); } catch (err) { toastError(err, 'Could not remove'); }
     };
-    const membersCard = card({ title: 'Members', flush: true, actions: canAdmin ? h('button', { class: 'btn sm primary', onclick: invite }, icon('plus'), 'Add member') : null,
+    const membersCard = card({ id: 'members', title: 'Members', flush: true, actions: canAdmin ? h('button', { class: 'btn sm primary', onclick: invite }, icon('plus'), 'Add member') : null,
       body: members.length ? table({ columns: [
         { key: 'handle', label: 'Handle', render: m => h('span', {}, h('strong', {}, m.handle), m.handle === ctx.handle ? h('span', { class: 'muted' }, ' (you)') : null) },
         { key: 'kind', label: 'Kind', render: m => chip(m.kind || 'human', { mono: false }) },
@@ -81,6 +91,28 @@ export default defineView({
         { key: 'act', label: '', sortable: false, render: t => t.revoked_at ? '' : h('button', { class: 'btn sm danger', onclick: () => revoke(t) }, 'Revoke') },
       ], rows: tokens }) : empty('No tokens listed.', 'conductor token create --save') });
 
+    const setMode = async mode => {
+      const tighten = mode === 'enhanced';
+      if (!await confirmModal({
+        title: tighten ? 'Require tokens everywhere?' : 'Allow local sign-in?',
+        message: tighten
+          ? 'Local sign-in turns off and every token it issued is revoked — including this dashboard\'s, if that is how you signed in. Use this on a machine other people can log in to.'
+          : 'The machine\'s owner will be signed in automatically from this machine, without a token. Only do this on a machine nobody else uses.',
+        confirmLabel: tighten ? 'Require tokens' : 'Allow local sign-in', kind: tighten ? 'primary' : 'danger' })) return;
+      try { await ctx.api.post('/v1/security', { security_mode: mode }); toast(tighten ? 'Enhanced security on' : 'Local sign-in on'); refresh(); }
+      catch (err) { toastError(err, 'Could not change the security mode'); }
+    };
+    const securityCard = security ? card({ title: 'Security', body: h('div', { class: 'stack' },
+      kv([['Mode', pill(security.security_mode === 'enhanced' ? 'ok' : 'info', security.security_mode)],
+        ['Set by', { flag: 'conductord --security-mode (pinned)', setting: 'saved choice', default: 'default for how conductord listens' }[security.mode_source] || security.mode_source],
+        ['Machine owner', security.owner ? security.owner + (security.you_are_owner ? ' (you)' : '') : 'none']]),
+      h('p', { class: 'hint' }, security.security_mode === 'enhanced'
+        ? 'Every client needs a token, on this machine and everywhere else.'
+        : 'The machine\'s owner is signed in automatically on this machine. Everyone else, everywhere else, still needs a token.'),
+      security.mode_source === 'flag' ? null : h('div', { class: 'btn-row' }, security.security_mode === 'enhanced'
+        ? (security.you_are_owner ? h('button', { class: 'btn', onclick: () => setMode('local') }, 'Allow local sign-in') : null)
+        : h('button', { class: 'btn primary', onclick: () => setMode('enhanced') }, 'Require tokens everywhere'))) }) : null;
+
     const budget = cfg.budget || {};
     const policyCard = card({ title: 'Project policy — from .conductor/', body: project ? kv([
       ['Default branch', project.default_branch], ['Repository', project.repo_path ? h('span', { class: 'mono' }, project.repo_path) : null],
@@ -105,6 +137,23 @@ export default defineView({
         h('li', {}, 'Duplicate detection compares HMAC\'d token sets under a per-tenant key; the server never sees either sentence.'),
         h('li', {}, 'This dashboard makes no external requests of any kind; a test enforces it.'))) });
 
-    return h('div', { class: 'stack', style: { gap: '20px' } }, h('div', { class: 'grid-2' }, connection, appearance), membersCard, tokensCard, policyCard, privacy);
+    // Settings are grouped by whose they are. A new card goes in the section it belongs to:
+    // things about you, things about this project (maintainers' configuration, such as
+    // notification channels), or this machine's security. Organization-wide settings are
+    // in Admin.
+    const sections = [
+      ['you', 'You', [h('div', { class: 'grid-2' }, connection, appearance), tokensCard]],
+      ['project', 'This project', [membersCard, notificationsCard(notifications, ctx, refresh), policyCard]],
+      ['security', 'Security', [securityCard]],
+      ['about', 'About', [privacy]],
+    ];
+    const page = h('div', { class: 'settings' },
+      h('nav', { class: 'toc', 'aria-label': 'Settings sections' }, h('ul', {}, sections.map(([id, title]) => h('li', {}, h('a', { href: '#' + id }, title))),
+        ctx.isOrgAdmin ? h('li', {}, h('a', { href: '/admin', 'data-link': true }, 'Organization (Admin)')) : null)),
+      h('div', { class: 'stack', style: { gap: '28px' } }, sections.map(([id, title, cards]) =>
+        h('section', { class: 'settings-section', id, 'aria-labelledby': id + '-h' }, h('h2', { class: 'section-title', id: id + '-h' }, title),
+          h('div', { class: 'stack', style: { gap: '16px' } }, cards.filter(Boolean))))));
+    if (location.hash) setTimeout(() => { const el = document.getElementById(location.hash.slice(1)); if (el) el.scrollIntoView(); }, 0);
+    return page;
   },
 });

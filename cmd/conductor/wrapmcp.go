@@ -6,8 +6,8 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/adamburan/conductor/internal/config"
-	"github.com/adamburan/conductor/internal/integrations"
+	"github.com/aburan28/conductor/internal/config"
+	"github.com/aburan28/conductor/internal/integrations"
 )
 
 // lookPath is exec.LookPath, replaceable in tests.

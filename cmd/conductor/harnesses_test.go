@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/adamburan/conductor/internal/config"
-	"github.com/adamburan/conductor/internal/harness"
+	"github.com/aburan28/conductor/internal/config"
+	"github.com/aburan28/conductor/internal/harness"
 )
 
 // writeProject lays down the minimum .conductor a config.Load will accept, with the caller's

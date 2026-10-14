@@ -1,0 +1,20 @@
+{"type":"thread.started","thread_id":"0199a213-81c0-7800-8aa1-bbab2a035a53"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"SENSITIVE-PROMPT-CONTENT-DO-NOT-STORE"}}
+{"type":"item.started","item":{"id":"item_1","type":"todo_list","items":[{"text":"SENSITIVE-PROMPT-CONTENT-DO-NOT-STORE","completed":false}]}}
+{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"bash -lc 'grep SENSITIVE-PROMPT-CONTENT-DO-NOT-STORE'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"bash -lc 'grep SENSITIVE-PROMPT-CONTENT-DO-NOT-STORE'","aggregated_output":"SENSITIVE-PROMPT-CONTENT-DO-NOT-STORE","exit_code":1,"status":"failed"}}
+{"type":"item.started","item":{"id":"item_3","type":"file_change","changes":[{"path":"internal/SENSITIVE-PROMPT-CONTENT-DO-NOT-STORE.go","kind":"add"}],"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_3","type":"file_change","changes":[{"path":"internal/SENSITIVE-PROMPT-CONTENT-DO-NOT-STORE.go","kind":"add"}],"status":"completed"}}
+{"type":"item.started","item":{"id":"item_4","type":"mcp_tool_call","server":"conductor","tool":"coord_report_progress","arguments":{"summary":"SENSITIVE-PROMPT-CONTENT-DO-NOT-STORE"},"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_4","type":"mcp_tool_call","server":"conductor","tool":"coord_report_progress","arguments":{"summary":"SENSITIVE-PROMPT-CONTENT-DO-NOT-STORE"},"result":{"content":[{"type":"text","text":"SENSITIVE-PROMPT-CONTENT-DO-NOT-STORE"}]},"status":"completed"}}
+{"type":"item.started","item":{"id":"item_5","type":"web_search","query":"SENSITIVE-PROMPT-CONTENT-DO-NOT-STORE"}}
+{"type":"item.completed","item":{"id":"item_5","type":"web_search","query":"SENSITIVE-PROMPT-CONTENT-DO-NOT-STORE"}}
+{"type":"item.updated","item":{"id":"item_1","type":"todo_list","items":[{"text":"SENSITIVE-PROMPT-CONTENT-DO-NOT-STORE","completed":true}]}}
+{"type":"item.completed","item":{"id":"item_1","type":"todo_list","items":[{"text":"SENSITIVE-PROMPT-CONTENT-DO-NOT-STORE","completed":true}]}}
+{"type":"item.completed","item":{"id":"item_6","type":"error","message":"SENSITIVE-PROMPT-CONTENT-DO-NOT-STORE"}}
+{"type":"item.completed","item":{"id":"item_7","type":"agent_message","text":"SENSITIVE-PROMPT-CONTENT-DO-NOT-STORE"}}
+{"type":"turn.completed","usage":{"input_tokens":24763,"cached_input_tokens":24448,"output_tokens":122,"reasoning_output_tokens":64}}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_8","type":"agent_message","text":"SENSITIVE-PROMPT-CONTENT-DO-NOT-STORE"}}
+{"type":"turn.completed","usage":{"input_tokens":30000,"cached_input_tokens":29000,"output_tokens":200,"reasoning_output_tokens":64}}

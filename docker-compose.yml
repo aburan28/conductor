@@ -4,10 +4,16 @@ services:
     container_name: conductor-db
     environment:
       POSTGRES_USER: conductor
-      POSTGRES_PASSWORD: conductor
+      # Development default only. `conductor up` passes a generated password here (and saves
+      # the DSN in ~/.conductor/database.url); set CONDUCTOR_DB_PASSWORD yourself for anything
+      # that is not a throwaway local database. The password is applied when the volume is
+      # first initialized; changing it later needs ALTER ROLE inside the database.
+      POSTGRES_PASSWORD: ${CONDUCTOR_DB_PASSWORD:-conductor}
       POSTGRES_DB: conductor
     ports:
-      - "55432:5432"
+      # Loopback only. Bearer tokens are stored as SHA-256 hashes, so anyone who can write to
+      # this database can mint themselves a login; it must not be reachable from the network.
+      - "127.0.0.1:55432:5432"
     volumes:
       - conductor-pgdata:/var/lib/postgresql/data
     healthcheck:

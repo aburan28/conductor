@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 
-	"github.com/adamburan/conductor/internal/db"
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/privacy"
-	"github.com/adamburan/conductor/internal/taskcard"
+	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/privacy"
+	"github.com/aburan28/conductor/internal/taskcard"
 )
 
 // Service operations a runner needs.
@@ -212,10 +212,11 @@ func (s *Service) AttemptViews(ctx context.Context, c Caller, taskID domain.ID) 
 		return nil, err
 	}
 
-	sponsors := make([]domain.ID, 0, len(attempts))
+	sponsors := make([]domain.ID, 0, len(attempts)+1)
 	for _, a := range attempts {
 		sponsors = append(sponsors, a.SponsorPrincipal)
 	}
+	sponsors = append(sponsors, task.CreatedBy)
 	principals, err := s.Store.PrincipalsByID(ctx, sponsors)
 	if err != nil {
 		return nil, err
@@ -226,11 +227,16 @@ func (s *Service) AttemptViews(ctx context.Context, c Caller, taskID domain.ID) 
 		PublishHarnessIdentity: project.Config.PublishHarnessIdentity,
 	}
 
+	owner := principals[task.CreatedBy]
+	taskAccess := privacy.AttemptTask{
+		Owner:      privacy.Owner{PrincipalID: owner.ID, Handle: owner.Handle},
+		Visibility: task.Visibility,
+	}
 	out := make([]privacy.AttemptView, 0, len(attempts))
 	for _, a := range attempts {
 		sponsor := principals[a.SponsorPrincipal]
 		out = append(out, privacy.ProjectAttempt(c.Viewer(), a,
-			privacy.Owner{PrincipalID: sponsor.ID, Handle: sponsor.Handle}, policy))
+			privacy.Owner{PrincipalID: sponsor.ID, Handle: sponsor.Handle}, taskAccess, policy))
 	}
 	return out, nil
 }

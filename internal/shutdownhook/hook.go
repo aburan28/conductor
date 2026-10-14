@@ -80,7 +80,7 @@ func linuxPlan(opts Options) Plan {
 	base := filepath.Join(opts.Home, ".config", "systemd", "user")
 	service := fmt.Sprintf(`[Unit]
 Description=Conductor — keep agent sessions resumable across shutdown
-Documentation=https://github.com/adamburan/conductor
+Documentation=https://github.com/aburan28/conductor
 
 [Service]
 Type=oneshot

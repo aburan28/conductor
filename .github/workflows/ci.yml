@@ -4,25 +4,114 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
 
-# A push that supersedes an in-flight run cancels it. The Postgres-backed suite is the slow
-# part and there is no value in finishing a run for a commit nobody will look at.
+# Every job only reads the repository. Anything that needs more asks for it per job.
+permissions:
+  contents: read
+
+# Cancel superseded PR checks without interrupting protected-branch validation.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Actions are pinned to full commit SHAs (a tag can be moved; a SHA cannot), with the
+# version in a comment so Dependabot can propose upgrades.
 
 jobs:
-  test:
-    name: build and test
+  changes:
+    name: CI scope
     runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      go: ${{ steps.scope.outputs.go }}
+      site: ${{ steps.scope.outputs.site }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # PR merge-base and merge-group diffs need both sides, including base history.
+          fetch-depth: 0
+      - name: validate scope detection and CI scripts
+        run: |
+          python3 scripts/test-ci-scope.py
+          bash -n scripts/ci-local.sh scripts/e2e.sh
+      - name: select relevant checks
+        id: scope
+        run: python3 scripts/ci-scope.py
+
+  # These names remain unchanged for existing branch protections. A scope failure runs
+  # all checks rather than silently making an existing required check pass by skipping it.
+  lint:
+    name: lint
+    needs: changes
+    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.go != 'false') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Every check below is a step of scripts/ci-local.sh, the same script `make check` and
+      # `make ci` run before a push, so what passes locally is what CI runs. The pinned tool
+      # versions (staticcheck, govulncheck) live there too.
+      - name: gofmt
+        run: ./scripts/ci-local.sh gofmt
+
+      - name: go vet
+        run: ./scripts/ci-local.sh vet
+
+      - name: staticcheck
+        run: ./scripts/ci-local.sh staticcheck
+
+  govulncheck:
+    name: govulncheck
+    needs: changes
+    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.go != 'false') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Scans with the toolchain go.mod selects, so standard-library fixes count only once
+      # go.mod actually requires them; the vulnerability database is always current.
+      - name: govulncheck
+        run: ./scripts/ci-local.sh govulncheck
+
+  test:
+    # Literal names preserve required contexts even when a job is skipped before its
+    # matrix expands. Each singleton matrix supplies the service version to shared steps.
+    name: test (Postgres 16)
+    needs: changes
+    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.go != 'false') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["16"]
 
     # The integration tests need a real Postgres: SKIP LOCKED, advisory locks, and partial
     # unique indexes are load-bearing, so there is nothing meaningful to test against a
     # substitute.
-    services:
+    services: &postgres-services
       postgres:
-        image: postgres:17-alpine
+        image: postgres:${{ matrix.postgres }}-alpine
         env:
           POSTGRES_USER: conductor
           POSTGRES_PASSWORD: conductor
@@ -35,51 +124,25 @@ jobs:
           --health-timeout 3s
           --health-retries 30
 
-    env:
+    env: &postgres-environment
       DATABASE_URL: postgres://conductor:conductor@localhost:5432/conductor?sslmode=disable
+      # ci-local.sh uses this database instead of starting a throwaway one.
+      CI_DATABASE_URL: postgres://conductor:conductor@localhost:5432/conductor?sslmode=disable
 
-    steps:
-      - uses: actions/checkout@v4
+    steps: &postgres-steps
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
 
-      - name: gofmt
-        run: |
-          unformatted=$(gofmt -l .)
-          if [ -n "$unformatted" ]; then
-            echo "These files are not gofmt'd:"
-            echo "$unformatted"
-            gofmt -d $unformatted
-            exit 1
-          fi
-
-      - name: go vet
-        run: go vet ./...
-
-      - name: build
-        run: make build
-
-      # The integration tests skip themselves without DATABASE_URL, which would turn a
-      # misconfigured service container into a silently green run. Fail loudly instead.
-      - name: verify the database is actually reachable
-        run: |
-          go test ./internal/db/ -run TestConcurrentClaimsYieldExactlyOneLease -v 2>&1 | tee /tmp/dbcheck.log
-          if grep -q "SKIP" /tmp/dbcheck.log; then
-            echo "Integration tests skipped — DATABASE_URL is not reaching Postgres."
-            exit 1
-          fi
-
-      - name: test
-        run: go test ./... -count=1
-
-      - name: test with the race detector
-        run: go test ./internal/db/ ./internal/harness/ -race -count=1
-
-      - name: end-to-end
-        run: ./scripts/e2e.sh
+      # One invocation shares the database probe; both supported Postgres versions retain
+      # the ordinary suite, race detector and end-to-end coverage.
+      - name: build, test, race and end-to-end
+        run: ./scripts/ci-local.sh build test race e2e
 
       - name: server logs on failure
         if: failure()
@@ -87,3 +150,90 @@ jobs:
           for f in /tmp/conductor-e2e.*/conductord.log; do
             [ -f "$f" ] && { echo "=== $f ==="; cat "$f"; }
           done || true
+
+  test17:
+    name: test (Postgres 17)
+    needs: changes
+    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.go != 'false') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      matrix:
+        # docker-compose.yml and `conductor up` use this version.
+        postgres: ["17"]
+    services: *postgres-services
+    env: *postgres-environment
+    steps: *postgres-steps
+
+  # The release ships darwin binaries, so they are built and unit-tested on macOS. There is no
+  # Postgres service on macOS runners; the integration tests skip themselves without
+  # DATABASE_URL, which is acceptable here and only here: the Linux jobs run them for real.
+  macos:
+    name: build and unit test (macOS)
+    needs: changes
+    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.go != 'false') }}
+    runs-on: macos-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: build
+        run: ./scripts/ci-local.sh build
+
+      - name: test
+        run: ./scripts/ci-local.sh unit
+
+  site:
+    name: build site (PR)
+    needs: changes
+    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.site != 'false') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - name: install and build site
+        working-directory: site
+        run: |
+          npm ci
+          npm run build
+
+  gate:
+    name: CI gate
+    needs: [changes, lint, govulncheck, test, test17, macos, site]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: require relevant checks to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          results = json.loads(os.environ['RESULTS'])
+          if results['changes']['result'] != 'success':
+              sys.exit('CI scope validation failed')
+          for scope in ['go', 'site']:
+              if results['changes']['outputs'].get(scope) not in ['true', 'false']:
+                  sys.exit(f'Missing or invalid {scope} scope output')
+          for job in ['lint', 'govulncheck', 'test', 'test17', 'macos', 'site']:
+              scope = 'site' if job == 'site' else 'go'
+              expected = 'success' if results['changes']['outputs'].get(scope) == 'true' else 'skipped'
+              actual = results[job]['result']
+              if actual != expected:
+                  sys.exit(f'{job}: expected {expected}, got {actual}')
+          PY

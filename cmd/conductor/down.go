@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/adamburan/conductor/internal/config"
+	"github.com/aburan28/conductor/internal/config"
 )
 
 // conductor down stops the control plane started by `conductor up` (and, when run inside

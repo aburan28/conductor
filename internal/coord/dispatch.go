@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/policy"
-	"github.com/adamburan/conductor/internal/router"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/policy"
+	"github.com/aburan28/conductor/internal/router"
 )
 
 // Dispatch resolution shared by the runner, the scheduler, and `conductor route`.

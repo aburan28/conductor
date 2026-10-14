@@ -76,6 +76,10 @@ type Record struct {
 	// it exactly the way it reopens a paused session whose terminal was closed.
 	Saved bool `json:"saved,omitempty"`
 
+	// RestoredFrom names the machine a record was pulled from by `conductor backup pull`.
+	// Such a record was not written here, so `conductor resume` asks before running it.
+	RestoredFrom string `json:"restored_from,omitempty"`
+
 	Status    string    `json:"status"`
 	StartedAt time.Time `json:"started_at"`
 	PausedAt  time.Time `json:"paused_at,omitzero"`

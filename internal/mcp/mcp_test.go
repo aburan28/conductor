@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/adamburan/conductor/internal/client"
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/client"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // The MCP gateway is a translation layer (DESIGN.md §7.2), so these tests use a stub control
@@ -83,8 +83,10 @@ func call(t *testing.T, s *Server, tool string, args map[string]any) (string, bo
 func TestToolListIsSmallAndDocumented(t *testing.T) {
 	tools := toolDefinitions()
 
-	// DESIGN.md §4.9: too many tools waste context and make selection less reliable.
-	if len(tools) > 12 {
+	// DESIGN.md §4.9: too many tools waste context and make selection less reliable. The
+	// ceiling moved for coord_quota (usage limits) and again for coord_list_secrets /
+	// coord_get_secret (encrypted project vault).
+	if len(tools) > 15 {
 		t.Errorf("%d tools exposed; the design calls for a minimal surface", len(tools))
 	}
 

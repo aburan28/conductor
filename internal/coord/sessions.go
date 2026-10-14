@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
-	"github.com/adamburan/conductor/internal/domain"
-	"github.com/adamburan/conductor/internal/privacy"
+	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/privacy"
 )
 
 // Sessions returns a project's complete session history, projected for the caller.

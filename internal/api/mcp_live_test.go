@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/adamburan/conductor/internal/mcp"
+	"github.com/aburan28/conductor/internal/mcp"
 )
 
 // The MCP gateway's own tests drive it against a stub. These drive it against a real control

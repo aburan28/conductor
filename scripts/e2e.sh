@@ -26,14 +26,22 @@ PROJECT="demo-$SUFFIX"
 SERVER_PID=""
 MESH_PIDS=""
 cleanup() {
+  local status=$?
   [[ -n "$SERVER_PID" ]] && kill "$SERVER_PID" 2>/dev/null || true
   [[ -n "$MESH_PIDS" ]] && kill $MESH_PIDS 2>/dev/null || true
-  rm -rf "$WORK"
+  if [[ "$status" -eq 0 ]]; then
+    rm -rf "$WORK"
+  else
+    echo "end-to-end failed; diagnostics retained in $WORK" >&2
+  fi
 }
 trap cleanup EXIT
 
 step() { printf '\n\033[1m── %s\033[0m\n' "$*"; }
 note() { printf '   %s\n' "$*"; }
+
+# Unresponsive HTTP must not consume the whole CI budget. Override locally if needed.
+curl() { command curl --connect-timeout 3 --max-time "${CONDUCTOR_E2E_HTTP_TIMEOUT:-15}" "$@"; }
 
 for binary in conductord conductor; do
   [[ -x "$BIN/$binary" ]] || { echo "missing $BIN/$binary — run: make build" >&2; exit 1; }
@@ -81,10 +89,10 @@ note "--no-login leaves the machine alone (bob authenticates via env vars)"
 "$BIN/conductord" --addr "127.0.0.1:$PORT" >"$WORK/conductord.log" 2>&1 &
 SERVER_PID=$!
 for _ in $(seq 1 40); do
-  curl -sf "$ENDPOINT/v1/health" >/dev/null 2>&1 && break
+  curl --max-time 1 -sf "$ENDPOINT/v1/health" >/dev/null 2>&1 && break
   sleep 0.25
 done
-curl -sf "$ENDPOINT/v1/health" >/dev/null || { echo "control plane did not start" >&2; cat "$WORK/conductord.log" >&2; exit 1; }
+curl --max-time 1 -sf "$ENDPOINT/v1/health" >/dev/null || { echo "control plane did not start" >&2; cat "$WORK/conductord.log" >&2; exit 1; }
 note "listening on $ENDPOINT"
 
 alice() { CONDUCTOR_ENDPOINT=$ENDPOINT CONDUCTOR_TOKEN=$ALICE_TOKEN CONDUCTOR_PROJECT=$PROJECT "$BIN/conductor" "$@"; }
@@ -106,6 +114,23 @@ bob check --summary "retry aware routing for models" --scope path:internal/route
 BOB_EXIT=$?
 set -e
 [[ $BOB_EXIT -eq 3 ]] || fail "expected exit 3 (blocked), got $BOB_EXIT"
+
+step "3b. Bob's Codex patch into Alice's files is stopped before it applies"
+# Codex edits through apply_patch, whose file paths live only in the patch text. One held
+# file blocks the whole patch (exit 2, holder on stderr); a patch touching only free files
+# goes through.
+codex_patch() {
+  printf '{"session_id":"codex-1","turn_id":"t1","cwd":"%s","hook_event_name":"PreToolUse","tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\\n*** Update File: README.md\\n+x\\n*** Update File: %s\\n+y\\n*** End Patch\\n"}}' "$WORK/repo" "$1"
+}
+set +e
+codex_patch internal/router/router.go | bob hook pre-tool --harness codex 2>"$WORK/codex-hook.err"
+HOOK_EXIT=$?
+set -e
+[[ $HOOK_EXIT -eq 2 ]] || fail "expected the Codex patch to be blocked (exit 2), got $HOOK_EXIT"
+grep -q "alice" "$WORK/codex-hook.err" || fail "block message does not name the holder: $(cat "$WORK/codex-hook.err")"
+codex_patch internal/api/api.go | bob hook pre-tool --harness codex >/dev/null 2>&1 \
+  || fail "a Codex patch touching only free files was blocked"
+note "held file in a patch blocks it and names alice; a patch on free files goes through"
 
 step "4. Alice files sensitive work as private"
 alice task create --title "Rotate the leaked production key" \
@@ -344,11 +369,17 @@ MESH_PIDS="$MESH_PIDS $!"
   --peer-key "$MESH_CERTS/mesh-b/key.pem" --peer "mesh-a=https://127.0.0.1:$MESH_PORT" \
   >"$WORK/mesh-b.log" 2>&1 &
 MESH_PIDS="$MESH_PIDS $!"
-sleep 2
 
 MESH_A="https://127.0.0.1:$MESH_PORT"
-# The link table shows mesh-b as up, with the identity its certificate carries.
-PEERS=$(curl -sf --cacert "$MESH_CERTS/ca.pem" -H "Authorization: Bearer $ALICE_TOKEN" "$MESH_A/v1/peers")
+# The link table shows mesh-b as up, with the identity its certificate carries. Each daemon
+# probes once at start and then every 10s; the two start together, so the first probe can
+# land before the other one listens. Wait out one probe interval rather than sampling once.
+PEERS=""
+for _ in $(seq 1 30); do
+  PEERS=$(curl --max-time 1 -sf --cacert "$MESH_CERTS/ca.pem" -H "Authorization: Bearer $ALICE_TOKEN" "$MESH_A/v1/peers" || true)
+  echo "$PEERS" | grep -q '"state": *"up"' && break
+  sleep 0.5
+done
 echo "$PEERS" | grep -q '"state": *"up"'     || fail "peer link did not come up: $PEERS"
 echo "$PEERS" | grep -q '"name": *"mesh-b"' || fail "peer did not report its mesh identity: $PEERS"
 

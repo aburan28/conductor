@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 func candidate(id, principal, harness, model string, tier domain.Tier, effort, ceiling domain.Effort) Candidate {

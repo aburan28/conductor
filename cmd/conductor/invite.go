@@ -1,19 +1,23 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/adamburan/conductor/internal/client"
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/client"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // Onboarding a teammate with one link.
@@ -49,6 +53,10 @@ are in — no flags to copy, no token to paste separately.
   conductor invite rachel
   conductor invite rachel --role maintainer --expires 7d
   conductor invite ci-runner --role runner --expires never --endpoint https://conductor.team
+
+When this machine's control plane is on loopback, prefer Tailscale MagicDNS as --endpoint
+(and as conductord --public-url) so teammates reach the dashboard and MCP over your
+private tailnet — see docs/REMOTE_ACCESS.md.
 
 The link contains a bearer token: send it over a channel you trust, exactly as you would a
 password. It is shown once and stored only as a hash.
@@ -104,37 +112,40 @@ Flags:
 		body["token_ttl"] = ttl.String()
 	}
 
-	var result struct {
-		Handle    string `json:"handle"`
-		Role      string `json:"role"`
-		Token     string `json:"token"`
-		ExpiresAt string `json:"expires_at"`
-		Created   bool   `json:"created_principal"`
-	}
+	var result inviteResult
 	if err := api.Post(ctx, "/v1/projects/"+ref+"/members", body, &result); err != nil {
 		return err
 	}
 	if result.Token == "" {
-		return errors.New("the server added the member but returned no token; they may already have one")
+		// An existing account is added to the project but never handed a new token: the
+		// server will not mint a credential for someone who already has one, since that
+		// would give the inviter a login as them.
+		return printTokenlessInvite(result, ref, *asJSON)
 	}
 
 	link := joinLink(joinEndpoint, ref, result.Token)
 	loopback := isLoopbackEndpoint(joinEndpoint)
+	tsDNS, tsOK := detectTailscale(ctx)
+	port := listenPort(joinEndpoint)
 
 	if *asJSON {
-		return emit(map[string]any{
+		out := map[string]any{
 			"handle": result.Handle, "role": result.Role, "created": result.Created,
 			"endpoint": joinEndpoint, "project": ref, "token": result.Token,
 			"expires_at": result.ExpiresAt, "join_url": link,
 			"endpoint_reachable": !loopback,
-		})
+		}
+		if tsOK {
+			out["tailscale_dns"] = tsDNS
+			out["suggested_endpoint"] = "https://" + tsDNS
+			out["serve_command"] = "tailscale serve --bg " + port
+			out["public_url_hint"] = "https://" + tsDNS
+			out["mcp_url"] = "https://" + tsDNS + "/mcp"
+		}
+		return emit(out)
 	}
 
-	verb := "Invited"
-	if !result.Created {
-		verb = "Re-invited"
-	}
-	fmt.Printf("%s %s as %s on %s.\n\n", verb, result.Handle, result.Role, ref)
+	fmt.Printf("Invited %s as %s on %s.\n\n", result.Handle, result.Role, ref)
 	fmt.Println("Send them this link, once, over a channel you trust:")
 	fmt.Println()
 	fmt.Println("  " + link)
@@ -148,13 +159,73 @@ Flags:
 	if loopback {
 		fmt.Fprintf(os.Stderr, `
 Warning: this link points at %s, which only reaches your own machine. A teammate on
-another computer cannot use it. Expose the control plane and re-run with the public URL:
+another computer cannot use it.
+`, joinEndpoint)
+		if tsOK {
+			// Publish the loopback daemon to the tailnet only; Tailscale terminates TLS.
+			// Local sign-in stays local — requests through the MagicDNS name need the token.
+			fmt.Fprintf(os.Stderr, `
+Tailscale is running on this machine (%s). To let them in over your private tailnet:
 
+  tailscale serve --bg %s
+  conductor invite %s --endpoint https://%s
+
+Use the MagicDNS name as the control plane's public URL (SSO, GitHub webhooks,
+dashboard and MCP links):
+
+  conductord … --public-url https://%s
+  # or: export CONDUCTOR_PUBLIC_URL=https://%s
+
+Remote MCP over the same URL: https://%s/mcp
+Stop sharing with: tailscale serve reset
+If they are not on your tailnet, share this machine from the Tailscale admin console
+first; nothing becomes reachable from the public internet.
+See docs/REMOTE_ACCESS.md.
+`, tsDNS, port, handle, tsDNS, tsDNS, tsDNS, tsDNS)
+		} else {
+			fmt.Fprintf(os.Stderr, `Expose the control plane and re-run with the address they can reach:
+
+  tailscale serve --bg %s                     # simplest: your private tailnet only
   conductord --addr 0.0.0.0:8080 --tls-cert cert.pem --tls-key key.pem   # or --behind-proxy
-  conductor invite %s --endpoint https://your-host:8080
-`, joinEndpoint, handle)
+  conductor invite %s --endpoint https://your-host
+
+See docs/REMOTE_ACCESS.md.
+`, port, handle)
+		}
+	} else if tsOK && strings.Contains(joinEndpoint, tsDNS) {
+		fmt.Fprintf(os.Stderr, "\nTailscale MagicDNS endpoint (%s). Teammates must be on your tailnet.\n"+
+			"Remote MCP: %s/mcp  ·  stop sharing: tailscale serve reset\n", tsDNS, strings.TrimRight(joinEndpoint, "/"))
 	}
 	fmt.Fprintln(os.Stderr, "\nThis link contains a bearer token. It is shown once and stored only as a hash.")
+	return nil
+}
+
+// inviteResult is the server's answer to POST /v1/projects/{project}/members.
+type inviteResult struct {
+	Handle            string `json:"handle"`
+	Role              string `json:"role"`
+	Token             string `json:"token"`
+	ExpiresAt         string `json:"expires_at"`
+	Created           bool   `json:"created_principal"`
+	ExistingPrincipal bool   `json:"existing_principal"`
+	Note              string `json:"note"`
+}
+
+// printTokenlessInvite reports an invite that added a membership without minting a token —
+// an account that already existed, or --no-token.
+func printTokenlessInvite(result inviteResult, ref string, asJSON bool) error {
+	if asJSON {
+		return emit(map[string]any{
+			"handle": result.Handle, "role": result.Role, "created": result.Created,
+			"existing_principal": result.ExistingPrincipal, "project": ref,
+			"token": "", "note": result.Note,
+		})
+	}
+	fmt.Printf("Added %s as %s on %s.\n", result.Handle, result.Role, ref)
+	if result.ExistingPrincipal {
+		fmt.Printf("\n%s already has an account here, so no token was minted: they keep using their own\n"+
+			"login, which now reaches %s. Tell them to run:\n\n  conductor login --project %s\n", result.Handle, ref, ref)
+	}
 	return nil
 }
 
@@ -165,6 +236,8 @@ another computer cannot use it. Expose the control plane and re-run with the pub
 func cmdJoin(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("join", flag.ExitOnError)
 	runner := fs.Bool("runner", false, "start a runner immediately after joining")
+	integrate := fs.Bool("integrate", false, "connect every coding tool on this machine (Claude Code, Codex, OpenCode, …) without asking")
+	noIntegrate := fs.Bool("no-integrate", false, "do not offer to connect the coding tools on this machine")
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, `conductor join — accept an invite link and log in
@@ -173,6 +246,7 @@ Paste the link a teammate gave you (from `+"`conductor invite`"+`). It saves you
 token, and project, verifies them, and tells you how to start contributing.
 
   conductor join "https://conductor.team/#project=myrepo&token=cdt_…"
+  echo "<link>" | conductor join -      # read the link from stdin, keeping the token off the command line
 
 You can also pass the three values by hand if you prefer:
 
@@ -195,7 +269,11 @@ Flags:
 		Endpoint: *endpoint, Token: *token, Project: *projectFlag,
 	}
 	if len(positional) > 0 {
-		parsed, err := parseJoinLink(positional[0])
+		link, err := joinLinkArg(positional[0], os.Stdin)
+		if err != nil {
+			return err
+		}
+		parsed, err := parseJoinLink(link)
 		if err != nil {
 			return err
 		}
@@ -227,6 +305,15 @@ Flags:
 	}
 	for _, p := range projects {
 		fmt.Printf("  %-24s %s\n", p.Slug, p.Role)
+	}
+	// Joining is the moment every tool on this machine should learn about the project; doing
+	// it by hand, tool by tool, is the friction that stops people using it. Ask once (yes by
+	// default), or not at all with --integrate / --no-integrate.
+	if !*noIntegrate && (*integrate || confirmDefaultYes("\nConnect the coding tools on this machine (Claude Code, Codex, OpenCode, …) to this project? [Y/n] ")) {
+		fmt.Println()
+		if err := cmdIntegrate(ctx, []string{"all", "--global"}); err != nil {
+			fmt.Fprintf(os.Stderr, "Tools not connected: %v\nRun `conductor integrate all --global` later, or `conductor integrate <tool>` inside a repository.\n", err)
+		}
 	}
 	printContributeGuidance()
 
@@ -293,6 +380,24 @@ func joinLink(endpoint, project, token string) string {
 	return strings.TrimRight(endpoint, "/") + "/#" + frag.Encode()
 }
 
+// joinLinkArg is the link a `conductor join` argument names. A lone "-" reads the link from
+// stdin instead, so the bearer token never has to sit in the process argument list, where any
+// local user can read it with ps. The macOS app passes the link this way.
+func joinLinkArg(arg string, stdin io.Reader) (string, error) {
+	if arg != "-" {
+		return arg, nil
+	}
+	line, err := bufio.NewReader(stdin).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", fmt.Errorf("reading the link from stdin: %w", err)
+	}
+	link := strings.TrimSpace(line)
+	if link == "" {
+		return "", errors.New("no link on standard input: pipe the link in, e.g. echo \"<link>\" | conductor join -")
+	}
+	return link, nil
+}
+
 // parseJoinLink extracts endpoint, project, and token from a join link. It accepts the
 // fragment form this tool emits, the older query form (`?token=&project=`) that
 // `conductor dashboard` used, and a bare `token&project` fragment body.
@@ -301,7 +406,8 @@ func parseJoinLink(s string) (client.Credentials, error) {
 	var creds client.Credentials
 	u, err := url.Parse(s)
 	if err != nil {
-		return creds, fmt.Errorf("not a valid link: %w", err)
+		// url.Parse's error quotes the whole input, token included, so it is not wrapped here.
+		return creds, errors.New("not a valid invite link")
 	}
 	if u.Scheme != "" && u.Host != "" {
 		creds.Endpoint = u.Scheme + "://" + u.Host
@@ -417,4 +523,55 @@ func scaleHours(hours float64) time.Duration {
 		return time.Duration(-1 << 63)
 	}
 	return time.Duration(ns)
+}
+
+// detectTailscale reports this machine's MagicDNS name when Tailscale is installed and
+// connected. A variable so tests can stub it.
+var detectTailscale = func(ctx context.Context) (string, bool) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tailscale", "status", "--json").Output()
+	if err != nil {
+		return "", false
+	}
+	return parseTailscaleStatus(out)
+}
+
+// parseTailscaleStatus extracts the MagicDNS name from `tailscale status --json`.
+func parseTailscaleStatus(out []byte) (string, bool) {
+	var st struct {
+		BackendState string `json:"BackendState"`
+		Self         struct {
+			DNSName string `json:"DNSName"`
+		} `json:"Self"`
+	}
+	if json.Unmarshal(out, &st) != nil || st.BackendState != "Running" {
+		return "", false
+	}
+	name := strings.TrimSuffix(st.Self.DNSName, ".")
+	return name, name != ""
+}
+
+// listenPort is the port of a loopback endpoint, for `tailscale serve`.
+func listenPort(endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Port() == "" {
+		return "8080"
+	}
+	return u.Port()
+}
+
+// confirmDefaultYes asks a yes/no question on an interactive terminal, defaulting to yes. On
+// anything that is not a terminal (a script, CI) it answers no: a script must opt in.
+func confirmDefaultYes(prompt string) bool {
+	if !stdinIsTerminal() {
+		return false
+	}
+	fmt.Print(prompt)
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "", "y", "yes":
+		return true
+	}
+	return false
 }

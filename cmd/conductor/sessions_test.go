@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,9 +12,29 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adamburan/conductor/internal/localstate"
-	"github.com/adamburan/conductor/internal/privacy"
+	"github.com/aburan28/conductor/internal/externalwork"
+	"github.com/aburan28/conductor/internal/localstate"
+	"github.com/aburan28/conductor/internal/privacy"
 )
+
+func TestExternalTaskBodyKeepsSourceMetadataLocal(t *testing.T) {
+	c := externalwork.Candidate{Source: "codex", ID: "12345678-1234-1234-1234-123456789abc", Title: "private conversation title", Cwd: "/private/work", RecordPath: "/private/work/transcript.jsonl"}
+	b, err := json.Marshal(externalTaskBody(c))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	for _, secret := range []string{c.Title, c.Cwd, c.RecordPath} {
+		if strings.Contains(s, secret) {
+			t.Fatalf("task body leaked local metadata: %s", secret)
+		}
+	}
+	for _, want := range []string{`"visibility":"private"`, `"status":"proposed"`, `"external_ref":"codex:12345678-1234-1234-1234-123456789abc"`} {
+		if !strings.Contains(s, want) {
+			t.Errorf("task body missing %s: %s", want, s)
+		}
+	}
+}
 
 // ---------------------------------------------------------------------------
 // sessions save — selection and the pause/resume decisions
@@ -126,7 +147,12 @@ const fakeHarnessEnv = "CONDUCTOR_TEST_FAKE_HARNESS"
 
 func TestMain(m *testing.M) {
 	if os.Getenv(fakeHarnessEnv) != "" {
-		select {}
+		// Sleep rather than select{}: with nothing else to run, the runtime reports a bare
+		// select{} as a deadlock and exits, which it does on macOS and in any build without
+		// cgo. A pending timer is not a deadlock, so this idles until it is killed.
+		for {
+			time.Sleep(time.Hour)
+		}
 	}
 	// No test in this package may scan the real process table: the scan finds the
 	// developer's own agent sessions, and pause would freeze them. Every test works from
@@ -409,5 +435,24 @@ func TestDefaultSessionsFile(t *testing.T) {
 	at := time.Date(2026, 8, 25, 14, 3, 5, 0, time.UTC)
 	if got, want := defaultSessionsFile("payments", at), "conductor-sessions-payments-20260825T140305Z.json"; got != want {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// A session export names machines and worktree paths; it is written owner-only, and an
+// existing looser file is tightened rather than kept.
+func TestSessionExportIsOwnerOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePrivateFile(path, []byte("{}\n")); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("export mode = %v, want 0600", info.Mode().Perm())
 	}
 }

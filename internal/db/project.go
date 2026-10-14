@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"strings"
 
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // ---------------------------------------------------------------------------
@@ -125,6 +125,37 @@ func (s *Store) ListProjectsFor(ctx context.Context, principalID domain.ID) ([]d
 		out = append(out, p)
 	}
 	return out, rows.Err()
+}
+
+// SoleProjectInOrg returns the organization's only project when there is exactly one.
+// Used by bootstrap so a solo machine reuses its project instead of minting another
+// from a worktree directory name.
+func (s *Store) SoleProjectInOrg(ctx context.Context, orgID domain.ID) (domain.Project, bool, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT `+projectColumns+`
+		  FROM projects p
+		 WHERE p.organization_id = $1::uuid
+		 ORDER BY p.created_at
+		 LIMIT 2`, orgID)
+	if err != nil {
+		return domain.Project{}, false, err
+	}
+	defer rows.Close()
+	var out []domain.Project
+	for rows.Next() {
+		p, err := scanProject(rows.Scan)
+		if err != nil {
+			return domain.Project{}, false, err
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return domain.Project{}, false, err
+	}
+	if len(out) != 1 {
+		return domain.Project{}, false, nil
+	}
+	return out[0], true, nil
 }
 
 func (s *Store) UpdateProjectConfig(ctx context.Context, id domain.ID, cfg domain.ProjectConfig) error {
@@ -258,4 +289,41 @@ func (s *Store) ListModelProfiles(ctx context.Context, orgID domain.ID) ([]domai
 		out = append(out, p)
 	}
 	return out, rows.Err()
+}
+
+// ProjectsWithRemote lists every project that records a canonical remote. The GitHub
+// integration matches a repository to its projects through it; there are few projects per
+// control plane, so the match is done by the caller rather than with a normalised column.
+func (s *Store) ProjectsWithRemote(ctx context.Context) ([]domain.Project, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT `+projectColumns+`
+		  FROM projects p
+		 WHERE p.canonical_remote <> ''
+		 ORDER BY p.created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.Project
+	for rows.Next() {
+		p, err := scanProject(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// SetProjectRemote records the repository a project governs, e.g.
+// https://github.com/acme/widgets.
+func (s *Store) SetProjectRemote(ctx context.Context, id domain.ID, remote string) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE projects SET canonical_remote = $2 WHERE id = $1::uuid`, id, remote)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.ErrNotFound
+	}
+	return nil
 }

@@ -8,9 +8,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/adamburan/conductor/internal/client"
-	"github.com/adamburan/conductor/internal/coord"
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/client"
+	"github.com/aburan28/conductor/internal/coord"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
 // ---------------------------------------------------------------------------
@@ -127,7 +127,7 @@ func printSwarm(v coord.SwarmView) {
 func swarmJoin(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("swarm join", flag.ExitOnError)
 	endpoint := fs.String("endpoint", "", "the team's control plane URL")
-	token := fs.String("token", "", "your access token (or paste a `conductor invite` link as the argument)")
+	token := fs.String("token", "", "your access token (or paste a 'conductor invite' link as the argument)")
 	project := fs.String("project", "", "project slug")
 	asRunner := fs.Bool("runner", false, "start a runner immediately after joining")
 	positional, err := parseFlags(fs, args)

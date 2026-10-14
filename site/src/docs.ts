@@ -26,9 +26,12 @@ const SOURCES: Record<'readme' | 'design', string> = {
 const PAGES: Record<string, PageSpec> = {
   quickstart: {
     h1: 'Quickstart',
-    intro: 'Postgres on :55432, the control plane on 127.0.0.1:8080, and your CLI login — from one command.',
+    intro: 'Install the binaries, then one command: Postgres (Docker only if none is running), the control plane on 127.0.0.1:8080, and your CLI login.',
     blocks: [
-      { source: 'readme', titles: ['Quickstart', 'Manual, or on another repository'] },
+      {
+        source: 'readme',
+        titles: ['Install', 'Quickstart', 'Getting help', 'Manual, or on another repository', 'Removing Conductor'],
+      },
     ],
   },
   'daily-use': {

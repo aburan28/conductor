@@ -20,7 +20,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adamburan/conductor/internal/policy"
+	"github.com/aburan28/conductor/internal/policy"
 )
 
 // Client reads one cairn node.

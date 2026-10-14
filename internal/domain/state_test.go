@@ -30,6 +30,9 @@ func TestTaskTransitionsFollowDesign(t *testing.T) {
 		{TaskReviewRequired, TaskRunning}, // changes requested
 		{TaskReviewRequired, TaskMerging},
 		{TaskMerging, TaskDone},
+		{TaskVerifying, TaskReady},      // sent back: changes requested after the attempt ended
+		{TaskReviewRequired, TaskReady}, // sent back from review
+		{TaskMerging, TaskReady},        // pull request closed without merging
 		{TaskRunning, TaskFailed},
 		{TaskFailed, TaskReady}, // operator retry
 	}

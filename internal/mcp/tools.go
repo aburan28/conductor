@@ -6,14 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
+	"time"
 
-	"github.com/adamburan/conductor/internal/client"
-	"github.com/adamburan/conductor/internal/coord"
-	"github.com/adamburan/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/checkpoint"
+	"github.com/aburan28/conductor/internal/client"
+	"github.com/aburan28/conductor/internal/coord"
+	"github.com/aburan28/conductor/internal/domain"
 )
 
-// The tool set is intentionally short (DESIGN.md §18). Nine tools, each mapping to one API
-// call. `conductor_check_conflicts` is separated out from `coord_start_work` because it is
+// The tool set is intentionally short (DESIGN.md §18). Fifteen tools, each mapping to one API
+// call — except coord_checkpoint, which is local to the machine the agent runs on. `conductor_check_conflicts` is separated out from `coord_start_work` because it is
 // the one an agent should reach for reflexively before editing — the cheapest possible call
 // that prevents the most expensive possible mistake.
 func toolDefinitions() []map[string]any {
@@ -206,12 +209,50 @@ func toolDefinitions() []map[string]any {
 			},
 		},
 		{
+			"name": "coord_checkpoint",
+			"description": "Checkpoint this session so the work can continue elsewhere: on another machine, under another " +
+				"account after a usage limit, or in a different coding agent. Bundles your transcript and the working tree " +
+				"into a file on this machine only; nothing is uploaded or shared with the team. Call it when you reach a " +
+				"milestone or suspect you are near a limit, with a note on where the work stands.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"note": map[string]any{"type": "string",
+						"description": "Where the work stands and what comes next, for whoever resumes it."},
+				},
+			},
+		},
+		quotaToolDefinition(),
+		{
 			"name": "coord_project_status",
 			"description": "Who is working on what right now, plus open conflicts. Shows tasks, owners, scopes, and " +
 				"branches. Never shows anyone's prompts or model output.",
 			"inputSchema": map[string]any{
 				"type":       "object",
 				"properties": map[string]any{},
+			},
+		},
+		{
+			"name": "coord_list_secrets",
+			"description": "List the names of project secrets stored in Conductor's encrypted vault (hints only — never values). " +
+				"Use coord_get_secret to retrieve one value for this session. Do not put secret values into progress, " +
+				"handoffs, or task titles.",
+			"inputSchema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
+			},
+		},
+		{
+			"name": "coord_get_secret",
+			"description": "Retrieve one project secret's plaintext for this session only. Values are sealed at rest in " +
+				"Conductor. Never echo the value into coord_report_progress, handoffs, commits, or task metadata.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name": map[string]any{"type": "string",
+						"description": "Secret name (environment-variable style), e.g. DATABASE_URL or OPENAI_API_KEY."},
+				},
+				"required": []string{"name"},
 			},
 		},
 	}
@@ -243,8 +284,16 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		return s.capabilities(ctx, raw)
 	case "coord_delegate":
 		return s.delegate(ctx, raw)
+	case "coord_checkpoint":
+		return s.checkpointTool(ctx, raw)
+	case "coord_quota":
+		return s.quotaTool(ctx, raw)
 	case "coord_project_status":
 		return s.projectStatus(ctx)
+	case "coord_list_secrets":
+		return s.listSecrets(ctx, raw)
+	case "coord_get_secret":
+		return s.getSecret(ctx, raw)
 	default:
 		return nil, fmt.Errorf("unknown tool %q", name)
 	}
@@ -314,6 +363,10 @@ func (s *Server) startWork(ctx context.Context, raw json.RawMessage) (any, error
 		"attach_to":    args.AttachTo,
 		"force":        args.Force,
 		"harness":      "mcp",
+		// Binding the claim to the wrapping session is what keeps it alive: the wrap
+		// sidecar's heartbeat renews every lease its session holds. Without it the lease
+		// lived only as long as the model kept calling progress tools.
+		"session_id": s.session,
 	}, &result)
 
 	// A 409 here is a coordination answer, not a failure: the body explains who holds the
@@ -330,10 +383,10 @@ func (s *Server) startWork(ctx context.Context, raw json.RawMessage) (any, error
 	}
 
 	// Adopt the fence so subsequent tool calls in this session are automatically fenced.
-	s.fence = domain.Fence{
+	s.setFence(domain.Fence{
 		TaskID: result.TaskID, AttemptID: result.AttemptID,
 		LeaseID: result.LeaseID, FencingEpoch: result.FencingEpoch,
-	}
+	})
 	return jsonResult(result), nil
 }
 
@@ -477,21 +530,23 @@ func (s *Server) publishResult(ctx context.Context, raw json.RawMessage) (any, e
 		})
 	}
 
-	// Reported as evidence with outcome "blocked", which records the artifact metadata
-	// without transitioning the task. Completion still goes through coord_finish_work, and
-	// the runner's own observations are what the verification pipeline trusts.
-	err := s.api.Post(ctx, "/v1/attempts/"+s.fence.AttemptID+"/progress", map[string]any{
+	// Recorded as evidence against the attempt — the commit, the changed paths, and each
+	// command with its exit code — without transitioning the task; completion still goes
+	// through coord_finish_work. The results carry no runner id, so anything reading them can
+	// tell an agent's own report from a runner's observation.
+	var out map[string]any
+	err := s.api.Post(ctx, "/v1/attempts/"+s.fence.AttemptID+"/evidence", map[string]any{
 		"task_id": s.fence.TaskID, "lease_id": s.fence.LeaseID,
 		"fencing_epoch": s.fence.FencingEpoch,
-		"phase":         "testing", "changed_paths": args.ChangedPaths,
-		"summary": fmt.Sprintf("published %d validation result(s)", len(commands)),
-	}, nil)
+		"commit_sha":    args.CommitSHA, "changed_paths": args.ChangedPaths,
+		"commands": commands,
+	}, &out)
 	if err != nil {
 		return nil, err
 	}
 	return jsonResult(map[string]any{
 		"status": "recorded", "commands": len(commands), "commit_sha": args.CommitSHA,
-		"note": "Validation is attested by the runner. Agent-reported exit codes are advisory.",
+		"note": "Recorded as agent-reported evidence. A runner's own observations are attested separately.",
 	}), nil
 }
 
@@ -524,7 +579,7 @@ func (s *Server) finishWork(ctx context.Context, raw json.RawMessage) (any, erro
 	if len(result.MissingChecks) > 0 {
 		return jsonResult(result), nil
 	}
-	s.fence = domain.Fence{}
+	s.setFence(domain.Fence{})
 	return jsonResult(result), nil
 }
 
@@ -558,7 +613,7 @@ func (s *Server) handoff(ctx context.Context, raw json.RawMessage) (any, error) 
 	if err != nil {
 		return nil, err
 	}
-	s.fence = domain.Fence{}
+	s.setFence(domain.Fence{})
 	return jsonResult(out), nil
 }
 
@@ -650,7 +705,7 @@ func (s *Server) delegate(ctx context.Context, raw json.RawMessage) (any, error)
 	}
 	// The lease is gone either way: the handoff released it. Clearing the fence keeps the
 	// agent from making further fenced calls that would now fail confusingly.
-	s.fence = domain.Fence{}
+	s.setFence(domain.Fence{})
 	return jsonResult(out), nil
 }
 
@@ -667,4 +722,57 @@ func (s *Server) requireFence() error {
 		return errors.New("no active claim: call coord_start_work first, or run inside a Conductor attempt")
 	}
 	return nil
+}
+
+// checkpointTool takes a local checkpoint of the session the gateway is running inside.
+// Only the stdio gateway can: it runs on the same machine as the harness and sees the same
+// filesystem. Over HTTP the gateway lives in the control plane, which must never hold a
+// transcript, so the tool explains where to run it instead. Nothing from the checkpoint —
+// not the note, not the path's contents — is sent to the API.
+func (s *Server) checkpointTool(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args struct {
+		Note string `json:"note"`
+	}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &args); err != nil {
+			return nil, err
+		}
+	}
+	if !s.local {
+		return nil, errors.New("checkpoints are taken on the machine running the session, not by the control plane: " +
+			"run `conductor checkpoint capture --note \"…\"` in the session's directory, or mount the stdio gateway (conductor-mcp)")
+	}
+	if checkpoint.Disabled(os.Getenv) {
+		return nil, errors.New("checkpoints are disabled here (CONDUCTOR_CHECKPOINT=off)")
+	}
+	cwd, _ := os.Getwd()
+	harness := checkpoint.NormalizeHarness(os.Getenv("CONDUCTOR_HARNESS"))
+	if harness == "" {
+		switch {
+		case os.Getenv("CLAUDECODE") != "" || os.Getenv("CLAUDE_CODE_ENTRYPOINT") != "":
+			harness = "claude"
+		case os.Getenv("CODEX_SANDBOX") != "" || os.Getenv("CODEX_HOME") != "":
+			harness = "codex"
+		default:
+			harness = "claude"
+		}
+	}
+	res, err := checkpoint.Capture(ctx, checkpoint.Request{
+		Harness: harness, Cwd: cwd, Since: time.Now().Add(-30 * 24 * time.Hour),
+		Reason: checkpoint.ReasonAgent, Note: args.Note, Force: true,
+		Conductor: checkpoint.ConductorRef{Project: s.project, SessionID: string(s.session), Task: s.fence.TaskID},
+	})
+	if err != nil {
+		return nil, err
+	}
+	m := res.Manifest
+	return jsonResult(map[string]any{
+		"checkpoint_id": m.ID,
+		"harness":       m.Harness,
+		"session_id":    m.SessionID,
+		"path":          res.Path,
+		"skipped":       res.Skipped,
+		"resume":        "conductor checkpoint resume " + checkpoint.ShortID(m.ID) + "  (add --account <name> for another login, --harness <claude|codex|opencode> for another agent)",
+		"privacy":       "stored on this machine only; nothing was sent to the team",
+	}), nil
 }

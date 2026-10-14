@@ -77,12 +77,14 @@ profiles:
     capabilities: [code_review, architecture, long_context]
     billing: tokens
 
-  # Codex ids stay empty until this installation names a verified Codex model.
+  # gpt-5.3-codex is OpenAI's current Codex-tuned model id (developers.openai.com/api/docs/
+  # models/gpt-5.3-codex, checked 2026-10-05). The profile stays disabled until someone on
+  # this installation has run `codex exec -m gpt-5.3-codex` against their account.
   # OpenCode talks to local vLLM (`conductor serve`). Model ids match --served-model-name.
   - alias: worker.general
     harness: codex
     provider: openai
-    model: ""
+    model: gpt-5.3-codex
     reasoning_effort: medium
     capabilities: [code_edit, tests, multi_file]
     enabled: false
