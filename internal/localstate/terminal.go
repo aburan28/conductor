@@ -1,12 +1,14 @@
 package localstate
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // Terminal spawning. When a paused session's terminal has been closed, resume must put the
@@ -40,7 +42,12 @@ func newLauncher() launcher {
 		getenv:   os.Getenv,
 		lookPath: exec.LookPath,
 		run: func(argv []string) error {
-			out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput()
+			// A wait with no end would stall resume entirely: osascript on macOS can
+			// block for a TCC permission a background agent cannot be granted, and a
+			// wedged launcher must fall through to the next one, not hang the loop.
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			out, err := exec.CommandContext(ctx, argv[0], argv[1:]...).CombinedOutput()
 			if err != nil {
 				return fmt.Errorf("%s: %v: %s", filepath.Base(argv[0]), err,
 					strings.TrimSpace(string(out)))
