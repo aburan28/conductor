@@ -190,6 +190,58 @@ func TestDockerNotFound(t *testing.T) {
 	}
 }
 
+func TestChoosePostgresVolume(t *testing.T) {
+	cases := []struct {
+		name          string
+		labeled       []string
+		bareExists    bool
+		composeExists bool
+		want          string
+		wantErr       bool
+	}{
+		{name: "new install", want: composePostgresVolume},
+		{name: "older conductor up volume", bareExists: true, want: barePostgresVolume},
+		{name: "compose volume", composeExists: true, want: composePostgresVolume},
+		{
+			name:    "labeled compose volume wins over a bare one",
+			labeled: []string{composePostgresVolume}, bareExists: true, want: composePostgresVolume,
+		},
+		{
+			name:    "only labeled volume from another checkout",
+			labeled: []string{"myclone_conductor-pgdata"}, want: "myclone_conductor-pgdata",
+		},
+		{
+			name:    "canonical name among several labeled volumes",
+			labeled: []string{"myclone_conductor-pgdata", composePostgresVolume}, want: composePostgresVolume,
+		},
+		{
+			name:    "two labeled volumes and no canonical name",
+			labeled: []string{"a_conductor-pgdata", "b_conductor-pgdata"}, wantErr: true,
+		},
+		{
+			name:       "bare and compose both exist unlabeled",
+			bareExists: true, composeExists: true, wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := choosePostgresVolume(tc.labeled, tc.bareExists, tc.composeExists)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("choosePostgresVolume() = %q, want an error", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("choosePostgresVolume(): %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("choosePostgresVolume() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestPublishedBeyondLoopback(t *testing.T) {
 	for in, want := range map[string]bool{
 		"":                   false,
