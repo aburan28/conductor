@@ -131,6 +131,8 @@ func runCommand(ctx context.Context, name string, args []string) error {
 		return cmdPresence(ctx, args)
 	case "capabilities":
 		return cmdCapabilities(ctx, args)
+	case "systemd":
+		return cmdSystemd(args)
 	case "sessions":
 		return cmdSessions(ctx, args)
 	case "memory":

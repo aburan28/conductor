@@ -384,6 +384,20 @@ Example:
 		summary: "freeze every agent terminal on this machine; save how to revive them"},
 	{name: "resume", group: "Sessions and machines",
 		summary: "wake paused sessions, reopening any closed terminals"},
+	{name: "systemd", group: "Sessions and machines", subs: []string{"install", "pull-images", "status"},
+		summary: "user units for postgres + conductord (+ vLLM) with image pre-pulls",
+		topic: `conductor systemd — user units for postgres + conductord (+ vLLM)
+
+Usage:
+  conductor systemd install      write the user units (postgres, conductord, optional vLLM)
+  conductor systemd pull-images  pre-pull every image the units need
+  conductor systemd status       which unit images are cached locally
+
+Example:
+  conductor systemd install
+
+Run ` + "`conductor systemd <subcommand> -h`" + ` for its flags.
+`},
 	{name: "accounts", group: "Sessions and machines", subs: []string{"add", "list", "switch", "exhaust", "ok"},
 		summary: "harness login profiles: switch accounts when usage runs out",
 		topic: `conductor accounts — harness login profiles resume-all can switch between
