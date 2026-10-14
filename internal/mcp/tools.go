@@ -15,7 +15,7 @@ import (
 	"github.com/aburan28/conductor/internal/domain"
 )
 
-// The tool set is intentionally short (DESIGN.md §18). Thirteen tools, each mapping to one API
+// The tool set is intentionally short (DESIGN.md §18). Fifteen tools, each mapping to one API
 // call — except coord_checkpoint, which is local to the machine the agent runs on. `conductor_check_conflicts` is separated out from `coord_start_work` because it is
 // the one an agent should reach for reflexively before editing — the cheapest possible call
 // that prevents the most expensive possible mistake.
@@ -232,6 +232,29 @@ func toolDefinitions() []map[string]any {
 				"properties": map[string]any{},
 			},
 		},
+		{
+			"name": "coord_list_secrets",
+			"description": "List the names of project secrets stored in Conductor's encrypted vault (hints only — never values). " +
+				"Use coord_get_secret to retrieve one value for this session. Do not put secret values into progress, " +
+				"handoffs, or task titles.",
+			"inputSchema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
+			},
+		},
+		{
+			"name": "coord_get_secret",
+			"description": "Retrieve one project secret's plaintext for this session only. Values are sealed at rest in " +
+				"Conductor. Never echo the value into coord_report_progress, handoffs, commits, or task metadata.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name": map[string]any{"type": "string",
+						"description": "Secret name (environment-variable style), e.g. DATABASE_URL or OPENAI_API_KEY."},
+				},
+				"required": []string{"name"},
+			},
+		},
 	}
 }
 
@@ -267,6 +290,10 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		return s.quotaTool(ctx, raw)
 	case "coord_project_status":
 		return s.projectStatus(ctx)
+	case "coord_list_secrets":
+		return s.listSecrets(ctx, raw)
+	case "coord_get_secret":
+		return s.getSecret(ctx, raw)
 	default:
 		return nil, fmt.Errorf("unknown tool %q", name)
 	}

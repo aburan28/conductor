@@ -1,6 +1,8 @@
 # Conductor for macOS: plan
 
-Status: plan, not built. Scope: macOS 13 (Ventura) and later, Apple silicon and Intel.
+Status: phases 1 to 5 implemented in [`macos/`](../macos/README.md) (see "Phases" for what
+has been verified, and what needs a Mac and a Developer ID to verify). Scope: macOS 13
+(Ventura) and later, Apple silicon and Intel.
 
 ## Why an app
 
@@ -8,8 +10,9 @@ Conductor is a CLI, a daemon, a database, and a dashboard. For the person who ju
 their agents to stop colliding, that is four things to install, start, and keep running, and
 a token to find. The app makes it one thing:
 
-- **Install, open, done.** The app runs the control plane and its database for you, starts
-  them at login, and signs you in without a token (local security mode, see
+- **Install, choose, open.** On a first run the app asks whether to connect to an
+  existing control plane or start a new one with its own database. A local instance
+  starts at login and signs you in without a token (local security mode, see
   `conductor security`).
 - **Always visible.** A menu bar item shows who is live, what is contested, and work offered
   to you, without opening a browser.
@@ -24,8 +27,9 @@ a token to find. The app makes it one thing:
 |---|---|
 | Sign in with no token on this machine | `POST /v1/local/session` (client `mac-app`), `GET /v1/local/status`, `conductor security` |
 | Every screen of a dashboard | the web dashboard, served by conductord, same-origin, no external requests |
-| Live updates | `GET /v1/projects/{p}/events/stream` (SSE) |
+| Live updates | `GET /v1/projects/{p}/events/stream` (SSE over HTTPS; WebSocket not required — see `docs/REMOTE_ACCESS.md`) |
 | Invite and join | `conductor invite` (link with the token in the fragment), `conductor join` |
+| Private remote reachability | Tailscale MagicDNS + `tailscale serve` (`conductor doctor` / invite hints; `docs/REMOTE_ACCESS.md`) |
 | Connect coding tools | `conductor integrate all --global` |
 | Pause and wake every agent terminal | `conductor pause`, `conductor resume` |
 | Portable sessions | `conductor checkpoint list / resume --account / --harness` |
@@ -131,7 +135,7 @@ event.
 | Menu bar icon | dot: green (all clear), amber (conflict or offer), grey (daemon down) | SSE + `/v1/projects/{p}/status` |
 | Menu bar popover | live sessions; open conflicts with "join / wait / split"; offers with accept/decline; Pause all / Resume all; Open dashboard | status, presence, inbox APIs; `conductor pause/resume` |
 | Main window | the dashboard in a web view | conductord |
-| First run | 1. start database and daemon; 2. sign in (automatic); 3. pick a repository folder (`conductor init` + bootstrap); 4. connect tools; 5. optional GitHub | `up`, `init`, `integrate`, `github setup` |
+| First run | 1. connect to an existing endpoint or start a new database and daemon; 2. sign in; 3. pick a repository folder (`conductor init` + bootstrap) if needed; 4. connect tools; 5. optional GitHub | `up`, `init`, `integrate`, `github setup` |
 | Invite sheet | handle, role, expiry; share sheet; reachability hint | members API |
 | Connect tools sheet | per-tool status from `conductor doctor --json`, one Connect button each, or all | `integrate` |
 | GitHub sheet | Create app, Install, linked repositories, last poll | `github status/setup/link` |
@@ -175,14 +179,68 @@ The cairn recipe, unchanged where possible:
 
 ## Phases
 
-| Phase | Delivers | Done when |
-|---|---|---|
-| 0. Groundwork (this repository) | local sign-in, `conductor security`, the GitHub App, Tailscale-aware invites, `--json` everywhere | merged (this PR) |
-| 1. Menu bar + supervisor | `ConductorKit`; launchd agents for the bundled Postgres and conductord; automatic sign-in; the menu bar popover from status + SSE; web-view window | a fresh Mac with no Docker opens the app and sees its dashboard with no terminal |
-| 2. Onboarding | first-run flow; Connect tools; Invite with the share sheet and the Tailscale option; `conductor://join` | a second person joins from a texted link, and their Claude Code shows Conductor's MCP tools |
-| 3. Portability | Checkpoints window; usage-limit notification; continue under another account or harness | a session stopped by a limit continues under a second login in two clicks |
-| 4. GitHub | the GitHub sheet; check-run status per pull request in the popover | the app is created and installed from the sheet |
-| 5. Ship | Developer ID, notarization, DMG/pkg, Sparkle | a notarized DMG installs and updates itself |
+| Phase | Delivers | Done when | State |
+|---|---|---|---|
+| 0. Groundwork (this repository) | local sign-in, `conductor security`, the GitHub App, Tailscale-aware invites, `--json` everywhere | merged (this PR) | done |
+| 1. Menu bar + supervisor | `ConductorKit`; launchd agents for the bundled Postgres and conductord; automatic sign-in; the menu bar popover from status + SSE; web-view window | a fresh Mac with no Docker opens the app and sees its dashboard with no terminal | builds and launches on a Mac (see below); launchd agents and the full first-run click-through still need one with Accessibility access |
+| 2. Onboarding | first-run flow; Connect tools; Invite with the share sheet and the Tailscale option; `conductor://join` | a second person joins from a texted link, and their Claude Code shows Conductor's MCP tools | implemented |
+| 3. Portability | Checkpoints window; usage-limit notification; continue under another account or harness | a session stopped by a limit continues under a second login in two clicks | implemented |
+| 4. GitHub | the GitHub sheet; check-run status per pull request in the popover | the app is created and installed from the sheet | implemented |
+| 5. Ship | Developer ID, notarization, DMG/pkg, Sparkle | a notarized DMG installs and updates itself | implemented, unsigned |
+
+Beyond the plan, Settings → Storage configures the bucket of [STORAGE.md](STORAGE.md): the
+supervisor archives the bundled Postgres to it, installs a base-backup agent, and offers
+Restore from bucket on a new Mac.
+
+### What has been verified, and what has not
+
+The implementation was written where no Mac was available, then built and run once a Mac
+was: `swift build` (debug and the `Conductor` executable target) compiles cleanly with only
+the Command Line Tools, with one harmless warning (`SMAppService` `await` is a no-op on an
+older SDK than CI's — kept because CI's SDK needs it). The resulting binary, assembled by
+hand into a bundle with Sparkle's framework and the Go commands, launches as a real app:
+AppKit brings up its `MenuBarExtra` scene (confirmed through Control Center's scene
+messages), it restores its last window frame from `UserDefaults`, and its `APIClient` probes
+`127.0.0.1:<daemonPort>` exactly as documented. Before the first-run choice was added,
+a real `conductord` started by hand against local PostgreSQL caused the app to pick a
+different port and start a second instance. The first-run gate now waits for an explicit
+choice when the app owns no daemon or database; interactive verification on a Mac is still
+owed. `swift test` itself could not run in that earlier smoke test: this
+machine has only the Command Line Tools, and the macOS `XCTest.framework` ships with Xcode,
+not with them — CI's `macos-latest` runner has Xcode, which is why the test job lives there
+and not in a Command Line Tools-only check. Before that, what could be checked without a Mac:
+
+- `ConductorKit`, which holds all the logic (plists, supervisor, API and SSE clients,
+  decoders for every `--json` the app reads, storage settings, join links, AWS profiles),
+  builds and passes its tests on Linux.
+- An integration test ran the supervisor's Postgres setup and conductord for real (with
+  PostgreSQL 16 and this repository's conductord, without launchd): initdb with the app's
+  arguments, the socket-only configuration under a path with spaces, conductord on the
+  socket DSN, bootstrap, local sign-in, a `quota.exhausted` event through the SSE client,
+  and an invite link that `conductor join` accepted.
+- `build.sh --go-only` cross-compiled the Go commands for both architectures;
+  `fetch-postgres.sh` was exercised on a synthetic archive (the real one was downloaded
+  once to pin its hash); the signing rules and `notarytool` status parsing have tests.
+- The SwiftUI sources were syntax-checked, and the app model type-checked against
+  ConductorKit, but not compiled.
+
+What a later Mac session with Accessibility access (or the CI job) still needs to check:
+
+- launchd actually loading the three agents (this smoke test ran the binary directly, not
+  through `LaunchAgent.swift`'s plists);
+- the window, the share sheet, notifications, `conductor://` links, and clicking through
+  onboarding (its choice between "start a new instance" and "attach to one already running"
+  needs a click; this smoke test could only observe the headless default);
+- whether `/usr/bin/security` reads the shared Keychain items without a prompt (the item's
+  partition list, which macOS added after access lists, could still make it ask);
+- the EnterpriseDB binaries running from inside the bundle, signed by the app, under the
+  hardened runtime;
+- `swift test`'s full suite (including `IntegrationTests` and `CONDUCTOR_TEST_KEYCHAIN=1`),
+  which needs Xcode's `XCTest.framework`, not just the Command Line Tools.
+
+What needs a Developer ID and an App Store Connect key, and has never run: Developer ID
+signing, notarization and stapling, a signed `.pkg`, and Sparkle updates (which also need
+`SPARKLE_PUBLIC_ED_KEY` and a published `appcast.xml`).
 
 ## Risks and open questions
 
@@ -195,6 +253,12 @@ The cairn recipe, unchanged where possible:
   macOS user accounts should run in enhanced mode. The app should detect a second
   console user and say so.
 - **Tailscale serve** needs the user's consent and tailnet policy. The app runs it only after
-  the user clicks, and shows how to stop sharing (`tailscale serve reset`).
+  the user clicks, and shows how to stop sharing (`tailscale serve reset`). Use MagicDNS as
+  `--public-url` / invite `--endpoint`. Overlay NAT traversal (including any STUN/TURN-like
+  relay) is Tailscale’s network, not a Conductor-owned relay — see
+  [REMOTE_ACCESS.md](REMOTE_ACCESS.md).
+- **SSE, not WebSocket**, for live updates: the same `events/stream` endpoint works over
+  Tailscale HTTPS; do not add a second transport in the app unless a future bidirectional
+  feature needs it ([REMOTE_ACCESS.md](REMOTE_ACCESS.md)).
 - **Other platforms**: the CLI already covers Linux. A Windows or Linux GUI would reuse the
   web view approach (Tauri or Electron) and is not planned.

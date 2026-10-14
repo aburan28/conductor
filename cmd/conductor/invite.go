@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -52,6 +53,10 @@ are in — no flags to copy, no token to paste separately.
   conductor invite rachel
   conductor invite rachel --role maintainer --expires 7d
   conductor invite ci-runner --role runner --expires never --endpoint https://conductor.team
+
+When this machine's control plane is on loopback, prefer Tailscale MagicDNS as --endpoint
+(and as conductord --public-url) so teammates reach the dashboard and MCP over your
+private tailnet — see docs/REMOTE_ACCESS.md.
 
 The link contains a bearer token: send it over a channel you trust, exactly as you would a
 password. It is shown once and stored only as a hash.
@@ -120,14 +125,24 @@ Flags:
 
 	link := joinLink(joinEndpoint, ref, result.Token)
 	loopback := isLoopbackEndpoint(joinEndpoint)
+	tsDNS, tsOK := detectTailscale(ctx)
+	port := listenPort(joinEndpoint)
 
 	if *asJSON {
-		return emit(map[string]any{
+		out := map[string]any{
 			"handle": result.Handle, "role": result.Role, "created": result.Created,
 			"endpoint": joinEndpoint, "project": ref, "token": result.Token,
 			"expires_at": result.ExpiresAt, "join_url": link,
 			"endpoint_reachable": !loopback,
-		})
+		}
+		if tsOK {
+			out["tailscale_dns"] = tsDNS
+			out["suggested_endpoint"] = "https://" + tsDNS
+			out["serve_command"] = "tailscale serve --bg " + port
+			out["public_url_hint"] = "https://" + tsDNS
+			out["mcp_url"] = "https://" + tsDNS + "/mcp"
+		}
+		return emit(out)
 	}
 
 	fmt.Printf("Invited %s as %s on %s.\n\n", result.Handle, result.Role, ref)
@@ -146,27 +161,40 @@ Flags:
 Warning: this link points at %s, which only reaches your own machine. A teammate on
 another computer cannot use it.
 `, joinEndpoint)
-		if ts, ok := detectTailscale(ctx); ok {
-			// The easy way to let someone across town in: publish the loopback daemon to the
-			// tailnet only, with Tailscale terminating TLS. Local sign-in stays local — requests
-			// arriving through the tailnet name are not from localhost and need the token.
+		if tsOK {
+			// Publish the loopback daemon to the tailnet only; Tailscale terminates TLS.
+			// Local sign-in stays local — requests through the MagicDNS name need the token.
 			fmt.Fprintf(os.Stderr, `
-Tailscale is running on this machine (%s). To let them in over your tailnet:
+Tailscale is running on this machine (%s). To let them in over your private tailnet:
 
   tailscale serve --bg %s
   conductor invite %s --endpoint https://%s
 
-If they are not on your tailnet, share this machine with them from the Tailscale admin
-console first; nothing becomes reachable from the public internet.
-`, ts, listenPort(joinEndpoint), handle, ts)
+Use the MagicDNS name as the control plane's public URL (SSO, GitHub webhooks,
+dashboard and MCP links):
+
+  conductord … --public-url https://%s
+  # or: export CONDUCTOR_PUBLIC_URL=https://%s
+
+Remote MCP over the same URL: https://%s/mcp
+Stop sharing with: tailscale serve reset
+If they are not on your tailnet, share this machine from the Tailscale admin console
+first; nothing becomes reachable from the public internet.
+See docs/REMOTE_ACCESS.md.
+`, tsDNS, port, handle, tsDNS, tsDNS, tsDNS, tsDNS)
 		} else {
 			fmt.Fprintf(os.Stderr, `Expose the control plane and re-run with the address they can reach:
 
   tailscale serve --bg %s                     # simplest: your private tailnet only
   conductord --addr 0.0.0.0:8080 --tls-cert cert.pem --tls-key key.pem   # or --behind-proxy
   conductor invite %s --endpoint https://your-host
-`, listenPort(joinEndpoint), handle)
+
+See docs/REMOTE_ACCESS.md.
+`, port, handle)
 		}
+	} else if tsOK && strings.Contains(joinEndpoint, tsDNS) {
+		fmt.Fprintf(os.Stderr, "\nTailscale MagicDNS endpoint (%s). Teammates must be on your tailnet.\n"+
+			"Remote MCP: %s/mcp  ·  stop sharing: tailscale serve reset\n", tsDNS, strings.TrimRight(joinEndpoint, "/"))
 	}
 	fmt.Fprintln(os.Stderr, "\nThis link contains a bearer token. It is shown once and stored only as a hash.")
 	return nil
@@ -218,6 +246,7 @@ Paste the link a teammate gave you (from `+"`conductor invite`"+`). It saves you
 token, and project, verifies them, and tells you how to start contributing.
 
   conductor join "https://conductor.team/#project=myrepo&token=cdt_…"
+  echo "<link>" | conductor join -      # read the link from stdin, keeping the token off the command line
 
 You can also pass the three values by hand if you prefer:
 
@@ -240,7 +269,11 @@ Flags:
 		Endpoint: *endpoint, Token: *token, Project: *projectFlag,
 	}
 	if len(positional) > 0 {
-		parsed, err := parseJoinLink(positional[0])
+		link, err := joinLinkArg(positional[0], os.Stdin)
+		if err != nil {
+			return err
+		}
+		parsed, err := parseJoinLink(link)
 		if err != nil {
 			return err
 		}
@@ -347,6 +380,24 @@ func joinLink(endpoint, project, token string) string {
 	return strings.TrimRight(endpoint, "/") + "/#" + frag.Encode()
 }
 
+// joinLinkArg is the link a `conductor join` argument names. A lone "-" reads the link from
+// stdin instead, so the bearer token never has to sit in the process argument list, where any
+// local user can read it with ps. The macOS app passes the link this way.
+func joinLinkArg(arg string, stdin io.Reader) (string, error) {
+	if arg != "-" {
+		return arg, nil
+	}
+	line, err := bufio.NewReader(stdin).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", fmt.Errorf("reading the link from stdin: %w", err)
+	}
+	link := strings.TrimSpace(line)
+	if link == "" {
+		return "", errors.New("no link on standard input: pipe the link in, e.g. echo \"<link>\" | conductor join -")
+	}
+	return link, nil
+}
+
 // parseJoinLink extracts endpoint, project, and token from a join link. It accepts the
 // fragment form this tool emits, the older query form (`?token=&project=`) that
 // `conductor dashboard` used, and a bare `token&project` fragment body.
@@ -355,7 +406,8 @@ func parseJoinLink(s string) (client.Credentials, error) {
 	var creds client.Credentials
 	u, err := url.Parse(s)
 	if err != nil {
-		return creds, fmt.Errorf("not a valid link: %w", err)
+		// url.Parse's error quotes the whole input, token included, so it is not wrapped here.
+		return creds, errors.New("not a valid invite link")
 	}
 	if u.Scheme != "" && u.Host != "" {
 		creds.Endpoint = u.Scheme + "://" + u.Host

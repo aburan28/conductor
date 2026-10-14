@@ -89,6 +89,8 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /v1/runners/register", auth(s.registerRunner))
 	m.HandleFunc("POST /v1/runners/{runner}/heartbeat", auth(s.heartbeatRunner))
 
+	m.HandleFunc("POST /v1/local/resume-all", auth(s.localResumeAll))
+
 	m.HandleFunc("GET /v1/projects/{project}/runner/snapshot", auth(s.runnerSnapshot))
 	m.HandleFunc("GET /v1/attempts/{attempt}/brief", auth(s.attemptBrief))
 	m.HandleFunc("POST /v1/attempts/{attempt}/route", auth(s.setAttemptRoute))
@@ -105,6 +107,7 @@ func (s *Server) routes() {
 	s.quotaRoutes(m)
 	s.lifecycleRoutes(m)
 	s.notifyRoutes(m)
+	s.secretRoutes(m)
 
 	// The mesh surface. /v1/peer/* is authenticated by the peer's mesh certificate (not a
 	// bearer token); /v1/peers is the same link table shown to project members.

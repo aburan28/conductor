@@ -96,6 +96,21 @@ files predate that rule and cannot be renamed (the file name is the version a da
 recorded). The version is the whole name, applied in byte-wise order, so they are distinct
 and deterministically ordered.
 
+**Hosting.** On a personal or single-machine deployment, prefer a dedicated
+Postgres instance that does not depend on a container runtime. A Docker
+Desktop-backed database fails whenever the VM wedges or restarts — under heavy
+host load the VM can hang while the port forward stays open, so conductord sees
+brief `connection refused` windows: every request during one returns
+`internal error` with a request id, and leases that expire during one are
+reclaimed. A native instance under launchd/systemd does not share that failure
+mode. Run it bound to `127.0.0.1` on a fixed port and point the DSN at
+`127.0.0.1` (not `localhost`) so nothing else on the machine can claim the
+`::1` side of the name. On macOS, a launchd agent running the postgres binary
+directly needs `LC_ALL=C` in its environment, or the postmaster aborts with
+"postmaster became multithreaded during startup". When migrating, take a
+`pg_dump -Fc` first and verify row counts of a few core tables against the
+source before cutting over.
+
 **Upgrades and rollback.** Back up, then start the new version; it migrates. There are no
 down migrations, so rolling back means restoring the backup taken before the upgrade and
 starting the old binary against it. Anything recorded between the upgrade and the rollback
@@ -275,9 +290,10 @@ no app, and is not read after that; delete it once the import is logged.
 ## The secret key
 
 Secrets conductord keeps in Postgres — the GitHub App's private key, webhook secret and
-client secret, and each notification channel's URL and signing secret — are sealed with AES-256-GCM under a 32-byte key that never goes into the
-database. A database dump, backup or restored copy is then useless for acting as the app
-without the key as well.
+client secret, each notification channel's URL and signing secret, and project secrets in
+the vault (`conductor secrets`) — are sealed with AES-256-GCM under a 32-byte key that never
+goes into the database. A database dump, backup or restored copy is then useless for acting
+as the app (or reading vault values) without the key as well.
 
 Where the key comes from, first match wins:
 
@@ -304,12 +320,35 @@ defeats the purpose.
 **If the key is lost**, the sealed credentials cannot be recovered, and nothing else is
 affected: tasks, leases, tokens and everything else are not sealed. Start conductord with a
 new key, then run `conductor github setup --replace` to create and install the app again (the
-old app can be deleted in GitHub's settings), and re-add notification channels
-(`conductor notify remove` / `add`): until then each send fails with "cannot unseal", shown
-as the channel's last error. The same applies when restoring a backup without its key.
+old app can be deleted in GitHub's settings), re-add notification channels
+(`conductor notify remove` / `add`), and re-paste project secrets (`conductor secrets set`):
+until then each notify send fails with "cannot unseal", shown as the channel's last error,
+and vault open/export fails. The same applies when restoring a backup without its key.
 
 **Rotating the key** is the same procedure: switch every replica to the new key, then run
-setup again. There is no in-place re-encryption.
+setup again and re-set notification channels and project secrets. There is no in-place
+re-encryption.
+
+## Project secrets vault
+
+Maintainers paste small credentials with `conductor secrets set NAME` (stdin paste preferred).
+Values are sealed under the same secretbox key (purpose `conductor/project_secret/<project_id>`).
+Contributors may list hints and open values for their own session (MCP `coord_get_secret`,
+CLI `get` / `env`, and `conductor wrap`, which injects them into the child environment).
+
+Local shell: `conductor secrets inject` writes an rc snippet that runs
+`eval "$(conductor secrets env)"` at shell start — the rc file never holds plaintext.
+
+Agent push helpers:
+
+- `conductor secrets push claude` merges into `~/.claude/settings.json` `env` (Claude Code has
+  no remote team-secrets API; this persists plaintext locally — prefer inject/wrap/MCP when
+  possible).
+- `conductor secrets push cursor` writes `~/.conductor/cursor-secrets.env` for local use.
+  **Gap:** Cursor Cloud / Background Agents expose no public secrets-upload API that
+  Conductor can call; configure those in Cursor's product settings or your cloud provider.
+
+Never put vault values into task titles, progress, handoffs, or SSE payloads.
 
 Rows stored by a conductord older than this (plaintext secrets) keep working: the first
 server with a key that reads one seals it in place.

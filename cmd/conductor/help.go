@@ -256,6 +256,37 @@ Example:
 
 Run ` + "`conductor notify <subcommand> -h`" + ` for its flags.
 `},
+	{name: "secrets", group: "Coordinate",
+		subs:    []string{"list", "set", "get", "delete", "env", "inject", "push"},
+		summary: "encrypted project secrets for agents and local tools",
+		topic: `conductor secrets — paste credentials into Conductor's encrypted vault
+
+Values are sealed at rest (AES-256-GCM under conductord's secret key). List responses and
+SSE never include plaintext. MCP tools coord_list_secrets / coord_get_secret retrieve them
+for a session; wrap injects them into the coding-agent process environment.
+
+Usage:
+  conductor secrets [list]                      names and hints (not values)
+  conductor secrets set NAME                    paste a value on stdin (maintainers)
+  conductor secrets get NAME                    print one value
+  conductor secrets delete NAME
+  conductor secrets env [--format export|dotenv|json|fish]
+                                                print shell exports for eval or source
+  conductor secrets inject [--shell zsh|bash|fish]
+                                                add an rc snippet that eval's secrets env
+  conductor secrets push claude|cursor          install into a local agent runtime
+
+Example:
+  conductor secrets set OPENAI_API_KEY
+  conductor secrets inject --shell zsh
+  conductor wrap claude                         # child env includes vault secrets
+
+Gaps: Claude Code has no remote team-secrets API (push writes local settings.json env).
+Cursor Cloud Agents have no public secrets-upload API in-tree — use inject locally or the
+cloud product's own secret store.
+
+Run ` + "`conductor secrets <subcommand> -h`" + ` for its flags.
+`},
 	{name: "usage", group: "Coordinate", subs: []string{"sync"},
 		summary: "tokens and cost over time, by day, harness, model, or person"},
 	{name: "quota", group: "Coordinate",
@@ -372,6 +403,25 @@ Example:
 		summary: "freeze every agent terminal on this machine; save how to revive them"},
 	{name: "resume", group: "Sessions and machines",
 		summary: "wake paused sessions, reopening any closed terminals"},
+	{name: "accounts", group: "Sessions and machines", subs: []string{"add", "list", "switch", "exhaust", "ok"},
+		summary: "harness login profiles: switch accounts when usage runs out",
+		topic: `conductor accounts — harness login profiles resume-all can switch between
+
+Usage:
+  conductor accounts add <harness> <name>          snapshot the harness's current login as <name>
+  conductor accounts list [harness]               profiles, which is active, and quota markers
+  conductor accounts switch <harness> <name>       make <name> the harness's live account
+  conductor accounts exhaust <harness> <name>      mark an account out of usage
+  conductor accounts ok <harness> <name>           mark an account usable again
+
+Harnesses: claude, codex, opencode. An account is added by logging in with the harness
+itself, then snapshotting; a quota marker makes resume-all prefer another account when
+waking sessions after a restart.
+
+Example:
+  conductor accounts add claude main
+
+Run ` + "`conductor accounts <subcommand> -h`" + ` for its flags.`},
 	{name: "sessions", group: "Sessions and machines", subs: []string{"save", "list", "export", "install-hook"},
 		summary: "keep agent sessions resumable past a closed terminal or reboot",
 		topic: `conductor sessions — keep agent sessions resumable on this machine
