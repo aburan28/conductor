@@ -382,6 +382,11 @@ func readVerdicts(pattern string) ([]Verdict, error) {
 	var out []Verdict
 	seen := map[string]bool{}
 	for _, p := range paths {
+		// Skip macOS AppleDouble sidecars (._epoch1-….json). filepath.Glob on volumes that
+		// store Finder metadata next to fixtures otherwise treats them as verdict JSON.
+		if strings.HasPrefix(filepath.Base(p), "._") {
+			continue
+		}
 		v, err := readVerdict(p)
 		if err != nil {
 			return nil, err

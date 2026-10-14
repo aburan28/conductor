@@ -237,6 +237,37 @@ Example:
 
 Run ` + "`conductor notify <subcommand> -h`" + ` for its flags.
 `},
+	{name: "secrets", group: "Coordinate",
+		subs:    []string{"list", "set", "get", "delete", "env", "inject", "push"},
+		summary: "encrypted project secrets for agents and local tools",
+		topic: `conductor secrets — paste credentials into Conductor's encrypted vault
+
+Values are sealed at rest (AES-256-GCM under conductord's secret key). List responses and
+SSE never include plaintext. MCP tools coord_list_secrets / coord_get_secret retrieve them
+for a session; wrap injects them into the coding-agent process environment.
+
+Usage:
+  conductor secrets [list]                      names and hints (not values)
+  conductor secrets set NAME                    paste a value on stdin (maintainers)
+  conductor secrets get NAME                    print one value
+  conductor secrets delete NAME
+  conductor secrets env [--format export|dotenv|json|fish]
+                                                print shell exports for eval or source
+  conductor secrets inject [--shell zsh|bash|fish]
+                                                add an rc snippet that eval's secrets env
+  conductor secrets push claude|cursor          install into a local agent runtime
+
+Example:
+  conductor secrets set OPENAI_API_KEY
+  conductor secrets inject --shell zsh
+  conductor wrap claude                         # child env includes vault secrets
+
+Gaps: Claude Code has no remote team-secrets API (push writes local settings.json env).
+Cursor Cloud Agents have no public secrets-upload API in-tree — use inject locally or the
+cloud product's own secret store.
+
+Run ` + "`conductor secrets <subcommand> -h`" + ` for its flags.
+`},
 	{name: "usage", group: "Coordinate", subs: []string{"sync"},
 		summary: "tokens and cost over time, by day, harness, model, or person"},
 	{name: "quota", group: "Coordinate",
