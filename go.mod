@@ -3,6 +3,7 @@ module github.com/aburan28/conductor
 go 1.26.9
 
 require (
+	github.com/huin/goupnp v1.3.0
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/redis/go-redis/v9 v9.21.0
 	golang.org/x/text v0.43.0

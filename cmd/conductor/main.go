@@ -103,6 +103,8 @@ func runCommand(ctx context.Context, name string, args []string) error {
 		return cmdInit(args)
 	case "up":
 		return cmdUp(ctx, args)
+	case "leader":
+		return cmdLeader(ctx, args)
 	case "down":
 		return cmdDown(ctx, args)
 	case "login":
