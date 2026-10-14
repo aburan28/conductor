@@ -84,9 +84,9 @@ func TestToolListIsSmallAndDocumented(t *testing.T) {
 	tools := toolDefinitions()
 
 	// DESIGN.md §4.9: too many tools waste context and make selection less reliable. The
-	// ceiling moved from twelve to thirteen for coord_quota, the one read an agent needs to
-	// checkpoint before a usage limit cuts it off (docs/USAGE_LIMITS.md).
-	if len(tools) > 13 {
+	// ceiling moved for coord_quota (usage limits) and again for coord_list_secrets /
+	// coord_get_secret (encrypted project vault).
+	if len(tools) > 15 {
 		t.Errorf("%d tools exposed; the design calls for a minimal surface", len(tools))
 	}
 

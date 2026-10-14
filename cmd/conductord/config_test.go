@@ -227,3 +227,68 @@ func TestBootstrapMakesTheFirstPrincipalOrgAdmin(t *testing.T) {
 		t.Errorf("a later principal in an existing organization = %s, want project_admin", r)
 	}
 }
+
+// Omitting --project must not mint a second project from a worktree directory name when the
+// principal already has exactly one membership (the solo-machine default), and must not
+// replace that project's config or repo_path with the worktree.
+func TestBootstrapReusesSoleMembershipWithoutProjectFlag(t *testing.T) {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		t.Skip("DATABASE_URL not set")
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CONDUCTOR_STATE_DIR", t.TempDir())
+	org := fmt.Sprintf("boot-sole-%d", time.Now().UnixNano())
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".conductor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".conductor", "project.yaml"), []byte("execution:\n  maxConcurrentAttempts: 7\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := bootstrap([]string{"--dsn", dsn, "--org", org, "--project", "home", "--principal", "ada", "--repo", repo, "--no-login"}); err != nil {
+		t.Fatal(err)
+	}
+	worktree := filepath.Join(t.TempDir(), "codex-worktree-20261012")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := bootstrap([]string{"--dsn", dsn, "--org", org, "--principal", "ada", "--repo", worktree, "--no-login"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	store, err := db.Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	o, err := store.GetOrganizationBySlug(ctx, org)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr, err := store.GetPrincipalByHandle(ctx, o.ID, "ada")
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, err := store.ListProjectsFor(ctx, pr.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projects) != 1 || projects[0].Slug != "home" {
+		t.Fatalf("projects after worktree bootstrap = %v, want sole slug home", projectSlugs(projects))
+	}
+	if projects[0].RepoPath != repo {
+		t.Fatalf("repo_path = %q, want original checkout %q", projects[0].RepoPath, repo)
+	}
+	if projects[0].Config.MaxConcurrentAttempts != 7 {
+		t.Fatalf("max concurrent attempts = %d, want 7 (worktree bootstrap rewrote project config)", projects[0].Config.MaxConcurrentAttempts)
+	}
+}
+
+func projectSlugs(projects []domain.Project) []string {
+	out := make([]string, len(projects))
+	for i, p := range projects {
+		out[i] = p.Slug
+	}
+	return out
+}

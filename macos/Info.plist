@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key><string>en</string>
+	<key>CFBundleExecutable</key><string>Conductor</string>
+	<key>CFBundleIdentifier</key><string>dev.conductor.app</string>
+	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+	<key>CFBundleName</key><string>Conductor</string>
+	<key>CFBundleDisplayName</key><string>Conductor</string>
+	<key>CFBundlePackageType</key><string>APPL</string>
+	<!-- A checkout's build says 0.0.0; build.sh (given a version) and packaging/build-dmg.sh stamp
+	     the release's version over both before the bundle is signed. -->
+	<key>CFBundleShortVersionString</key><string>0.0.0</string>
+	<key>CFBundleVersion</key><string>0.0.0</string>
+	<key>LSMinimumSystemVersion</key><string>13.0</string>
+	<key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
+	<key>NSHumanReadableCopyright</key><string>Copyright © The Conductor contributors. See LICENSE.</string>
+	<key>NSHighResolutionCapable</key><true/>
+	<key>NSPrincipalClass</key><string>NSApplication</string>
+
+	<!-- The dashboard and the API are plain HTTP on loopback (conductord on 127.0.0.1). -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key><true/>
+	</dict>
+	<!-- macOS 15 asks before an app reaches addresses on the local network: a Tailscale
+	     address, or a teammate's Conductor on the LAN. Without a reason here the request is
+	     refused silently. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Conductor connects to control planes on your network or tailnet when you join or share one.</string>
+	<!-- Continuing a checkpoint opens Terminal with `osascript`, as `conductor resume` does. -->
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Conductor opens a Terminal window to continue a checkpointed session.</string>
+
+	<!-- conductor://join#endpoint=…&project=…&token=… opens this app, which joins with it. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key><string>dev.conductor.join</string>
+			<key>CFBundleTypeRole</key><string>Viewer</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>conductor</string>
+			</array>
+		</dict>
+	</array>
+
+	<!-- Sparkle (Sources/Conductor/Updates.swift). The feed is on a fixed release tag, which
+	     the release overwrites only once a new image is uploaded. SUPublicEDKey is not here:
+	     packaging/build-dmg.sh writes it from SPARKLE_PUBLIC_ED_KEY, and a build without it
+	     does not start the updater. -->
+	<key>SUFeedURL</key>
+	<string>https://github.com/aburan28/conductor/releases/download/macos-appcast/appcast.xml</string>
+	<key>SUEnableAutomaticChecks</key><true/>
+	<key>SUScheduledCheckInterval</key><integer>86400</integer>
+</dict>
+</plist>
