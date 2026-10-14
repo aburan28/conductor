@@ -104,16 +104,16 @@ func TestDatabaseArchiveRestoreEndToEnd(t *testing.T) {
 		var line strings.Builder
 		for _, e := range env {
 			k, v, _ := strings.Cut(e, "=")
-			fmt.Fprintf(&line, "%s=%s ", k, shellQuote(v))
+			fmt.Fprintf(&line, "%s=%s ", k, shellQuoteWord(v))
 		}
 		for _, a := range args {
-			line.WriteString(shellQuote(a) + " ")
+			line.WriteString(shellQuoteWord(a) + " ")
 		}
 		var cmd *exec.Cmd
 		if pgUser != nil {
-			cmd = exec.Command("su", "postgres", "-s", "/bin/sh", "-c", "cd "+shellQuote(work)+" && "+line.String())
+			cmd = exec.Command("su", "postgres", "-s", "/bin/sh", "-c", "cd "+shellQuoteWord(work)+" && "+line.String())
 		} else {
-			cmd = exec.Command("/bin/sh", "-c", "cd "+shellQuote(work)+" && "+line.String())
+			cmd = exec.Command("/bin/sh", "-c", "cd "+shellQuoteWord(work)+" && "+line.String())
 		}
 		out, err := cmd.CombinedOutput()
 		if err != nil {

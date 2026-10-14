@@ -35,12 +35,12 @@ func TestArchiveCommandPathSurvivesConfAndShell(t *testing.T) {
 		t.Skip("no sh")
 	}
 	exe := `/opt/con\ductor/it's here/conductor`
-	command := shellQuote(exe) + " db archive-wal %p %f"
+	command := shellQuoteWord(exe) + " db archive-wal %p %f"
 	if got := confUnquote(pgarchive.ConfQuote(command)); got != command {
 		t.Fatalf("the server reads the archive_command back as %q; want %q", got, command)
 	}
 	// What the shell runs: the quoted binary path must come out unchanged.
-	out, err := exec.Command("sh", "-c", "printf %s "+shellQuote(exe)).Output()
+	out, err := exec.Command("sh", "-c", "printf %s "+shellQuoteWord(exe)).Output()
 	if err != nil {
 		t.Fatal(err)
 	}

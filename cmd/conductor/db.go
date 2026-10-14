@@ -153,9 +153,9 @@ func archiveCommandPrefix() string {
 	} else if abs, err := filepath.EvalSymlinks(exe); err == nil {
 		exe = abs
 	}
-	prefix := shellQuote(exe)
+	prefix := shellQuoteWord(exe)
 	if v := os.Getenv("CONDUCTOR_STATE_DIR"); v != "" {
-		prefix = "CONDUCTOR_STATE_DIR=" + shellQuote(v) + " " + prefix
+		prefix = "CONDUCTOR_STATE_DIR=" + shellQuoteWord(v) + " " + prefix
 	}
 	return prefix
 }
@@ -828,7 +828,7 @@ func dbRestore(ctx context.Context, args []string) error {
 	} else {
 		fmt.Println("to the last archived segment, then opens for writes.")
 	}
-	fmt.Println("Then point archiving at it again: conductor db archiving --data-dir " + shellQuote(abs) + " --write")
+	fmt.Println("Then point archiving at it again: conductor db archiving --data-dir " + shellQuoteWord(abs) + " --write")
 	return nil
 }
 
