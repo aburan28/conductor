@@ -19,6 +19,7 @@ macos/
 ├── build.sh                   the universal .app
 ├── fetch-postgres.sh          the pinned PostgreSQL 17 bundle
 └── packaging/                 signing, notarization, .pkg and .dmg
+    └── icon/                  AppIcon.icns (web favicon mark) + make-icon.py
 ```
 
 | Piece | Where |
@@ -60,8 +61,10 @@ macos/build.sh --go-only         # only the Go commands, cross-compiled; works o
 `build.sh` cross-compiles `conductor`, `conductord` and `conductor-mcp` for both
 architectures and joins them with `lipo` into `Contents/Resources/bin`; runs one
 `swift build --triple <arch>-apple-macosx13.0` per architecture and joins those; copies
-Sparkle's framework with `ditto`; puts PostgreSQL in `Contents/Resources/postgres`; and
-signs (see below).
+Sparkle's framework with `ditto`; copies `packaging/icon/AppIcon.icns` into
+`Contents/Resources` (Finder/Dock/About); puts PostgreSQL in `Contents/Resources/postgres`;
+and signs (see below). Regenerate the icon with
+`python3 macos/packaging/icon/make-icon.py` (Pillow + icnsutil).
 
 PostgreSQL comes from `fetch-postgres.sh`, which downloads EnterpriseDB's universal
 `postgresql-17.11-1-osx-binaries.zip` (437 MB), checks its pinned sha256, keeps only the

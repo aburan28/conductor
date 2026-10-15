@@ -11,7 +11,13 @@ struct OnboardingView: View {
         let current = model.onboardingStep
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 14) {
-                Text("Welcome to Conductor").font(.title2.bold())
+                HStack(spacing: 10) {
+                    Image(nsImage: StatusDotImage.make(.clear))
+                        .resizable()
+                        .frame(width: 28, height: 28)
+                        .accessibilityHidden(true)
+                    Text("Welcome to Conductor").font(.title2.bold())
+                }
                 ForEach(OnboardingStep.allCases.filter { $0 != .done }) { step in
                     HStack(spacing: 8) {
                         Image(systemName: step < current ? "checkmark.circle.fill" : (step == current ? "circle.inset.filled" : "circle"))
@@ -211,8 +217,8 @@ private struct DoneStep: View {
 
     var body: some View {
         StepHeader(title: "You are set",
-                   detail: "Conductor is running and your tools are connected. The menu bar dot shows who is live and what is contested; Invite someone by text from the toolbar.")
-        Button("Open the Dashboard") { model.finishOnboarding() }
+                   detail: "Conductor is running and your tools are connected. The menu bar mark is green when all is clear, amber when something needs you, and grey when the control plane is down — the popover also spells that out in words. Invite someone by text from the toolbar.")
+        Button("Open Dashboard") { model.finishOnboarding() }
             .keyboardShortcut(.defaultAction)
     }
 }

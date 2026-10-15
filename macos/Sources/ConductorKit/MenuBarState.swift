@@ -25,6 +25,15 @@ public enum StatusDot: String, Equatable, Sendable {
         case .down: return "Conductor: the control plane is not running"
         }
     }
+
+    /// Short label for the menu bar popover header (pairs with colour for accessibility).
+    public var stateLabel: String {
+        switch self {
+        case .clear: return "All clear"
+        case .attention: return "Needs attention"
+        case .down: return "Not running"
+        }
+    }
 }
 
 /// What an event on the stream means to the app.

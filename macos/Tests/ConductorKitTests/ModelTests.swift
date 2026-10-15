@@ -63,6 +63,9 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(status.sessions(of: "ada").map(\.sessionID), ["s1"])
         XCTAssertEqual(StatusDot.compute(daemonUp: false, status: status, offers: []), .down)
         XCTAssertEqual(StatusDot.compute(daemonUp: true, status: status, offers: []), .attention)
+        XCTAssertEqual(StatusDot.down.stateLabel, "Not running")
+        XCTAssertEqual(StatusDot.attention.stateLabel, "Needs attention")
+        XCTAssertEqual(StatusDot.clear.stateLabel, "All clear")
 
         var calm = status
         calm.conflicts = []

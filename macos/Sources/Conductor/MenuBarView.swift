@@ -40,14 +40,28 @@ struct MenuBarView: View {
     private var header: some View {
         HStack {
             Image(nsImage: StatusDotImage.make(model.dot))
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Conductor").font(.headline)
+                Text(model.dot.stateLabel)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(statusColor)
+                    .accessibilityLabel("Status: \(model.dot.stateLabel)")
                 Text(subtitle).font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
             if let busy = model.busy {
                 ProgressView().controlSize(.small).help(busy)
             }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var statusColor: Color {
+        switch model.dot {
+        case .clear: return Color(red: 0x2F / 255, green: 0x6F / 255, blue: 0x4E / 255)
+        case .attention: return .orange
+        case .down: return .secondary
         }
     }
 
@@ -61,7 +75,7 @@ struct MenuBarView: View {
     @ViewBuilder private var sections: some View {
         let live = model.status?.liveSessions ?? []
         let conflicts = model.status?.openConflicts ?? []
-        PopoverSection(title: "Live now", count: live.count) {
+        PopoverSection(title: "Live now", count: live.count, empty: "No agents live right now.") {
             ForEach(live.prefix(8)) { s in
                 HStack(spacing: 6) {
                     Text(s.principal).fontWeight(.medium)
@@ -166,6 +180,7 @@ struct MenuBarView: View {
 private struct PopoverSection<Content: View>: View {
     let title: String
     let count: Int
+    var empty: String = "Nothing here yet."
     @ViewBuilder let content: () -> Content
 
     var body: some View {
@@ -175,7 +190,7 @@ private struct PopoverSection<Content: View>: View {
                 Text("\(count)").font(.caption).foregroundStyle(.secondary)
             }
             if count == 0 {
-                Text("Nobody yet.").font(.callout).foregroundStyle(.secondary)
+                Text(empty).font(.callout).foregroundStyle(.secondary)
             } else {
                 content()
             }

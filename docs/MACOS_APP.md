@@ -131,7 +131,8 @@ event.
 
 | Surface | Contents | Source |
 |---|---|---|
-| Menu bar icon | dot: green (all clear), amber (conflict or offer), grey (daemon down) | SSE + `/v1/projects/{p}/status` |
+| App icon | green rounded mark (`#2f6f4e` + three strokes), same as the web favicon; `packaging/icon/AppIcon.icns` | Finder, Dock, About |
+| Menu bar icon | that mark tinted by status: brand green (all clear), amber (conflict or offer), grey (daemon down); popover also shows the state in words | SSE + `/v1/projects/{p}/status` |
 | Menu bar popover | live sessions; open conflicts with "join / wait / split"; offers with accept/decline; Pause all / Resume all; Open dashboard | status, presence, inbox APIs; `conductor pause/resume` |
 | Main window | the dashboard in a web view | conductord |
 | First run | 1. start database and daemon; 2. sign in (automatic); 3. pick a repository folder (`conductor init` + bootstrap); 4. connect tools; 5. optional GitHub | `up`, `init`, `integrate`, `github setup` |
@@ -163,9 +164,35 @@ The cairn recipe, unchanged where possible:
 - **Updates.** Sparkle, pinned to an exact version, and disabled unless the public key is in
   `Info.plist`.
 - **`Info.plist`.**
+  - `CFBundleIconFile` → `AppIcon` (`macos/packaging/icon/AppIcon.icns`, same mark as the web favicon).
   - `NSAllowsLocalNetworking` (plain HTTP to loopback).
   - `NSLocalNetworkUsageDescription`, needed on macOS 15 for Tailscale and LAN addresses.
   - `CFBundleURLTypes` for `conductor://`.
+
+## UX review (logo pass)
+
+Findings from comparing `macos/` to the Cairn/Karen menu-bar shell and the web brand, and
+what changed with the logo work:
+
+| Area | Finding | Fix in this pass |
+|---|---|---|
+| Branding | Finder/Dock showed the generic executable icon; no `CFBundleIconFile`. | Ship `AppIcon.icns` (green `#2f6f4e` mark = web favicon) via `build.sh` + Info.plist. |
+| Menu bar | A coloured disc alone was hard to recognise as Conductor and relied on colour only. | Draw the favicon mark tinted by status; popover header adds an explicit state label ("All clear" / "Needs attention" / "Not running"). |
+| First run | Welcome sidebar was text-only; done step still said "menu bar dot". | Show the mark beside "Welcome to Conductor"; copy names the mark and colour meanings. |
+| Empty states | Live section said "Nobody yet." | "No agents live right now." |
+| Unreachable window | Generic SF Symbol bolt, message only. | Brand mark + "Conductor unavailable" title. |
+| About / Dock | No app icon for the About panel. | `CFBundleIconFile` + set `applicationIconImage` on launch. |
+| Accessibility | Status was colour-only in the tray. | `accessibilityLabel` / header state text; colours kept as a secondary cue (brand green, system orange, grey). |
+
+Still open (not blocking): richer empty states for conflicts/PRs; a dedicated template
+tray asset for pure monochrome menu bars if the tinted mark proves too busy on busy bars;
+full first-run click-through still needs a Mac with Accessibility for automation.
+
+Regenerate the icon (needs Pillow + icnsutil):
+
+```sh
+python3 macos/packaging/icon/make-icon.py
+```
 
 ## Testing
 
