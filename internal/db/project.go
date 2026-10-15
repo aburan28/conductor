@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/aburan28/conductor/internal/domain"
 )
 
@@ -238,14 +240,24 @@ func (s *Store) GetWorkflow(ctx context.Context, projectID domain.ID, sha string
 // ---------------------------------------------------------------------------
 
 func (s *Store) UpsertModelProfile(ctx context.Context, p domain.ModelProfile) (domain.ModelProfile, error) {
+	sel := domain.ModelSelector{}
+	if p.Select != nil {
+		sel = *p.Select
+	}
 	err := s.pool.QueryRow(ctx, `
 		INSERT INTO model_profiles (organization_id, alias, harness, provider, model,
 		            reasoning_effort, capabilities, tier, context_window,
-		            input_cost_per_mtok, output_cost_per_mtok, billing, enabled, catalog_version)
-		VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		            input_cost_per_mtok, output_cost_per_mtok, billing, enabled, catalog_version,
+		            select_project_id, select_endpoint, select_match, select_exclude,
+		            select_pick, select_prefix)
+		VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+		        $15::uuid, $16, $17, $18, $19, $20)
 		ON CONFLICT (organization_id, alias, harness) DO UPDATE SET
 		    provider = EXCLUDED.provider,
-		    model = EXCLUDED.model,
+		    -- A profile that selects its model arrives without one; keep the last model
+		    -- discovery chose until the next refresh confirms or replaces it.
+		    model = CASE WHEN model_profiles.pinned OR EXCLUDED.model = ''
+		                 THEN model_profiles.model ELSE EXCLUDED.model END,
 		    reasoning_effort = EXCLUDED.reasoning_effort,
 		    capabilities = EXCLUDED.capabilities,
 		    tier = EXCLUDED.tier,
@@ -254,37 +266,66 @@ func (s *Store) UpsertModelProfile(ctx context.Context, p domain.ModelProfile) (
 		    output_cost_per_mtok = EXCLUDED.output_cost_per_mtok,
 		    billing = EXCLUDED.billing,
 		    enabled = EXCLUDED.enabled,
-		    catalog_version = EXCLUDED.catalog_version
-		RETURNING id::text`,
+		    catalog_version = EXCLUDED.catalog_version,
+		    select_project_id = EXCLUDED.select_project_id,
+		    select_endpoint = EXCLUDED.select_endpoint,
+		    select_match = EXCLUDED.select_match,
+		    select_exclude = EXCLUDED.select_exclude,
+		    select_pick = EXCLUDED.select_pick,
+		    select_prefix = EXCLUDED.select_prefix,
+		    resolved_at = CASE WHEN EXCLUDED.select_endpoint = '' THEN NULL
+		                       ELSE model_profiles.resolved_at END
+		RETURNING id::text, model`,
 		p.OrganizationID, p.Alias, p.Harness, p.Provider, p.Model,
-		p.ReasoningEffort, p.Capabilities, p.Tier, p.ContextWindow,
+		p.ReasoningEffort, nonNil(p.Capabilities), p.Tier, p.ContextWindow,
 		p.InputCostPerMTok, p.OutputCostPerMTok, p.Billing, p.Enabled, p.CatalogVersion,
-	).Scan(&p.ID)
+		nullable(sel.ProjectID), sel.Endpoint, nonNil(sel.Match), nonNil(sel.Exclude),
+		sel.Pick, sel.Prefix,
+	).Scan(&p.ID, &p.Model)
 	return p, err
+}
+
+func nonNil(v []string) []string {
+	if v == nil {
+		return []string{}
+	}
+	return v
 }
 
 // ListModelProfiles returns the catalog the router resolves aliases against.
 func (s *Store) ListModelProfiles(ctx context.Context, orgID domain.ID) ([]domain.ModelProfile, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT id::text, organization_id::text, alias, harness, provider, model,
-		       reasoning_effort, capabilities, tier, context_window,
-		       input_cost_per_mtok, output_cost_per_mtok, billing, enabled, catalog_version
-		  FROM model_profiles
+	rows, err := s.pool.Query(ctx, modelProfileSelect+`
 		 WHERE organization_id = $1::uuid
 		 ORDER BY alias, harness`, orgID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+	return scanModelProfiles(rows)
+}
 
+const modelProfileSelect = `
+		SELECT id::text, organization_id::text, alias, harness, provider, model,
+		       reasoning_effort, capabilities, tier, context_window,
+		       input_cost_per_mtok, output_cost_per_mtok, billing, enabled, catalog_version,
+		       COALESCE(select_project_id::text, ''), select_endpoint, select_match,
+		       select_exclude, select_pick, select_prefix, resolved_at, pinned
+		  FROM model_profiles`
+
+func scanModelProfiles(rows pgx.Rows) ([]domain.ModelProfile, error) {
 	var out []domain.ModelProfile
 	for rows.Next() {
 		var p domain.ModelProfile
+		var sel domain.ModelSelector
 		if err := rows.Scan(&p.ID, &p.OrganizationID, &p.Alias, &p.Harness, &p.Provider, &p.Model,
 			&p.ReasoningEffort, &p.Capabilities, &p.Tier, &p.ContextWindow,
 			&p.InputCostPerMTok, &p.OutputCostPerMTok, &p.Billing, &p.Enabled,
-			&p.CatalogVersion); err != nil {
+			&p.CatalogVersion, &sel.ProjectID, &sel.Endpoint, &sel.Match, &sel.Exclude,
+			&sel.Pick, &sel.Prefix, &sel.ResolvedAt, &p.Pinned); err != nil {
 			return nil, err
+		}
+		if sel.Endpoint != "" {
+			p.Select = &sel
 		}
 		out = append(out, p)
 	}

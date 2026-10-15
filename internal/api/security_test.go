@@ -462,6 +462,9 @@ func TestNoGETRouteLeaksAPrivateTask(t *testing.T) {
 		// task private markers. Walked so a new GET cannot skip the privacy check.
 		"/v1/projects/{project}/secrets", "/v1/projects/{project}/secrets/export",
 		"/v1/projects/{project}/secrets/{name}",
+		// Inference endpoints and the models they serve: endpoint names and model ids, no task
+		// data. Walked so a new GET cannot skip the privacy check.
+		"/v1/projects/{project}/inference/endpoints", "/v1/projects/{project}/inference/models",
 		// The stream is read separately below; it never ends on its own.
 	}
 	assertRoutesCovered(t, append(routes, "/v1/projects/{project}/events/stream"))

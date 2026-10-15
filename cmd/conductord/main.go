@@ -38,6 +38,7 @@ import (
 	"github.com/aburan28/conductor/internal/db"
 	"github.com/aburan28/conductor/internal/domain"
 	"github.com/aburan28/conductor/internal/githubapp"
+	"github.com/aburan28/conductor/internal/modelsrc"
 	"github.com/aburan28/conductor/internal/nat"
 	"github.com/aburan28/conductor/internal/notify"
 	"github.com/aburan28/conductor/internal/peer"
@@ -106,6 +107,7 @@ type serveConfig struct {
 	secretKeyFile     string
 	secretKeyEnv      string
 	notifyPoll        time.Duration
+	modelDiscovery    time.Duration
 	notifyNetwork     notify.NetworkPolicy
 	verbose           bool
 	// sso is single sign-on, with its providers built from --sso-provider.
@@ -232,6 +234,8 @@ func parseServeConfigMode(args []string, output io.Writer, checkOnly bool) (*ser
 		"key that seals secrets conductord stores in the database (the GitHub App's private key); created 0600 on first use. "+
 			"Every replica must use the same key. Default: secret.key in CONDUCTOR_STATE_DIR or ~/.conductor. "+
 			secretbox.EnvKey+" (the base64 key itself) takes precedence")
+	fs.DurationVar(&c.modelDiscovery, "model-discovery-interval", time.Hour,
+		"how often inference endpoints are asked which models they serve, so new releases appear in the catalog without anyone editing it (negative disables the background refresh; endpoints can still be refreshed on request)")
 	fs.DurationVar(&c.notifyPoll, "notify-poll", 3*time.Second,
 		"how often the notification relay sends undelivered events to webhook and Slack channels (negative disables the relay)")
 	fs.BoolVar(&c.notifyNetwork.AllowPrivate, "notify-allow-private-networks", false,
@@ -619,6 +623,13 @@ func serve(args []string) error {
 		Poll: cfg.notifyPoll, Logger: logger,
 	})
 	vault := secrets.New(store, secretKey)
+	discovery := &modelsrc.Service{
+		Store: store, Lister: modelsrc.NewHTTPLister(), Logger: logger,
+		Key: func(ctx context.Context, project domain.Project, name string) (string, error) {
+			opened, err := vault.Open(ctx, project, name)
+			return opened.Value, err
+		},
+	}
 	server := api.New(store, svc, api.Options{
 		Logger:       logger,
 		Web:          web.Handler(),
@@ -631,6 +642,7 @@ func serve(args []string) error {
 		GitHub:       gh,
 		Notify:       notifier,
 		Secrets:      vault,
+		Models:       discovery,
 		Ops:          ops,
 		SSO:          cfg.sso,
 		Admin:        cfg.admin,
@@ -673,6 +685,12 @@ func serve(args []string) error {
 	}
 	if cfg.notifyPoll >= 0 {
 		goBackground("notification relay", notifier.Run)
+	}
+	if cfg.modelDiscovery > 0 && !cfg.noScheduler {
+		goBackground("model discovery", func(ctx context.Context) error {
+			discovery.Run(ctx, cfg.modelDiscovery)
+			return nil
+		})
 	}
 
 	httpServer := &http.Server{
@@ -997,10 +1015,19 @@ func bootstrap(args []string) error {
 			return fmt.Errorf("workflow: %w", err)
 		}
 	}
-	for _, profile := range bundle.ModelProfiles(org.ID) {
+	for _, profile := range bundle.ModelProfilesFor(org.ID, project.ID) {
+		if profile.Select != nil {
+			if err := modelsrc.ValidateSelector(*profile.Select); err != nil {
+				return fmt.Errorf("model profile %s/%s: %w", profile.Alias, profile.Harness, err)
+			}
+		}
 		if _, err := store.UpsertModelProfile(ctx, profile); err != nil {
 			return fmt.Errorf("model profile %s/%s: %w", profile.Alias, profile.Harness, err)
 		}
+	}
+	// Models discovered earlier may already satisfy a profile that was just declared.
+	if _, err := modelsrc.ResolveProject(ctx, store, project); err != nil {
+		fmt.Fprintf(os.Stderr, "bootstrap: could not resolve discovered models: %v\n", err)
 	}
 
 	// Re-running bootstrap is how a lost login is recovered, so the token it printed last
