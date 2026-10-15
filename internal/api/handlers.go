@@ -109,6 +109,7 @@ func (s *Server) routes() {
 	s.notifyRoutes(m)
 	s.secretRoutes(m)
 	s.inferenceRoutes(m)
+	s.delphiRoutes(m)
 
 	// The mesh surface. /v1/peer/* is authenticated by the peer's mesh certificate (not a
 	// bearer token); /v1/peers is the same link table shown to project members.

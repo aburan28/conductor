@@ -47,6 +47,12 @@ func New() (*Provider, error) {
 	return &Provider{client: anthropic.NewClient(option.WithMaxRetries(5)), model: model()}, nil
 }
 
+// NewWithKey returns a provider for an explicit key (a vault secret, not the environment).
+// ANTHROPIC_BASE_URL is still honoured, for proxies and tests.
+func NewWithKey(key string) *Provider {
+	return &Provider{client: anthropic.NewClient(option.WithAPIKey(key), option.WithMaxRetries(5)), model: model()}
+}
+
 // Offline returns a provider that can validate but not call the API.
 func Offline() *Provider { return &Provider{model: model()} }
 

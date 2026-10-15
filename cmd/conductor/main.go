@@ -167,6 +167,8 @@ func runCommand(ctx context.Context, name string, args []string) error {
 		return cmdNotify(ctx, args)
 	case "secrets":
 		return cmdSecrets(ctx, args)
+	case "delphi":
+		return cmdDelphi(ctx, args)
 	case "usage":
 		return cmdUsage(ctx, args)
 	case "task":

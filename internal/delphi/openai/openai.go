@@ -40,6 +40,13 @@ func New() (*Provider, error) {
 	return &Provider{client: openai.NewClient(option.WithMaxRetries(5)), model: os.Getenv("DELPHI_OPENAI_MODEL"), prices: prices()}, nil
 }
 
+// NewWithKey returns a provider for an explicit key (a vault secret, not the environment).
+// OPENAI_BASE_URL is still honoured, for proxies and tests.
+func NewWithKey(key string) *Provider {
+	return &Provider{client: openai.NewClient(option.WithAPIKey(key), option.WithMaxRetries(5)),
+		model: os.Getenv("DELPHI_OPENAI_MODEL"), prices: prices()}
+}
+
 // Offline returns a provider that can validate but not call the API.
 func Offline() *Provider {
 	return &Provider{model: os.Getenv("DELPHI_OPENAI_MODEL"), prices: prices()}
