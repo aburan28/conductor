@@ -1,8 +1,10 @@
 package db
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -375,6 +377,90 @@ func (s *Store) ListDecisions(ctx context.Context, taskID domain.ID, limit int) 
 			return nil, err
 		}
 		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// RecordExternalObservation keeps worker status and safety decisions in the
+// existing policy audit ledger. A producer's source/event ID pair is
+// idempotent within its project; conflicting replays fail closed. The
+// transaction lock serializes concurrent deliveries without a schema change.
+func (s *Store) RecordExternalObservation(ctx context.Context, o domain.ExternalObservation) (domain.ExternalObservation, error) {
+	identity := string(o.ProjectID) + ":" + o.Source + ":" + o.EventID
+	body, err := marshalJSON(o)
+	if err != nil {
+		return domain.ExternalObservation{}, err
+	}
+	err = s.Tx(ctx, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, identity); err != nil {
+			return err
+		}
+		var previous []byte
+		var existingID domain.ID
+		var existingAt time.Time
+		err := tx.QueryRow(ctx, `
+			SELECT id::text, created_at, rationale FROM policy_decisions
+			 WHERE project_id = $1::uuid AND kind = 'external_observation'
+			   AND rationale->>'source' = $2 AND rationale->>'event_id' = $3
+			 LIMIT 1`, o.ProjectID, o.Source, o.EventID).Scan(&existingID, &existingAt, &previous)
+		if err == nil {
+			var old domain.ExternalObservation
+			if err := decodeJSON(previous, &old); err != nil {
+				return err
+			}
+			canonical, err := marshalJSON(old)
+			if err != nil {
+				return err
+			}
+			if !bytes.Equal(canonical, body) {
+				return fmt.Errorf("%w: external observation event_id reused with different content", domain.ErrDuplicate)
+			}
+			o.ID, o.CreatedAt = existingID, existingAt
+			return nil
+		}
+		if err != pgx.ErrNoRows {
+			return err
+		}
+		return tx.QueryRow(ctx, `
+			INSERT INTO policy_decisions (project_id, task_id, attempt_id, kind, decision, rationale)
+			VALUES ($1::uuid, $2::uuid, $3::uuid, 'external_observation', $4, $5)
+			RETURNING id::text, created_at`,
+			o.ProjectID, nullable(o.TaskID), nullable(o.AttemptID), o.Kind, body,
+		).Scan(&o.ID, &o.CreatedAt)
+	})
+	return o, err
+}
+
+// ListExternalObservations includes taskless worker events so a project owner
+// can inspect fleet behavior even when a worker was not assigned a task.
+func (s *Store) ListExternalObservations(ctx context.Context, projectID domain.ID, limit int) ([]domain.ExternalObservation, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id::text, COALESCE(task_id::text, ''), COALESCE(attempt_id::text, ''),
+		       rationale, created_at
+		  FROM policy_decisions
+		 WHERE project_id = $1::uuid AND kind = 'external_observation'
+		 ORDER BY created_at DESC, id DESC LIMIT $2`, projectID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.ExternalObservation
+	for rows.Next() {
+		var o domain.ExternalObservation
+		var body []byte
+		var id, taskID, attemptID domain.ID
+		var createdAt time.Time
+		if err := rows.Scan(&id, &taskID, &attemptID, &body, &createdAt); err != nil {
+			return nil, err
+		}
+		if err := decodeJSON(body, &o); err != nil {
+			return nil, err
+		}
+		o.ID, o.ProjectID, o.TaskID, o.AttemptID, o.CreatedAt = id, projectID, taskID, attemptID, createdAt
+		out = append(out, o)
 	}
 	return out, rows.Err()
 }
