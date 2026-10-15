@@ -124,8 +124,22 @@ jobs:
       # initdb with the supervisor's arguments, the socket-only configuration, conductord on
       # the socket DSN, bootstrap, local sign-in, the event stream, and an invite link that
       # `conductor join` accepts (Tests/ConductorKitTests/IntegrationTests.swift).
+      # The step-level timeout: green runs finish in well under a minute, and a hung runner
+      # (seen a few times, never twice in a row) should fail fast and be retried, not hold
+      # one of the account's few macOS runners for the job's full hour.
       - name: Integration (bundled Postgres and conductord)
         working-directory: macos
+        timeout-minutes: 10
+        env:
+          CONDUCTOR_IT_PG_BIN: ${{ github.workspace }}/macos/build/Conductor.app/Contents/Resources/postgres/bin
+          CONDUCTOR_IT_BIN: ${{ github.workspace }}/macos/build/Conductor.app/Contents/Resources/bin
+        run: swift test --filter IntegrationTests
+        # A hung run is environmental: retry once before declaring failure.
+        id: integration
+      - name: Integration retry (once)
+        working-directory: macos
+        timeout-minutes: 10
+        if: failure() && steps.integration.outcome == 'failure'
         env:
           CONDUCTOR_IT_PG_BIN: ${{ github.workspace }}/macos/build/Conductor.app/Contents/Resources/postgres/bin
           CONDUCTOR_IT_BIN: ${{ github.workspace }}/macos/build/Conductor.app/Contents/Resources/bin

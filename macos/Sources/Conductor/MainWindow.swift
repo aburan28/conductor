@@ -54,6 +54,16 @@ struct DashboardView: View {
             }
         }
         .toolbar {
+            ToolbarItemGroup(placement: .navigation) {
+                Button { browser.goBack() } label: { Label("Back", systemImage: "chevron.backward") }
+                    .help("Go back through the dashboard's history (⌘[)")
+                    .keyboardShortcut("[", modifiers: .command)
+                    .disabled(!browser.canGoBack)
+                Button { browser.goForward() } label: { Label("Forward", systemImage: "chevron.forward") }
+                    .help("Go forward through the dashboard's history (⌘])")
+                    .keyboardShortcut("]", modifiers: .command)
+                    .disabled(!browser.canGoForward)
+            }
             ToolbarItemGroup(placement: .primaryAction) {
                 if let busy = model.busy {
                     ProgressView().controlSize(.small).help(busy)
