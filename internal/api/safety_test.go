@@ -36,7 +36,8 @@ func TestExternalObservationProjectReadAndReplay(t *testing.T) {
 		"worker_run_id": "worker-7", "kind": "worker.status", "status": "running",
 		"observed_at": observed,
 	}
-	if code, body := h.do(h.outTok, http.MethodPost, path, status); code != http.StatusForbidden {
+	// An outsider is not told the project exists: authorization answers 404, not 403.
+	if code, body := h.do(h.outTok, http.MethodPost, path, status); code != http.StatusNotFound {
 		t.Fatalf("outsider POST: %d %s", code, body)
 	}
 	code, body := h.do(h.bobTok, http.MethodPost, path, status)
@@ -77,7 +78,7 @@ func TestExternalObservationProjectReadAndReplay(t *testing.T) {
 	if code, body := h.do(h.bobTok, http.MethodPost, path, flag); code != http.StatusCreated {
 		t.Fatalf("flag POST: %d %s", code, body)
 	}
-	if code, body := h.do(h.outTok, http.MethodGet, path, nil); code != http.StatusForbidden {
+	if code, body := h.do(h.outTok, http.MethodGet, path, nil); code != http.StatusNotFound {
 		t.Fatalf("outsider GET: %d %s", code, body)
 	}
 	code, body = h.do(h.aliceTok, http.MethodGet, path, nil)

@@ -441,6 +441,7 @@ func TestNoGETRouteLeaksAPrivateTask(t *testing.T) {
 		"/v1/projects/{project}/runners", "/v1/projects/{project}/sessions",
 		"/v1/projects/{project}/status", "/v1/projects/{project}/swarm",
 		"/v1/projects/{project}/tasks", "/v1/projects/{project}/usage",
+		"/v1/projects/{project}/external-observations",
 		"/v1/queue/{ticket}", "/v1/sessions/{session}/assignments?all=true",
 		"/v1/tasks/{task}", "/v1/tasks/{task}/attempts", "/v1/tasks/{task}/card",
 		"/v1/tasks/{task}/decisions", "/v1/tasks/{task}/handoff", "/v1/tasks/{task}/route/explain",
