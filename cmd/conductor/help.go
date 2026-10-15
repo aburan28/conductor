@@ -41,6 +41,25 @@ var commandGroups = []string{"Get started", "Coordinate", "Work", "Territory", "
 
 var commands = []command{
 	// Get started
+	{name: "leader", group: "Get started", short: true, flags: true,
+		summary: "run the control-plane leader with local Postgres, external Postgres or RDS",
+		topic: `conductor leader — run the team's control plane in the foreground
+
+The leader manages a local loopback Postgres database by default. Use --database external
+or --database rds with DATABASE_URL or a config secret reference to skip Docker entirely.
+Workers join the leader's authenticated API without receiving database credentials.
+Server config, TLS and NAT flags are forwarded to conductord. Authentication defaults to
+enhanced. --bootstrap initializes this operator's project and saves its login once.
+
+Usage:
+  conductor leader [--database local|external|rds] [--config FILE] [server flags]
+
+Example:
+  conductor leader --bootstrap --project myrepo
+  conductor leader --database rds --config leader.yaml
+
+See docs/LEADER.md for TLS, RDS, UPnP and Tailscale deployment examples.
+`},
 	{name: "up", group: "Get started", short: true, flags: true,
 		summary: "start Postgres (when none is reachable), the control plane, and log in",
 		topic: `conductor up — one command from nothing to a running, logged-in control plane
@@ -384,6 +403,39 @@ Example:
 		summary: "freeze every agent terminal on this machine; save how to revive them"},
 	{name: "resume", group: "Sessions and machines",
 		summary: "wake paused sessions, reopening any closed terminals"},
+	{name: "systemd", group: "Sessions and machines", subs: []string{"install", "pull-images", "status"},
+		summary: "user units for postgres + conductord (+ vLLM) with image pre-pulls",
+		topic: `conductor systemd — user units for postgres + conductord (+ vLLM)
+
+Usage:
+  conductor systemd install      write the user units (postgres, conductord, optional vLLM)
+  conductor systemd pull-images  pre-pull every image the units need
+  conductor systemd status       which unit images are cached locally
+
+Example:
+  conductor systemd install
+
+Run ` + "`conductor systemd <subcommand> -h`" + ` for its flags.
+`},
+	{name: "accounts", group: "Sessions and machines", subs: []string{"add", "list", "switch", "exhaust", "ok"},
+		summary: "harness login profiles: switch accounts when usage runs out",
+		topic: `conductor accounts — harness login profiles resume-all can switch between
+
+Usage:
+  conductor accounts add <harness> <name>          snapshot the harness's current login as <name>
+  conductor accounts list [harness]               profiles, which is active, and quota markers
+  conductor accounts switch <harness> <name>       make <name> the harness's live account
+  conductor accounts exhaust <harness> <name>      mark an account out of usage
+  conductor accounts ok <harness> <name>           mark an account usable again
+
+Harnesses: claude, codex, opencode. An account is added by logging in with the harness
+itself, then snapshotting; a quota marker makes resume-all prefer another account when
+waking sessions after a restart.
+
+Example:
+  conductor accounts add claude main
+
+Run ` + "`conductor accounts <subcommand> -h`" + ` for its flags.`},
 	{name: "sessions", group: "Sessions and machines", subs: []string{"save", "list", "export", "install-hook"},
 		summary: "keep agent sessions resumable past a closed terminal or reboot",
 		topic: `conductor sessions — keep agent sessions resumable on this machine
@@ -398,6 +450,24 @@ Example:
   conductor sessions save all
 
 Run ` + "`conductor sessions <subcommand> -h`" + ` for its flags.
+`},
+	{name: "memory", group: "Sessions and machines", subs: []string{"configure", "disable", "status", "remember", "search", "timeline", "show", "forget", "context"},
+		summary: "private coding-session observations in your Redis or ElastiCache store",
+		topic: `conductor memory — private observations in an owner-selected Redis store
+
+Memory is off until configured. Records are encrypted locally before Redis receives them.
+Remote endpoints require verified TLS.
+
+Usage:
+  conductor memory configure --local
+  conductor memory configure --url-stdin [--cluster]
+  conductor memory status | disable
+  conductor memory remember < note.txt
+  conductor memory search WORDS | timeline ID | show ID | forget ID
+
+Example:
+  conductor memory configure --local
+  conductor memory search parser
 `},
 	{name: "checkpoint", group: "Sessions and machines",
 		subs:    []string{"capture", "list", "show", "resume", "export", "import", "push", "pull", "prune"},
@@ -452,6 +522,35 @@ Example:
   conductor storage test
 
 Settings live in ~/.conductor/storage.json; CONDUCTOR_BACKUP_S3_* variables override it.
+See docs/STORAGE.md.
+`},
+	{name: "db", group: "Sessions and machines",
+		subs:    []string{"status", "backups", "base-backup", "restore", "prune", "archiving", "archive-wal", "fetch-wal"},
+		summary: "keep the control-plane database durable in the storage bucket",
+		topic: `conductor db — keep the control-plane database durable in the storage bucket
+
+Postgres stays the local database. Every WAL segment is archived to the bucket as Postgres
+finishes it, and base backups are streamed on a schedule, so a lost machine is rebuilt on
+another to within about a minute (or to any chosen moment). Sealed with your passphrase
+unless turned off. The bucket is the one ` + "`conductor storage`" + ` configures.
+
+Usage:
+  conductor db status [--json]                    last archived segment, base backups, failures
+  conductor db backups [--json]                   base backups and the archived WAL range
+  conductor db base-backup [--dsn DSN]            stream a base backup now (then prune)
+  conductor db restore --data-dir DIR [--target-time 2026-10-07T12:00:00Z]
+  conductor db prune [--keep N]
+  conductor db archiving --data-dir DIR --write   point Postgres's archive_command here
+
+Postgres runs these itself (set up by ` + "`db archiving --write`" + `):
+  archive_command = 'conductor db archive-wal %p %f'
+  restore_command = 'conductor db fetch-wal %f %p'
+
+Example:
+  conductor db archiving --data-dir ~/pgdata --write && pg_ctl -D ~/pgdata restart
+  conductor db base-backup
+  conductor db restore --data-dir ~/pgdata-restored     # on the replacement machine
+
 See docs/STORAGE.md.
 `},
 	{name: "serve", group: "Sessions and machines",
@@ -519,7 +618,7 @@ Run ` + "`conductor sso <subcommand> -h`" + ` for its flags.
 		summary: "create the GitHub App, link a repo, sync its issues into tasks"},
 
 	// Other
-	{name: "hook", group: "Other", subs: []string{"pre-tool", "session-start", "session-end", "checkpoint"},
+	{name: "hook", group: "Other", subs: []string{"pre-tool", "session-start", "session-end", "checkpoint", "memory-observe", "memory-context"},
 		summary: "entry points for harness hooks (installed by conductor integrate)",
 		topic: `conductor hook — entry points a coding tool's hooks call
 
@@ -528,6 +627,7 @@ Codex, and other tools that support hooks.
 
 Usage:
   conductor hook pre-tool | session-start | session-end | checkpoint
+  conductor hook memory-observe | memory-context
 
 Example:
   conductor integrate claude    # installs the hooks

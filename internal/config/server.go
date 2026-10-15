@@ -34,6 +34,7 @@ type ServerFile struct {
 	Version       int               `yaml:"version"`
 	Server        ServerSection     `yaml:"server"`
 	Database      DatabaseSection   `yaml:"database"`
+	NAT           NATSection        `yaml:"nat"`
 	Retention     RetentionSection  `yaml:"retention"`
 	Metrics       MetricsSection    `yaml:"metrics"`
 	Notifications NotifySection     `yaml:"notifications"`
@@ -61,11 +62,23 @@ type ServerSection struct {
 
 // DatabaseSection names the database by reference, and bounds statements.
 type DatabaseSection struct {
+	Mode             string          `yaml:"mode"`
 	URLEnv           string          `yaml:"url_env"`
 	URLFile          string          `yaml:"url_file"`
 	URL              string          `yaml:"url"`
 	StatementTimeout *admin.Duration `yaml:"statement_timeout"`
 	LockTimeout      *admin.Duration `yaml:"lock_timeout"`
+}
+
+// NATSection configures connectivity for the leader's API. Database ports are never
+// mapped. Tailscale uses a local tailscaled installation for traversal and relay.
+type NATSection struct {
+	Mode         string          `yaml:"mode"`
+	InternalIP   string          `yaml:"internal_ip"`
+	ExternalPort *int            `yaml:"external_port"`
+	Lease        *admin.Duration `yaml:"lease"`
+	Timeout      *admin.Duration `yaml:"timeout"`
+	HTTPSPort    *int            `yaml:"https_port"`
 }
 
 // RetentionSection bounds how long history is kept (docs/OPERATIONS.md, "Retention").
@@ -224,6 +237,16 @@ func ParseServerFile(body []byte, getenv func(string) string, dir string) (*Serv
 	}
 
 	s := sf.Server
+	switch sf.Database.Mode {
+	case "", "local", "external", "rds":
+	default:
+		add("database.mode must be local, external or rds, not %q", sf.Database.Mode)
+	}
+	switch sf.NAT.Mode {
+	case "", "off", "upnp", "tailscale":
+	default:
+		add("nat.mode must be off, upnp or tailscale, not %q", sf.NAT.Mode)
+	}
 	switch s.SecurityMode {
 	case "", "local", "enhanced":
 	default:
@@ -409,6 +432,13 @@ func (sf *ServerFile) FlagValues() map[string]string {
 	str("tls-key", s.TLSKey)
 	str("secret-key-file", s.SecretKeyFile)
 	str("dsn", sf.resolved["dsn"])
+	str("database", sf.Database.Mode)
+	str("nat-mode", sf.NAT.Mode)
+	str("nat-internal-ip", sf.NAT.InternalIP)
+	num("nat-external-port", sf.NAT.ExternalPort)
+	dur("nat-lease", sf.NAT.Lease)
+	dur("nat-timeout", sf.NAT.Timeout)
+	num("nat-https-port", sf.NAT.HTTPSPort)
 	dur("db-statement-timeout", sf.Database.StatementTimeout)
 	dur("db-lock-timeout", sf.Database.LockTimeout)
 	num("retention-days", sf.Retention.EventsDays)

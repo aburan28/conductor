@@ -96,6 +96,21 @@ files predate that rule and cannot be renamed (the file name is the version a da
 recorded). The version is the whole name, applied in byte-wise order, so they are distinct
 and deterministically ordered.
 
+**Hosting.** On a personal or single-machine deployment, prefer a dedicated
+Postgres instance that does not depend on a container runtime. A Docker
+Desktop-backed database fails whenever the VM wedges or restarts — under heavy
+host load the VM can hang while the port forward stays open, so conductord sees
+brief `connection refused` windows: every request during one returns
+`internal error` with a request id, and leases that expire during one are
+reclaimed. A native instance under launchd/systemd does not share that failure
+mode. Run it bound to `127.0.0.1` on a fixed port and point the DSN at
+`127.0.0.1` (not `localhost`) so nothing else on the machine can claim the
+`::1` side of the name. On macOS, a launchd agent running the postgres binary
+directly needs `LC_ALL=C` in its environment, or the postmaster aborts with
+"postmaster became multithreaded during startup". When migrating, take a
+`pg_dump -Fc` first and verify row counts of a few core tables against the
+source before cutting over.
+
 **Upgrades and rollback.** Back up, then start the new version; it migrates. There are no
 down migrations, so rolling back means restoring the backup taken before the upgrade and
 starting the old binary against it. Anything recorded between the upgrade and the rollback

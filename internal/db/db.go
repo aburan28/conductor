@@ -11,9 +11,11 @@ package db
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -49,6 +51,44 @@ const (
 type Options struct {
 	StatementTimeout time.Duration
 	LockTimeout      time.Duration
+}
+
+// ValidateDSN checks a deployment before opening a connection. RDS uses the same
+// PostgreSQL driver, with certificate chain and hostname verification and an explicit
+// root certificate pool. Custom DNS and China-region endpoints are supported. Errors
+// deliberately omit the connection string, which can contain credentials.
+func ValidateDSN(mode, dsn string) error {
+	if mode == "" {
+		mode = "external"
+	}
+	switch mode {
+	case "local", "external", "rds":
+	default:
+		return errors.New("database mode must be local, external or rds")
+	}
+	if strings.TrimSpace(dsn) == "" {
+		return errors.New("a PostgreSQL connection string is required")
+	}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return errors.New("could not parse the PostgreSQL connection string or read its TLS files")
+	}
+	if mode != "rds" {
+		return nil
+	}
+	verified := func(host string, c *tls.Config) bool {
+		return host != "" && !strings.HasPrefix(host, "/") && c != nil &&
+			!c.InsecureSkipVerify && c.RootCAs != nil && c.ServerName == host
+	}
+	if !verified(cfg.ConnConfig.Host, cfg.ConnConfig.TLSConfig) {
+		return errors.New("RDS requires sslmode=verify-full and sslrootcert pointing to a trusted CA bundle")
+	}
+	for _, fallback := range cfg.ConnConfig.Fallbacks {
+		if !verified(fallback.Host, fallback.TLSConfig) {
+			return errors.New("every RDS fallback must verify TLS with a configured CA bundle")
+		}
+	}
+	return nil
 }
 
 func (o Options) withDefaults() Options {

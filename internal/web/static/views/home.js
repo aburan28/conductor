@@ -5,11 +5,35 @@ import { chip, chips } from '../components/pill.js';
 import { table } from '../components/table.js';
 import { conflictCard } from '../components/conflict.js';
 import { relTime, plural } from '../lib/format.js';
-import { toastError } from '../components/toast.js';
+import { toast, toastError } from '../components/toast.js';
 
 // Home answers three questions on one screen: can I start this, who is on what, and what is
 // waiting on me. Counts are kept to the one sentence at the top; everything below is a list
 // of things a person can act on.
+
+// resumeAll is the reboot-recovery button: one POST wakes every paused or saved
+// session on the machine the control plane runs on, switching harness accounts
+// first when the active one is marked out of usage.
+function resumeAll(ctx, refresh) {
+  return async () => {
+    const btn = document.getElementById('resume-all-btn');
+    if (btn) btn.disabled = true;
+    try {
+      const out = await ctx.api.post('/v1/local/resume-all');
+      const bits = [];
+      if (out.switched && out.switched.length) bits.push(out.switched.map(s => `${s.harness}: ${s.from} → ${s.to}`).join(', '));
+      if (out.resumed) bits.push(plural(out.resumed, 'session') + ' resumed');
+      if (out.running) bits.push(out.running + ' already running');
+      if (out.failed) bits.push(out.failed + ' failed');
+      toast(bits.length ? 'Resume all: ' + bits.join(' · ') : 'Resume all: nothing paused or saved', { kind: out.failed ? 'danger' : 'ok' });
+      refresh();
+    } catch (err) {
+      toastError(err, 'Resume all');
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  };
+}
 
 // statusWords says a task's state the way a person would.
 export const STATUS_WORDS = {
@@ -108,6 +132,9 @@ export default defineView({
     });
 
     return h('div', { class: 'stack home', style: { gap: '20px' } },
+      h('div', { class: 'row', style: { alignItems: 'center', gap: '12px' } },
+        h('button', { class: 'btn', id: 'resume-all-btn', onclick: resumeAll(ctx, refresh) }, 'Resume all sessions'),
+        h('span', { class: 'muted' }, 'wake every paused or saved Claude, Codex, and OpenCode session on this machine — after a restart, or onto a fresh account when the active one is out of usage')),
       h('p', { class: 'lede' }, summary + '.'),
       checkCard,
       h('div', { class: 'grid-2' }, waitingCard, contestedCard),

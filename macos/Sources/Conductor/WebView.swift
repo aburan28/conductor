@@ -8,6 +8,8 @@ import WebKit
 final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate {
     let view: WKWebView
     @Published private(set) var failure: String?
+    @Published private(set) var canGoBack = false
+    @Published private(set) var canGoForward = false
     private var origin: URL?
 
     override init() {
@@ -31,6 +33,19 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
         if previous != url || view.url == nil {
             view.load(URLRequest(url: url))
         }
+    }
+
+    /// The toolbar's back and forward buttons. The web view owns the history — full page
+    /// loads and the dashboard's own hash navigations both land in its back-forward list,
+    /// so the buttons and the trackpad swipe gestures (which were always on) stay in step.
+    func goBack() { failure = nil; view.goBack() }
+    func goForward() { failure = nil; view.goForward() }
+
+    /// Any navigation, including the same-document ones the dashboard's hash changes are,
+    /// passes the delegate; the back-forward list is up to date by the time it commits.
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        canGoBack = view.canGoBack
+        canGoForward = view.canGoForward
     }
 
     func reload() {

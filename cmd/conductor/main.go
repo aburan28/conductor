@@ -103,6 +103,8 @@ func runCommand(ctx context.Context, name string, args []string) error {
 		return cmdInit(args)
 	case "up":
 		return cmdUp(ctx, args)
+	case "leader":
+		return cmdLeader(ctx, args)
 	case "down":
 		return cmdDown(ctx, args)
 	case "login":
@@ -131,12 +133,20 @@ func runCommand(ctx context.Context, name string, args []string) error {
 		return cmdPresence(ctx, args)
 	case "capabilities":
 		return cmdCapabilities(ctx, args)
+	case "systemd":
+		return cmdSystemd(args)
 	case "sessions":
 		return cmdSessions(ctx, args)
+	case "memory":
+		return cmdMemory(ctx, args)
+	case "accounts":
+		return cmdAccounts(args)
 	case "backup":
 		return cmdBackup(ctx, args)
 	case "storage":
 		return cmdStorage(ctx, args)
+	case "db":
+		return cmdDB(ctx, args)
 	case "checkpoint":
 		return cmdCheckpoint(ctx, args)
 	case "security":
