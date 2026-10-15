@@ -99,7 +99,11 @@ func TestClaimRefusesAnotherPrincipalsSession(t *testing.T) {
 
 func TestWrapAdoptsAClaimMadeBeforeIt(t *testing.T) {
 	f := newFixture(t)
-	const ttl = 500 * time.Millisecond
+	// Generous over the heartbeat cadence below: a loaded CI runner must be able to miss
+	// a beat's deadline by a second without the lease expiring mid-loop, yet still shorter
+	// than the claim's own 2s lease, so only the heartbeats can be carrying it.
+	const ttl = 1500 * time.Millisecond
+	const beats = 8
 	task := f.newTask(t, "Claim then wrap")
 	params := f.claimParams(task, f.alice)
 	params.WorktreePath, params.LeaseTTL = "/work/checkout-a", 2*time.Second
@@ -130,11 +134,11 @@ func TestWrapAdoptsAClaimMadeBeforeIt(t *testing.T) {
 		t.Errorf("session active task = %q, want %s", s.ActiveTaskID, task.ID)
 	}
 	// From here the session's heartbeat carries it past what the claim alone would last.
-	for i := 0; i < 8; i++ {
+	for i := 0; i < beats; i++ {
 		if _, err := f.store.HeartbeatSession(f.ctx, HeartbeatSessionParams{SessionID: session.ID, TTL: ttl}); err != nil {
 			t.Fatalf("heartbeat: %v", err)
 		}
-		time.Sleep(ttl / 2)
+		time.Sleep(ttl / 4)
 	}
 	if !f.leaseLive(t, claim.Lease.ID) {
 		t.Fatal("an adopted claim should live as long as its session heartbeats")
