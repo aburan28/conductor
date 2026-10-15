@@ -255,6 +255,14 @@ export function installDemo(api) {
     if (m('v1/projects/:p/sessions')) return { sessions: D.sessions };
     if (m('v1/projects/:p/runners')) return { runners: D.runners };
     if (m('v1/projects/:p/models')) return { profiles: D.profiles };
+    if (m('v1/projects/:p/inference/endpoints')) return { endpoints: demoEndpoints(), presets: [{ name: 'anthropic', kind: 'anthropic', base_url: 'http://localhost:4000', key_hint: 'ANTHROPIC_API_KEY' }, { name: 'ollama', kind: 'ollama', base_url: 'http://localhost:11434', local: true }] };
+    if (m('v1/projects/:p/inference/models')) return { models: demoDiscovered() };
+    if ((mm = m('v1/projects/:p/models/profiles/:alias/:harness/pin')) && (method === 'PUT' || method === 'DELETE')) {
+      const prof = D.profiles.find(x => x.alias === mm.alias && x.harness === mm.harness);
+      if (!prof) throw notFound();
+      if (method === 'PUT') { prof.model = body.model; prof.pinned = true; } else { delete prof.pinned; }
+      return { profile: prof };
+    }
     if (m('v1/projects/:p/conflicts')) return { conflicts: q.get('open') === 'false' ? D.conflicts : D.conflicts.filter(c => c.state === 'open') };
     if (m('v1/projects/:p/reservations')) return { reservations: [] };
     if (m('v1/projects/:p/events')) return { events: D.events.slice(0, Number(q.get('limit') || 100)) };
@@ -324,6 +332,25 @@ function matchPath(seg, pattern) {
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+// Discovery fixtures: an Anthropic endpoint and a local Ollama, one model of which appeared
+// this week. Nothing here is a claim about what any provider actually serves.
+function demoEndpoints() {
+  const ago = h => new Date(Date.now() - h * 3600e3).toISOString();
+  return [
+    { id: 'ep-anthropic', name: 'anthropic', kind: 'anthropic', base_url: 'http://localhost:4000', api_key_secret: 'ANTHROPIC_API_KEY', enabled: true, last_status: 'ok', last_refresh_at: ago(0.4), model_count: 3 },
+    { id: 'ep-ollama', name: 'ollama', kind: 'ollama', base_url: 'http://localhost:11434', enabled: true, last_status: 'ok', last_refresh_at: ago(0.4), model_count: 2 },
+  ];
+}
+function demoDiscovered() {
+  const week = new Date(Date.now() - 2 * 86400e3).toISOString();
+  return [
+    { endpoint: 'anthropic', kind: 'anthropic', model: 'claude-sonnet-5-6', display_name: 'Claude Sonnet 5.6', released: week, new: true, used_by: ['worker.general/claude'] },
+    { endpoint: 'anthropic', kind: 'anthropic', model: 'claude-sonnet-5-5', released: '2026-06-01T00:00:00Z', used_by: [] },
+    { endpoint: 'anthropic', kind: 'anthropic', model: 'claude-opus-5-5', released: '2026-06-01T00:00:00Z', used_by: ['planner.frontier/claude'] },
+    { endpoint: 'ollama', kind: 'ollama', model: 'qwen3:8b', released: '2026-09-01T00:00:00Z', used_by: [] },
+    { endpoint: 'ollama', kind: 'ollama', model: 'llama4:latest', released: '2026-08-01T00:00:00Z', used_by: [] },
+  ];
+}
 function notFound() { const e = new Error('not found (demo)'); e.status = 404; return e; }
 
 function demoProject() {

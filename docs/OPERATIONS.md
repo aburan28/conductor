@@ -191,6 +191,16 @@ URL, and whichever claims an event sends it. `conductor_notifications_total{kind
 counts sends (`delivered`, `retry`, `failed`, `expired`) and
 `conductor_notify_relay_errors_total` counts failed passes.
 
+## Model discovery
+
+`conductord` asks each registered inference endpoint which models it serves every
+`--model-discovery-interval` (default one hour; a negative value turns the background refresh
+off, and endpoints can still be refreshed on request). It reads model names only, with the key
+from the project secret vault, and connects to `https` addresses and to loopback and private
+addresses over plain `http`; link-local addresses (cloud metadata) are always refused. An
+environment proxy (`HTTPS_PROXY`) is honoured, with the destination checked before the proxy is
+asked for it. See [INFERENCE_ENDPOINTS.md](INFERENCE_ENDPOINTS.md).
+
 ## The config file
 
 `conductord --config conductor.yaml` (or `CONDUCTOR_CONFIG=conductor.yaml`) reads a YAML file
@@ -224,6 +234,7 @@ inline, or a reference to an empty variable or unreadable file is an error namin
 | `retention.idempotency_ttl` | `--idempotency-ttl` | |
 | `metrics.token_env` / `metrics.token_file` | `--metrics-token` | by reference only |
 | `notifications.poll`, `.allow_private_networks`, `.allow_http`, `.proxy` | `--notify-poll`, `--notify-allow-private-networks`, `--notify-allow-http`, `--notify-proxy` | a proxy URL with credentials is refused in the file |
+| `model_discovery.interval` | `--model-discovery-interval` | how often inference endpoints are asked which models they serve (default 1h; negative disables the background refresh) |
 | `sso.token_ttl`, `sso.auto_provision`, `sso.default_project` | `--sso-token-ttl`, `--sso-auto-provision`, `--sso-default-project` | |
 | `sso.providers[]` | `--sso-provider` | `name`, `type`, `label`, `issuer`, `client_id`, `client_secret_env` or `client_secret_file` (default `CONDUCTOR_SSO_<NAME>_CLIENT_SECRET`), `domains`, `orgs`, `api_url`, `web_url`, `groups_claim`, `trusted_email_domains`. Providers given by `--sso-provider` or `CONDUCTOR_SSO_PROVIDERS` replace the file's rather than adding to them |
 | `features.<name>` | — | locks a feature flag for every organization |

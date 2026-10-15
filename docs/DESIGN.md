@@ -2974,6 +2974,10 @@ The first pull request should contain:
 - Docker Compose development environment;
 - no production model credentials or hardcoded model names.
 
+Model names stay out of code and, increasingly, out of policy files too: inference endpoints
+report what they serve and profiles may select by pattern rather than by id
+([docs/INFERENCE_ENDPOINTS.md](INFERENCE_ENDPOINTS.md)).
+
 ---
 
 ## 37. Current integration assumptions and primary references

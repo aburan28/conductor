@@ -222,7 +222,14 @@ T-42 would route to:
 A dispatch candidate can never route *below* a hard floor: a security-sensitive task keeps its
 T4 floor whatever the ladder says. `conductor policy lint` validates the whole file — unknown
 facts, undefined lanes, malformed expressions — and `conductor models discover` finds the local
-models (Ollama today) worth adding to the ladder.
+model servers (Ollama, LM Studio, vLLM) worth adding to the ladder.
+
+Model ids need not be typed at all: register the inference APIs you use
+(`conductor models endpoints add anthropic`) and a profile that says
+`select: {endpoint: anthropic, match: ["claude-sonnet-*"]}` follows the newest matching model the
+provider lists, so a new release is adopted without editing a file. The dashboard's Fleet page
+has the same, with a dropdown of discovered models on every catalog profile.
+[docs/INFERENCE_ENDPOINTS.md](docs/INFERENCE_ENDPOINTS.md) has the details.
 
 ### Budgets bound the team, not the person
 
@@ -717,7 +724,11 @@ conductor github issues enable --label conductor          # labelled GitHub issu
 conductor integrate cursor                                # wire a coding tool to this project (MCP + hooks)
 conductor route T-42                                      # what would this route to, and why — before spending a token
 conductor dispatch T-42                                   # send work to a model by policy, through the queue
-conductor models                                          # the model catalog; `models discover` finds local ones
+conductor models                                          # the model catalog (profiles marked "auto" follow discovery)
+conductor models endpoints add anthropic                  # connect an inference API; its models are discovered, not typed
+conductor models available --new                          # models the endpoints started serving this week
+conductor models pin worker.general claude <model>        # choose a model yourself; `unpin` returns it to discovery
+conductor models discover                                 # find Ollama / LM Studio / vLLM on this machine
 conductor policy lint                                     # validate .conductor/ policy and dispatch rules
 conductor swarm                                           # the team's pooled capacity and who has budget to share
 conductor queue                                           # the admission line when the team is at capacity
@@ -1647,7 +1658,7 @@ that produced it.
 |---|---|
 | `.conductor/project.yaml` | lease TTLs, heartbeat cadence, visibility defaults, isolation |
 | `.conductor/policies.yaml` | conflict matrix, duplicate thresholds, hard routing rules, budgets |
-| `.conductor/models.yaml` | model aliases (roles), capability floors, concrete profiles |
+| `.conductor/models.yaml` | model aliases (roles), capability floors, profiles — each a fixed model or a `select` that [follows discovery](docs/INFERENCE_ENDPOINTS.md) |
 | `.conductor/WORKFLOW.md` | the prose contract every agent reads; required checks; protected scopes |
 
 **These files are code, not just settings, wherever a `conductor worker` runs.** The harness

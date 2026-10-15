@@ -825,6 +825,12 @@ type ModelProfile struct {
 	Billing           string   `json:"billing"`
 	Enabled           bool     `json:"enabled"`
 	CatalogVersion    string   `json:"catalog_version"`
+	// Select, when set, means Model is chosen by discovery from an inference endpoint's
+	// served models rather than declared (see ModelSelector).
+	Select *ModelSelector `json:"select,omitempty"`
+	// Pinned means a person chose Model from the dashboard or CLI. Neither discovery nor
+	// bootstrap changes a pinned profile's model; unpinning hands it back.
+	Pinned bool `json:"pinned,omitempty"`
 }
 
 // HasCapabilities reports whether the profile satisfies every capability in floor.

@@ -23,6 +23,7 @@ import (
 	"github.com/aburan28/conductor/internal/coord"
 	"github.com/aburan28/conductor/internal/db"
 	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/modelsrc"
 	"github.com/aburan28/conductor/internal/notify"
 	"github.com/aburan28/conductor/internal/peer"
 	"github.com/aburan28/conductor/internal/secrets"
@@ -58,6 +59,8 @@ type Server struct {
 	notify *notify.Notifier
 	// secrets is the project secret vault; nil serves its routes as not configured.
 	secrets *secrets.Vault
+	// models discovers what inference endpoints serve; nil serves its routes as not configured.
+	models *modelsrc.Service
 	// ops is the operational surface: lifetime context, background work, streams (observe.go).
 	ops *opsState
 	// sso is single sign-on; it has no providers when none are configured (sso.go).
@@ -92,6 +95,8 @@ type Options struct {
 	Notify *notify.Notifier
 	// Secrets is the project secret vault (secrets.go). Nil disables it.
 	Secrets *secrets.Vault
+	// Models is model discovery for inference endpoints (inference.go). Nil disables it.
+	Models *modelsrc.Service
 	// Ops configures metrics, request deadlines, stream caps and the server lifetime
 	// (observe.go).
 	Ops OpsOptions
@@ -127,6 +132,7 @@ func New(store *db.Store, svc *coord.Service, opts Options) *Server {
 		sso:         newSSOState(opts.SSO, opts.SelfEndpoint),
 		notify:      opts.Notify,
 		secrets:     opts.Secrets,
+		models:      opts.Models,
 		admin:       newAdminState(opts.Admin),
 		localResume: opts.LocalResume,
 	}

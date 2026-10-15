@@ -31,21 +31,22 @@ import (
 // so the file can be committed, templated and reviewed like any other.
 type ServerFile struct {
 	// Version is 1. A file without it is refused, so a future format is never misread.
-	Version       int               `yaml:"version"`
-	Server        ServerSection     `yaml:"server"`
-	Database      DatabaseSection   `yaml:"database"`
-	NAT           NATSection        `yaml:"nat"`
-	Retention     RetentionSection  `yaml:"retention"`
-	Metrics       MetricsSection    `yaml:"metrics"`
-	Notifications NotifySection     `yaml:"notifications"`
-	SSO           SSOSection        `yaml:"sso"`
-	Features      map[string]bool   `yaml:"features"`
-	Branding      BrandingSection   `yaml:"branding"`
-	Policy        admin.Patch       `yaml:"policy"`
-	Path          string            `yaml:"-"`
-	logo          *admin.Logo       `yaml:"-"`
-	providers     []sso.Config      `yaml:"-"`
-	resolved      map[string]string `yaml:"-"`
+	Version        int                   `yaml:"version"`
+	Server         ServerSection         `yaml:"server"`
+	Database       DatabaseSection       `yaml:"database"`
+	NAT            NATSection            `yaml:"nat"`
+	Retention      RetentionSection      `yaml:"retention"`
+	Metrics        MetricsSection        `yaml:"metrics"`
+	Notifications  NotifySection         `yaml:"notifications"`
+	ModelDiscovery ModelDiscoverySection `yaml:"model_discovery"`
+	SSO            SSOSection            `yaml:"sso"`
+	Features       map[string]bool       `yaml:"features"`
+	Branding       BrandingSection       `yaml:"branding"`
+	Policy         admin.Patch           `yaml:"policy"`
+	Path           string                `yaml:"-"`
+	logo           *admin.Logo           `yaml:"-"`
+	providers      []sso.Config          `yaml:"-"`
+	resolved       map[string]string     `yaml:"-"`
 }
 
 // ServerSection is where and how conductord listens.
@@ -103,6 +104,11 @@ type NotifySection struct {
 	AllowPrivateNetworks *bool           `yaml:"allow_private_networks"`
 	AllowHTTP            *bool           `yaml:"allow_http"`
 	Proxy                string          `yaml:"proxy"`
+}
+
+// ModelDiscoverySection configures the background refresh of inference endpoints.
+type ModelDiscoverySection struct {
+	Interval *admin.Duration `yaml:"interval"`
 }
 
 // SSOSection configures single sign-on.
@@ -451,6 +457,7 @@ func (sf *ServerFile) FlagValues() map[string]string {
 	boolean("notify-allow-private-networks", sf.Notifications.AllowPrivateNetworks)
 	boolean("notify-allow-http", sf.Notifications.AllowHTTP)
 	str("notify-proxy", sf.Notifications.Proxy)
+	dur("model-discovery-interval", sf.ModelDiscovery.Interval)
 	dur("sso-token-ttl", sf.SSO.TokenTTL)
 	str("sso-auto-provision", sf.SSO.AutoProvision)
 	str("sso-default-project", sf.SSO.DefaultProject)
