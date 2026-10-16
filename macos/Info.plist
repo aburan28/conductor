@@ -8,6 +8,8 @@
 	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
 	<key>CFBundleName</key><string>Conductor</string>
 	<key>CFBundleDisplayName</key><string>Conductor</string>
+	<!-- AppIcon.icns from packaging/icon/; build.sh copies it into Contents/Resources. -->
+	<key>CFBundleIconFile</key><string>AppIcon</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
 	<!-- A checkout's build says 0.0.0; build.sh (given a version) and packaging/build-dmg.sh stamp
 	     the release's version over both before the bundle is signed. -->

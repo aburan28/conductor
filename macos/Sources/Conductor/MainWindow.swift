@@ -87,6 +87,7 @@ struct DashboardView: View {
             }
         }
         .navigationTitle(model.project.map { "Conductor — \($0)" } ?? "Conductor")
+        .navigationSubtitle(model.daemonUp ? "Dashboard" : "Waiting for control plane")
     }
 }
 
@@ -96,9 +97,15 @@ struct Unreachable: View {
 
     var body: some View {
         VStack(spacing: 12) {
-            Image(systemName: "bolt.horizontal.circle").font(.system(size: 40)).foregroundStyle(.secondary)
+            Image(nsImage: StatusDotImage.make(.down))
+                .resizable()
+                .frame(width: 40, height: 40)
+                .accessibilityHidden(true)
+            Text("Conductor unavailable").font(.title3.bold())
             Text(message).multilineTextAlignment(.center).frame(maxWidth: 480)
+                .foregroundStyle(.secondary)
             Button("Try Again", action: retry)
+                .keyboardShortcut(.defaultAction)
         }
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)

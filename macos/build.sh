@@ -105,6 +105,11 @@ if [ -n "$VERSION" ]; then
     plutil -replace CFBundleVersion -string "$VERSION" "$APP/Contents/Info.plist"
 fi
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
+# Drawn by packaging/icon/make-icon.py (web favicon mark on Apple's icon grid) and
+# committed as AppIcon.icns so the build needs no renderer.
+ICON="$HERE/packaging/icon/AppIcon.icns"
+[ -f "$ICON" ] || die "missing $ICON; run: python3 macos/packaging/icon/make-icon.py"
+cp "$ICON" "$APP/Contents/Resources/AppIcon.icns"
 # ditto, not cp -R: the framework's Versions/Current links must stay links, or its
 # signature no longer matches its layout.
 ditto "$SPARKLE" "$APP/Contents/Frameworks/Sparkle.framework"
