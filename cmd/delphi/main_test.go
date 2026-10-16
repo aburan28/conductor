@@ -278,6 +278,74 @@ func TestRunMixedProvidersEndToEnd(t *testing.T) {
 	}
 }
 
+func TestRunAnthropicWithWorkloadFederation(t *testing.T) {
+	fa := &fakeAnthropic{batches: map[string][]map[string]any{}, outcome: func(id string) string {
+		return claudeMsg("federated reply for "+id, "end_turn", "")
+	}}
+	var exchangeCalls, batchCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/oauth/token" {
+			exchangeCalls++
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode token exchange: %v", err)
+			}
+			for key, want := range map[string]string{
+				"grant_type":         "urn:ietf:params:oauth:grant-type:jwt-bearer",
+				"assertion":          "header.claims.signature",
+				"federation_rule_id": "fdrl_test",
+				"organization_id":    "org_test",
+				"service_account_id": "svac_test",
+				"workspace_id":       "default",
+			} {
+				if body[key] != want {
+					t.Errorf("exchange %s = %v, want %s", key, body[key], want)
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"access_token":"federated-access","token_type":"Bearer","expires_in":600}`)
+			return
+		}
+		if r.URL.Path == "/v1/messages/batches" {
+			batchCalls++
+			if got := r.Header.Get("Authorization"); got != "Bearer federated-access" {
+				t.Errorf("batch Authorization = %q", got)
+			}
+			if got := r.Header.Get("X-Api-Key"); got != "" {
+				t.Errorf("batch unexpectedly used an API key")
+			}
+		}
+		fa.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	for key, value := range map[string]string{
+		"ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": "", "ANTHROPIC_PROFILE": "",
+		"ANTHROPIC_BASE_URL": srv.URL, "ANTHROPIC_FEDERATION_RULE_ID": "fdrl_test",
+		"ANTHROPIC_ORGANIZATION_ID": "org_test", "ANTHROPIC_SERVICE_ACCOUNT_ID": "svac_test",
+		"ANTHROPIC_WORKSPACE_ID": "default", "OPENAI_API_KEY": "",
+	} {
+		t.Setenv(key, value)
+	}
+	assertion := filepath.Join(t.TempDir(), "assertion")
+	if err := os.WriteFile(assertion, []byte("header.claims.signature"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ANTHROPIC_IDENTITY_TOKEN_FILE", assertion)
+	t.Setenv("ANTHROPIC_IDENTITY_TOKEN", "")
+	out := filepath.Join(t.TempDir(), "run")
+	code, _, stderr := cli(t, "", "run", "-prompt", "Reply briefly", "-out", out, "-every", "1ms")
+	if code != exitOK {
+		t.Fatalf("delphi run exit %d: %s", code, stderr)
+	}
+	if exchangeCalls != 1 || batchCalls != 1 {
+		t.Fatalf("exchange calls %d, batch submits %d", exchangeCalls, batchCalls)
+	}
+	results := lines(t, filepath.Join(out, "results.jsonl"))
+	if len(results) != 1 || results[0]["status"] != "succeeded" {
+		t.Fatalf("unexpected results: %v", results)
+	}
+}
+
 func TestOutcomeClassification(t *testing.T) {
 	fa, fo := servers(t)
 	fa.outcome = func(id string) string {

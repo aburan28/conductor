@@ -13,10 +13,10 @@ import (
 	"github.com/aburan28/conductor/internal/wif"
 )
 
-// cmdWIF runs Claude Code with a renewable workload identity token.
+// cmdWIF runs a supported Anthropic client with a renewable workload identity token.
 func cmdWIF(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: conductor wif local init|jwks or conductor wif exec [OPTIONS] -- claude [ARGS...]")
+		return errors.New("usage: conductor wif local init|jwks or conductor wif exec [OPTIONS] -- claude|delphi [ARGS...]")
 	}
 	switch args[0] {
 	case "local":
@@ -24,7 +24,7 @@ func cmdWIF(ctx context.Context, args []string) error {
 	case "exec":
 		return cmdWIFExec(ctx, args[1:])
 	default:
-		return errors.New("usage: conductor wif local init|jwks or conductor wif exec [OPTIONS] -- claude [ARGS...]")
+		return errors.New("usage: conductor wif local init|jwks or conductor wif exec [OPTIONS] -- claude|delphi [ARGS...]")
 	}
 }
 
@@ -84,10 +84,11 @@ func cmdWIFExec(ctx context.Context, args []string) error {
 	}
 	argv := fs.Args()
 	if *providerName == "" || *rule == "" || *org == "" || *service == "" || len(argv) == 0 {
-		return errors.New("usage: conductor wif exec --provider gcp|aws|file|local --rule-id fdrl_... --organization-id UUID --service-account-id svac_... [--workspace-id wrkspc_...] [PROVIDER OPTIONS] -- claude [ARGS...]")
+		return errors.New("usage: conductor wif exec --provider gcp|aws|file|local --rule-id fdrl_... --organization-id UUID --service-account-id svac_... [--workspace-id wrkspc_...] [PROVIDER OPTIONS] -- claude|delphi [ARGS...]")
 	}
-	if argv[0] != "claude" && !(argv[0] == "conductor" && len(argv) >= 3 && argv[1] == "wrap" && argv[2] == "claude") {
-		return errors.New("wif exec accepts only claude or conductor wrap claude")
+	if argv[0] != "claude" && argv[0] != "delphi" &&
+		!(argv[0] == "conductor" && len(argv) >= 3 && argv[1] == "wrap" && argv[2] == "claude") {
+		return errors.New("wif exec accepts only claude, delphi, or conductor wrap claude")
 	}
 	var provider wif.Provider
 	var identityPath string
@@ -146,7 +147,7 @@ func cmdWIFExec(ctx context.Context, args []string) error {
 		"ANTHROPIC_WORKSPACE_ID":        *workspace,
 	})
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("Claude workload failed: %w", err)
+		return fmt.Errorf("Anthropic workload failed: %w", err)
 	}
 	return nil
 }

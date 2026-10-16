@@ -1,6 +1,7 @@
 // Package anthropic runs delphi requests through the Anthropic Message Batches
-// API with the official SDK. Credentials: ANTHROPIC_API_KEY (or
-// ANTHROPIC_AUTH_TOKEN); ANTHROPIC_BASE_URL is honoured.
+// API with the official SDK. Credentials: ANTHROPIC_API_KEY,
+// ANTHROPIC_AUTH_TOKEN, or complete workload federation environment variables.
+// ANTHROPIC_BASE_URL is honoured.
 package anthropic
 
 import (
@@ -41,10 +42,17 @@ type Provider struct {
 
 // New returns a provider; it fails when no credential is configured.
 func New() (*Provider, error) {
-	if os.Getenv("ANTHROPIC_API_KEY") == "" && os.Getenv("ANTHROPIC_AUTH_TOKEN") == "" {
-		return nil, errors.New("anthropic: export ANTHROPIC_API_KEY")
+	if os.Getenv("ANTHROPIC_API_KEY") == "" && os.Getenv("ANTHROPIC_AUTH_TOKEN") == "" && !federationConfigured() {
+		return nil, errors.New("anthropic: export ANTHROPIC_API_KEY or configure workload identity federation")
 	}
 	return &Provider{client: anthropic.NewClient(option.WithMaxRetries(5)), model: model()}, nil
+}
+
+func federationConfigured() bool {
+	return os.Getenv("ANTHROPIC_FEDERATION_RULE_ID") != "" &&
+		os.Getenv("ANTHROPIC_ORGANIZATION_ID") != "" &&
+		os.Getenv("ANTHROPIC_SERVICE_ACCOUNT_ID") != "" &&
+		(os.Getenv("ANTHROPIC_IDENTITY_TOKEN_FILE") != "" || os.Getenv("ANTHROPIC_IDENTITY_TOKEN") != "")
 }
 
 // NewWithKey returns a provider for an explicit key (a vault secret, not the environment).
