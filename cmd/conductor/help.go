@@ -613,6 +613,22 @@ Example:
 
 Run ` + "`conductor sso <subcommand> -h`" + ` for its flags.
 `},
+	{name: "publish", group: "Team and access", flags: true,
+		summary: "share the control plane over Tailscale (serve, and optionally funnel)",
+		topic: `conductor publish — share the control plane over Tailscale in one command
+
+Runs ` + "`tailscale serve --bg --https=443 <backend>`" + ` against the loopback daemon so the
+dashboard and MCP are reachable at https://<magicdns>/ from your tailnet, and with
+--funnel also from the public internet. Prints the resulting dashboard and MCP URLs and
+the --public-url / invite --endpoint commands to go with them.
+
+Usage:
+  conductor publish
+  conductor publish --funnel
+
+Example:
+  conductor publish --funnel
+`},
 	{name: "github", group: "Team and access", subs: []string{"setup", "install", "link", "status", "check", "issues"},
 		nested:  map[string][]string{"issues": {"enable", "disable", "status", "sync"}},
 		summary: "create the GitHub App, link a repo, sync its issues into tasks"},

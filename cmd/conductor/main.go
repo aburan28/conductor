@@ -117,6 +117,8 @@ func runCommand(ctx context.Context, name string, args []string) error {
 		return cmdMember(ctx, args)
 	case "invite":
 		return cmdInvite(ctx, args)
+	case "publish":
+		return cmdPublish(ctx, args)
 	case "join":
 		return cmdJoin(ctx, args)
 	case "token":
