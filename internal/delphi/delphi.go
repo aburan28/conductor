@@ -32,6 +32,14 @@ type Request struct {
 	Params    map[string]any    `json:"params,omitempty"` // provider-specific request fields, passed through
 	Meta      map[string]string `json:"meta,omitempty"`   // opaque to delphi; copied onto the result (task ids, paths, ...)
 	Attempt   int               `json:"attempt,omitempty"`
+	// Fallback is where the request goes, in order, if a model's safeguards decline it.
+	Fallback []Target `json:"fallback,omitempty"`
+	// Profile is the named tier the request was resolved from, if any.
+	Profile string `json:"profile,omitempty"`
+	// Origin is the hash of the request as first submitted, set once a fallback rewrites it.
+	Origin string `json:"origin,omitempty"`
+	// FallbackFrom records each model that declined, in order ("provider:model refused (category)").
+	FallbackFrom []string `json:"fallback_from,omitempty"`
 }
 
 // Message is one conversation turn.
@@ -100,7 +108,9 @@ type Result struct {
 	Attempt    int               `json:"attempt,omitempty"`
 	Meta       map[string]string `json:"meta,omitempty"`
 	FinishedAt string            `json:"finished_at,omitempty"`
-	Hash       string            `json:"request_hash,omitempty"` // content hash of the request answered
+	Hash       string            `json:"request_hash,omitempty"` // content hash of the request as first submitted
+	// FallbackFrom lists the models that declined before this one answered.
+	FallbackFrom []string `json:"fallback_from,omitempty"`
 }
 
 // Retryable reports whether resubmitting the request could succeed. A refusal
@@ -171,7 +181,7 @@ func (r Registry) Names() []string {
 var idRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 var rowKeys = map[string]bool{"id": true, "custom_id": true, "provider": true, "model": true, "prompt": true, "messages": true,
-	"system": true, "max_tokens": true, "effort": true, "params": true, "meta": true}
+	"system": true, "max_tokens": true, "effort": true, "params": true, "meta": true, "profile": true, "fallback": true}
 
 // reservedParams belong to the neutral request, not to params.
 var reservedParams = map[string]string{
@@ -186,6 +196,11 @@ type Defaults struct {
 	MaxTokens int
 	Effort    string
 	System    string
+	// Profile is applied to rows that name none; Profiles resolves profile names.
+	Profile  string
+	Profiles Profiles
+	// Fallback is the chain for rows (and profiles) that set none.
+	Fallback []string
 }
 
 // RequestError lists every problem found in an input.
@@ -238,14 +253,42 @@ func Normalize(row map[string]any, d Defaults, reg Registry, where string) (Requ
 		add("id must match [A-Za-z0-9_-]{1,64}, got %q", id)
 	}
 	r.ID = id
+	r.Model = d.Model
+	r.Profile = d.Profile
+	fallback := d.Fallback
+	// A row's profile replaces the defaults; its own keys then override the profile.
+	if name, ok := str("profile"); ok && name != "" {
+		pr, found := d.Profiles[name]
+		if !found {
+			add("profile %q is not defined (have %v)", name, d.Profiles.Names())
+		}
+		r.Profile = name
+		if pr.Provider != "" && pr.Provider != r.Provider {
+			r.Provider, r.Model = pr.Provider, ""
+		}
+		if pr.Model != "" {
+			r.Model = pr.Model
+		}
+		if pr.Effort != "" {
+			r.Effort = pr.Effort
+		}
+		if pr.MaxTokens > 0 {
+			r.MaxTokens = pr.MaxTokens
+		}
+		if len(pr.Fallback) > 0 {
+			fallback = pr.Fallback
+		}
+	}
 	if s, ok := str("provider"); ok {
+		if s != r.Provider {
+			r.Model = ""
+		}
 		r.Provider = s
 	}
 	prov, known := reg[r.Provider]
 	if !known {
 		add("provider %q is not one of %v", r.Provider, reg.Names())
 	}
-	r.Model = d.Model
 	if s, ok := str("model"); ok {
 		r.Model = s
 	}
@@ -346,6 +389,30 @@ func Normalize(row map[string]any, d Defaults, reg Registry, where string) (Requ
 			}
 			r.Meta[k] = s
 		}
+	}
+	if v, ok := row["fallback"]; ok {
+		fallback = nil
+		switch x := v.(type) {
+		case string:
+			fallback = SplitList(x)
+		case []any:
+			for i, e := range x {
+				s, isStr := e.(string)
+				if !isStr {
+					add("fallback[%d] must be a string", i)
+				}
+				fallback = append(fallback, s)
+			}
+		default:
+			add("fallback must be a list of \"provider:model[@effort]\" or profile names")
+		}
+	}
+	if len(fallback) > 0 {
+		ts, err := ParseTargets(fallback, d.Profiles, reg)
+		if err != nil {
+			add("%v", err)
+		}
+		r.Fallback = ts
 	}
 	if len(p) == 0 {
 		for _, msg := range prov.Validate(r) {

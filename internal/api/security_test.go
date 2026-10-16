@@ -467,7 +467,7 @@ func TestNoGETRouteLeaksAPrivateTask(t *testing.T) {
 		"/v1/projects/{project}/inference/endpoints", "/v1/projects/{project}/inference/models",
 		// Delphi delegations: refs, providers, models, token counts and labels, no task data;
 		// answers are fetched from the provider. Walked so a new GET cannot skip the check.
-		"/v1/projects/{project}/delphi", "/v1/projects/{project}/delphi/{ref}",
+		"/v1/projects/{project}/delphi", "/v1/projects/{project}/delphi/{ref}", "/v1/projects/{project}/delphi/profiles",
 		"/v1/projects/{project}/delphi/{ref}/answer",
 		// The stream is read separately below; it never ends on its own.
 	}

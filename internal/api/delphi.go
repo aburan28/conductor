@@ -16,6 +16,7 @@ func (s *Server) delphiRoutes(m *http.ServeMux) {
 	auth := s.authenticate
 	m.HandleFunc("POST /v1/projects/{project}/delphi", auth(s.submitDelphi))
 	m.HandleFunc("GET /v1/projects/{project}/delphi", auth(s.listDelphi))
+	m.HandleFunc("GET /v1/projects/{project}/delphi/profiles", auth(s.delphiProfiles))
 	m.HandleFunc("GET /v1/projects/{project}/delphi/{ref}", auth(s.getDelphi))
 	m.HandleFunc("GET /v1/projects/{project}/delphi/{ref}/answer", auth(s.answerDelphi))
 	m.HandleFunc("POST /v1/projects/{project}/delphi/{ref}/cancel", auth(s.cancelDelphi))
@@ -60,9 +61,31 @@ func (s *Server) submitDelphi(w http.ResponseWriter, r *http.Request, p domain.P
 	case created:
 		status = http.StatusCreated
 		s.store.Audit(r.Context(), project.OrganizationID, project.ID, p.ID, "delphi.submit", "delphi_delegation", d.ID,
-			map[string]any{"ref": d.Ref, "provider": d.Provider, "model": d.Model})
+			map[string]any{"ref": d.Ref, "provider": d.Provider, "model": d.Model, "profile": d.Profile, "fallback_of": d.FallbackOf})
 	}
 	s.ok(w, r, status, d)
+}
+
+type delphiProfileList struct {
+	Profiles []hosted.Profile `json:"profiles"`
+}
+
+// delphiProfiles lists the tiers a delegation can name with "profile".
+func (s *Server) delphiProfiles(w http.ResponseWriter, r *http.Request, p domain.Principal) {
+	project, _, err := s.project(r, p, domain.RoleObserver)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if s.delphiOff(w, r) {
+		return
+	}
+	profiles, err := s.delphi.Profiles(r.Context(), project)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.ok(w, r, http.StatusOK, delphiProfileList{Profiles: profiles})
 }
 
 type delphiList struct {

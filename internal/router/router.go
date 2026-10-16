@@ -362,7 +362,7 @@ func (c Catalog) Resolve(alias string, tier domain.Tier, req Request) (domain.Mo
 
 	var candidates []domain.ModelProfile
 	for _, p := range c.Profiles {
-		if !p.Enabled || p.Model == "" {
+		if !p.Enabled || p.Model == "" || p.Harness == domain.DelphiHarness {
 			continue
 		}
 		if p.Alias != alias {
@@ -382,7 +382,7 @@ func (c Catalog) Resolve(alias string, tier domain.Tier, req Request) (domain.Mo
 	if len(candidates) == 0 {
 		for _, next := range c.ladderAbove(alias) {
 			for _, p := range c.Profiles {
-				if p.Enabled && p.Model != "" && p.Alias == next &&
+				if p.Enabled && p.Model != "" && p.Alias == next && p.Harness != domain.DelphiHarness &&
 					(len(available) == 0 || available[p.Harness]) {
 					candidates = append(candidates, p)
 				}

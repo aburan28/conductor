@@ -82,6 +82,11 @@ func strict(model string) bool {
 		model == "claude-opus-5-5" || model == "claude-sonnet-5-5"
 }
 
+// noSampling models accept only default sampling, so any sampling parameter is a 400.
+func noSampling(model string) bool {
+	return strings.HasPrefix(model, "claude-haiku-5-5")
+}
+
 func (p *Provider) Validate(r delphi.Request) []string {
 	var out []string
 	if r.MaxTokens > maxOutputTokens {
@@ -90,13 +95,15 @@ func (p *Provider) Validate(r delphi.Request) []string {
 	if r.Effort != "" && !efforts[r.Effort] {
 		out = append(out, fmt.Sprintf("effort %q is not one of low, medium, high, xhigh, max", r.Effort))
 	}
+	if strict(r.Model) || noSampling(r.Model) {
+		for _, k := range []string{"temperature", "top_p", "top_k"} {
+			if _, bad := r.Params[k]; bad {
+				out = append(out, fmt.Sprintf("params.%s: sampling parameters are rejected by %s", k, r.Model))
+			}
+		}
+	}
 	if !strict(r.Model) {
 		return out
-	}
-	for _, k := range []string{"temperature", "top_p", "top_k"} {
-		if _, bad := r.Params[k]; bad {
-			out = append(out, fmt.Sprintf("params.%s: sampling parameters are rejected by %s", k, r.Model))
-		}
 	}
 	if t, ok := r.Params["thinking"]; ok {
 		if m, _ := t.(map[string]any); m == nil || m["type"] != "adaptive" {

@@ -120,7 +120,7 @@ func listJSON(dir string) ([]string, error) {
 
 // Hash identifies a request's content, ignoring the attempt counter.
 func Hash(r Request) string {
-	r.Attempt = 0
+	r.Attempt, r.Origin, r.FallbackFrom = 0, "", nil
 	b, _ := json.Marshal(r)
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:8])
@@ -134,7 +134,7 @@ func (s *FileStore) Enqueue(reqs []Request, now time.Time) (int, error) {
 	}
 	for _, f := range flights {
 		for _, r := range f.Requests {
-			inFlight[r.ID] = Hash(r)
+			inFlight[r.ID] = OriginHash(r)
 		}
 	}
 	existing := func(id string) (string, bool) {
@@ -169,7 +169,7 @@ func (s *FileStore) Enqueue(reqs []Request, now time.Time) (int, error) {
 }
 
 func (s *FileStore) Requeue(r Request, now time.Time) error {
-	return writeAtomic(s.path("queue", r.ID+".json"), Queued{Request: r, EnqueuedAt: now, Hash: Hash(r)})
+	return writeAtomic(s.path("queue", r.ID+".json"), Queued{Request: r, EnqueuedAt: now, Hash: OriginHash(r)})
 }
 
 func (s *FileStore) Pending() ([]Queued, error) {

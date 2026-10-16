@@ -14,9 +14,13 @@ type DelphiDelegation struct {
 	TaskID         ID     `json:"task_id,omitempty"`
 	Provider       string `json:"provider"`
 	Model          string `json:"model"`
-	BodySHA256     string `json:"body_sha256"`
-	Label          string `json:"label"`
-	BatchID        string `json:"batch_id,omitempty"`
+	// Profile is the model-catalog alias the request was resolved from, if any.
+	Profile string `json:"profile,omitempty"`
+	// FallbackOf is the ref of the delegation whose model refused this request.
+	FallbackOf string `json:"fallback_of,omitempty"`
+	BodySHA256 string `json:"body_sha256"`
+	Label      string `json:"label"`
+	BatchID    string `json:"batch_id,omitempty"`
 	// State is the delegation's lifecycle: submitting (provider outcome not yet known),
 	// running, finished, or abandoned (an unknown submit an operator gave up on).
 	State string `json:"state"`
@@ -46,3 +50,7 @@ const (
 	DelphiFinished   = "finished"
 	DelphiAbandoned  = "abandoned"
 )
+
+// DelphiHarness is the model-catalog harness for profiles written for delphi delegation. The
+// agent router never picks them; delphi prefers them over agent profiles of the same alias.
+const DelphiHarness = "delphi"

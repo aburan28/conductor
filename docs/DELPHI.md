@@ -64,6 +64,77 @@ The API lives under `/v1/projects/{project}/delphi`:
 
 Observers can read metadata. Contributors can submit, read answers and cancel.
 
+## Tiers
+
+Different work can go to different models. A **profile** is a model-catalog alias
+(`.conductor/models.yaml`, the same catalog agents are routed by) that names an Anthropic
+or OpenAI model and an effort:
+
+```yaml
+profiles:
+  - alias: implementer          # cheap and fast, thinking as hard as it can
+    harness: delphi
+    provider: anthropic
+    model: claude-haiku-5-5
+    reasoning_effort: max
+    billing: tokens
+  - alias: frontier
+    harness: delphi
+    provider: anthropic
+    model: claude-mythos-5-1
+    reasoning_effort: high
+    billing: tokens
+```
+
+```sh
+conductor delphi profiles                         # the tiers delphi can use
+conductor delphi ask --profile implementer --file spec.md
+conductor delphi ask --profile frontier --effort max "..."   # flags override the profile
+```
+
+- Every enabled `anthropic` or `openai` profile is a tier, one per alias. Under one alias,
+  a profile with `harness: delphi` wins over agent profiles (`harness: claude`, ...), so a
+  delegation tier can differ from the agent model of the same name. The agent router
+  ignores `harness: delphi` profiles.
+- `reasoning_effort: none` sends no effort.
+- The delegation records its `profile`, so spend can be read per tier.
+
+## Fallback on refusal
+
+A model's safeguards can decline a request (status `refused`, with a category such as
+`cyber`). That is common on security research. `--fallback` resubmits the same request to
+the next target in order until one answers:
+
+```sh
+conductor delphi ask --wait --profile frontier \
+    --fallback "openai:<model>@high,anthropic:claude-opus-5-5" --file probe.md
+```
+
+- A target is `provider:model[@effort]` or a profile name. The default chain is
+  `$CONDUCTOR_DELPHI_FALLBACK`.
+- Each resubmission is a new delegation, `REF-fb1`, `REF-fb2`, and so on. It records
+  `fallback_of` (the ref that refused), and the server accepts `fallback_of` only for a
+  delegation that was refused.
+- When the provider changes, `params` and effort are dropped, because they were written
+  for the other API; the target's own `@effort` applies.
+- The CLI does the resubmitting, so `--fallback` needs `--wait`. Holding the request text
+  is the caller's part; the server keeps none (below).
+
+The standalone binary falls back on its own, because it holds the text: `delphi run
+-profile frontier`, `-fallback ...`, `$DELPHI_FALLBACK`, or a profile's `fallback` list in
+`~/.delphi/profiles.json` (`$DELPHI_PROFILES`):
+
+```json
+{"implementer": {"provider": "anthropic", "model": "claude-haiku-5-5", "effort": "max"},
+ "frontier": {"provider": "anthropic", "model": "claude-mythos-5-1", "effort": "high",
+              "fallback": ["openai:<model>@high", "implementer"]}}
+```
+
+The request is resent under the same id. Its result lists the models that declined in
+`fallback_from`, and a target whose provider has no key is skipped and noted there.
+Resubmitting the original request after a fallback is still recognised as the same
+request.
+
 ## What is stored, and what is not
 
 Conductor's database never holds prompts or model output (DESIGN.md §12.4), and delphi
@@ -128,5 +199,8 @@ See [OPERATIONS.md](OPERATIONS.md#delphi).
 - **MCP tools.** The tool list is capped at 15 (DESIGN.md §4.9) and is full; agents use
   the CLI.
 - **Budgets.** Project budgets do not count delegated spend.
-- **Automatic resubmission.** It would need the server to hold request text, which this
-  design rules out.
+- **Automatic resubmission**, including server-side fallback. It would need the server to
+  hold request text, which this design rules out. The CLI and the standalone binary do it
+  instead.
+- **Fallback chains in the catalog.** `models.yaml` profiles have no fallback list yet;
+  the chain comes from `--fallback` or `$CONDUCTOR_DELPHI_FALLBACK`.

@@ -63,6 +63,7 @@ operations:
   cancel     cancel in-flight batches (-label L or -all)
   reconcile  list or resolve flights whose submit outcome is unknown
   providers  which providers have credentials
+  profiles   the named tiers in the profiles file
   validate   check a JSONL file locally (no key, no cost)
 
 every command takes -home DIR (default $DELPHI_HOME or ~/.delphi).
@@ -72,6 +73,15 @@ environment: ANTHROPIC_API_KEY, OPENAI_API_KEY (one or both); DELPHI_PROVIDER
 (default anthropic); DELPHI_ANTHROPIC_MODEL (default claude-mythos-5-1);
 DELPHI_OPENAI_MODEL (no default); DELPHI_MAX_TOKENS (default 32000);
 DELPHI_OPENAI_PRICES (JSON {"model":[in,out]} batch $/MTok for cost estimates).
+
+tiers and fallback: -profile NAME takes provider, model, effort and max_tokens from
+$DELPHI_PROFILES (default ~/.delphi/profiles.json), a JSON object such as
+  {"implementer": {"provider": "anthropic", "model": "claude-haiku-5-5", "effort": "max"},
+   "frontier": {"provider": "anthropic", "model": "claude-mythos-5-1",
+                "fallback": ["openai:MODEL@high", "anthropic:claude-opus-5-5"]}}
+A request whose model refuses it is resent, same id, to the next fallback in order
+(-fallback, $DELPHI_FALLBACK, the profile's, or a row's "fallback"); the result lists the
+models that declined in fallback_from.
 `
 
 type app struct {
@@ -144,8 +154,58 @@ func describe(err error) string {
 }
 
 type requestFlags struct {
-	d    delphi.Defaults
-	meta multiFlag
+	fs       *flag.FlagSet
+	d        delphi.Defaults
+	meta     multiFlag
+	profile  string
+	fallback string
+}
+
+func defaultProfiles() string {
+	if p := os.Getenv("DELPHI_PROFILES"); p != "" {
+		return p
+	}
+	return filepath.Join(defaultHome(), "profiles.json")
+}
+
+// defaults resolves -profile against the profiles file. Flags given on the command line
+// override the profile; the profile overrides the flags' defaults.
+func (rf *requestFlags) defaults() (delphi.Defaults, error) {
+	d := rf.d
+	profiles, err := delphi.LoadProfiles(defaultProfiles())
+	if err != nil {
+		return d, err
+	}
+	d.Profiles = profiles
+	set := map[string]bool{}
+	rf.fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	if rf.profile != "" {
+		pr, ok := profiles[rf.profile]
+		if !ok {
+			return d, fmt.Errorf("profile %q is not in %s (have %v)", rf.profile, defaultProfiles(), profiles.Names())
+		}
+		d.Profile = rf.profile
+		if pr.Provider != "" && !set["provider"] {
+			if pr.Provider != d.Provider && !set["model"] {
+				d.Model = ""
+			}
+			d.Provider = pr.Provider
+		}
+		if pr.Model != "" && !set["model"] {
+			d.Model = pr.Model
+		}
+		if pr.Effort != "" && !set["effort"] {
+			d.Effort = pr.Effort
+		}
+		if pr.MaxTokens > 0 && !set["max-tokens"] {
+			d.MaxTokens = pr.MaxTokens
+		}
+		d.Fallback = pr.Fallback
+	}
+	if set["fallback"] || len(d.Fallback) == 0 {
+		d.Fallback = delphi.SplitList(rf.fallback)
+	}
+	return d, nil
 }
 
 type multiFlag []string
@@ -154,7 +214,7 @@ func (m *multiFlag) String() string     { return strings.Join(*m, ",") }
 func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 
 func addRequestFlags(fs *flag.FlagSet) *requestFlags {
-	rf := &requestFlags{}
+	rf := &requestFlags{fs: fs}
 	prov := os.Getenv("DELPHI_PROVIDER")
 	if prov == "" {
 		prov = "anthropic"
@@ -164,6 +224,9 @@ func addRequestFlags(fs *flag.FlagSet) *requestFlags {
 	fs.IntVar(&rf.d.MaxTokens, "max-tokens", envInt("DELPHI_MAX_TOKENS", 32000), "output token limit (reasoning counts toward it)")
 	fs.StringVar(&rf.d.Effort, "effort", "", "reasoning effort (anthropic: low..max; openai: as the model accepts)")
 	fs.StringVar(&rf.d.System, "system", "", "system prompt / instructions")
+	fs.StringVar(&rf.profile, "profile", os.Getenv("DELPHI_PROFILE"), "named tier from the profiles file ($DELPHI_PROFILES or ~/.delphi/profiles.json)")
+	fs.StringVar(&rf.fallback, "fallback", os.Getenv("DELPHI_FALLBACK"),
+		"where a refused request goes next: comma-separated provider:model[@effort] or profile names")
 	return rf
 }
 
@@ -205,7 +268,7 @@ func run(ctx context.Context, args []string, a *app) int {
 	}
 	cmds := map[string]func(context.Context, []string, *app) int{
 		"ask": cmdAsk, "enqueue": cmdEnqueue, "get": cmdGet, "results": cmdResults, "serve": cmdServe, "run": cmdRun,
-		"status": cmdStatus, "cancel": cmdCancel, "reconcile": cmdReconcile, "providers": cmdProviders, "validate": cmdValidate,
+		"status": cmdStatus, "cancel": cmdCancel, "reconcile": cmdReconcile, "providers": cmdProviders, "profiles": cmdProfiles, "validate": cmdValidate,
 	}
 	fn, ok := cmds[args[0]]
 	if !ok {
@@ -238,6 +301,10 @@ func cmdAsk(ctx context.Context, args []string, a *app) int {
 	if !parse(fs, args) {
 		return exitUsage
 	}
+	d, err := rf.defaults()
+	if err != nil {
+		return a.fail(err)
+	}
 	text := *prompt
 	if text == "" {
 		b, err := readInput(a, map[bool]string{true: "-", false: *file}[*file == ""])
@@ -262,7 +329,7 @@ func cmdAsk(ctx context.Context, args []string, a *app) int {
 		}
 		row["meta"] = meta
 	}
-	req, problems := delphi.Normalize(row, rf.d, offline(), "ask")
+	req, problems := delphi.Normalize(row, d, offline(), "ask")
 	if len(problems) > 0 {
 		return a.fail(&delphi.RequestError{Problems: problems})
 	}
@@ -284,6 +351,10 @@ func cmdEnqueue(ctx context.Context, args []string, a *app) int {
 	if !parse(fs, args) {
 		return exitUsage
 	}
+	d, err := rf.defaults()
+	if err != nil {
+		return a.fail(err)
+	}
 	if *in == "" {
 		fmt.Fprintln(a.stderr, "-in is required")
 		return exitUsage
@@ -292,7 +363,7 @@ func cmdEnqueue(ctx context.Context, args []string, a *app) int {
 	if err != nil {
 		return a.fail(err)
 	}
-	reqs, err := delphi.Parse(data, rf.d, offline())
+	reqs, err := delphi.Parse(data, d, offline())
 	if err != nil {
 		return a.fail(err)
 	}
@@ -315,6 +386,10 @@ func cmdValidate(ctx context.Context, args []string, a *app) int {
 	if !parse(fs, args) {
 		return exitUsage
 	}
+	d, err := rf.defaults()
+	if err != nil {
+		return a.fail(err)
+	}
 	if *in == "" {
 		fmt.Fprintln(a.stderr, "-in is required")
 		return exitUsage
@@ -323,7 +398,7 @@ func cmdValidate(ctx context.Context, args []string, a *app) int {
 	if err != nil {
 		return a.fail(err)
 	}
-	reqs, err := delphi.Parse(data, rf.d, offline())
+	reqs, err := delphi.Parse(data, d, offline())
 	if err != nil {
 		return a.fail(err)
 	}
@@ -514,13 +589,17 @@ func cmdRun(ctx context.Context, args []string, a *app) int {
 	if !parse(fs, args) {
 		return exitUsage
 	}
+	d, err := rf.defaults()
+	if err != nil {
+		return a.fail(err)
+	}
 	if *out == "" || (*in == "") == (*prompt == "") {
 		fmt.Fprintln(a.stderr, "usage: delphi run (-in F | -prompt TEXT) -out DIR [flags]")
 		return exitUsage
 	}
 	var reqs []delphi.Request
 	if *prompt != "" {
-		r, p := delphi.Normalize(map[string]any{"id": "prompt-1", "prompt": *prompt}, rf.d, offline(), "-prompt")
+		r, p := delphi.Normalize(map[string]any{"id": "prompt-1", "prompt": *prompt}, d, offline(), "-prompt")
 		if len(p) > 0 {
 			return a.fail(&delphi.RequestError{Problems: p})
 		}
@@ -531,7 +610,7 @@ func cmdRun(ctx context.Context, args []string, a *app) int {
 			return a.fail(err)
 		}
 		var perr error
-		if reqs, perr = delphi.Parse(data, rf.d, offline()); perr != nil {
+		if reqs, perr = delphi.Parse(data, d, offline()); perr != nil {
 			return a.fail(perr)
 		}
 	}
@@ -827,6 +906,38 @@ func cmdProviders(ctx context.Context, args []string, a *app) int {
 			model = "(none: set DELPHI_" + strings.ToUpper(name) + "_MODEL or -model)"
 		}
 		fmt.Fprintf(a.stdout, "%-10s default model %-40s %s\n", name, model, state)
+	}
+	return exitOK
+}
+
+func cmdProfiles(ctx context.Context, args []string, a *app) int {
+	fs, _ := newFS("profiles", a)
+	if !parse(fs, args) {
+		return exitUsage
+	}
+	path := defaultProfiles()
+	profiles, err := delphi.LoadProfiles(path)
+	if err != nil {
+		return a.fail(err)
+	}
+	if len(profiles) == 0 {
+		fmt.Fprintf(a.stdout, "no profiles in %s\n", path)
+		return exitOK
+	}
+	for _, name := range profiles.Names() {
+		p := profiles[name]
+		model := p.Model
+		if model == "" {
+			model = "(provider default)"
+		}
+		line := fmt.Sprintf("%-14s %s:%s", name, p.Provider, model)
+		if p.Effort != "" {
+			line += " effort " + p.Effort
+		}
+		if len(p.Fallback) > 0 {
+			line += " -> " + strings.Join(p.Fallback, " -> ")
+		}
+		fmt.Fprintln(a.stdout, line)
 	}
 	return exitOK
 }
