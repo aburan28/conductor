@@ -172,7 +172,7 @@ func checkedToken(token string, now time.Time) (string, error) {
 }
 
 // TokenFile refreshes provider assertions for Claude Code, which reads a file
-// on each Anthropic token exchange. It never stores a signing key.
+// on each Anthropic token exchange. It stores assertions, never signing keys.
 type TokenFile struct {
 	Path string
 	stop context.CancelFunc
