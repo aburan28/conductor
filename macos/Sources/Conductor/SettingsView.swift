@@ -39,6 +39,8 @@ struct GeneralSettings: View {
                 Toggle("Start Conductor when I log in", isOn: $draft.startAtLogin)
                 TextField("Public URL (optional)", text: $draft.publicURL, prompt: Text("https://conductor.example.com"))
                     .help("conductord --public-url: the address teammates reach this Mac at, used in invite links")
+                Button("Remote Access…") { model.present(.publish) }
+                    .help("Publish this Mac's control plane over Tailscale (serve, and optionally funnel)")
             }
 
             Section {

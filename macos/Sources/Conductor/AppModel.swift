@@ -10,7 +10,7 @@ final class AppModel: ObservableObject {
     static let shared = AppModel()
 
     enum Sheet: String, Identifiable {
-        case invite, tools, github, join
+        case invite, tools, github, join, publish
         var id: String { rawValue }
     }
 
