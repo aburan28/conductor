@@ -103,9 +103,9 @@ Allow the peer port in the tailnet access policy and confirm `conductor peers` r
 database topology above when tasks must appear on every instance.
 
 `--peer-discover-dns` needs a DNS SRV record set. MagicDNS registers device names but
-does not create Conductor's SRV directory. Use explicit `--peer` entries or provide a
-separate DNS service for that SRV record; `mesh.internal` on one Mac is not automatically
-visible to other tailnet nodes.
+does not create Conductor's SRV directory. Use explicit `--peer` entries or run
+`conductor-mesh-dns` (see "Service discovery over the tailnet" below) as that separate
+DNS service.
 
 Local sign-in never applies through the MagicDNS name: those requests are remote and use
 the token in the invite link (see `docs/MACOS_APP.md`).
@@ -152,8 +152,64 @@ Two footguns, both learned the hard way:
   Invoke it by that absolute path or through PATH; a plain symlink **crashes** with
   "bundleIdentifier unknown to the registry".
 
-Prefer plain Serve (tailnet only) whenever teammates can join the tailnet: Funnel exposes
-the endpoint to everyone on the internet, so use it only for machines that cannot join.
+Prefer plain Serve (tailnet only) whenever teammates can join the tailnet: Funnel exposes the
+endpoint to everyone on the internet, so use it only for machines that cannot join.
+
+## Service discovery over the tailnet
+
+MagicDNS names one host; it does not publish *what* runs on it. `conductor-mesh-dns`
+fills that gap: a tiny hand-rolled DNS server that answers one directory of SRV records —
+conductor's daemon links, the dashboard, cairn's HTTP API and cairn p2p — and nothing
+else. Run it on the machine that publishes the services:
+
+```bash
+conductor-mesh-dns --listen 0.0.0.0:15353
+```
+
+On loopback (the default `127.0.0.1:15353`) only local daemons see it, which is what
+conductord's `--peer-discover-dns _conductor-mesh._tcp.mesh.internal` expects with
+`CONDUCTOR_PEER_DNS_SERVER=127.0.0.1:15353`. With `--listen 0.0.0.0:15353` any node on
+the tailnet can query it by pointing `dig` (or `resolvectl`, or a per-domain resolver) at
+the publisher's tailscale IP:
+
+```bash
+dig -p 15353 @100.64.0.1 _cairn-p2p._tcp.mesh.internal SRV
+# _cairn-p2p._tcp.mesh.internal. 60 IN SRV 0 0 9000 host-a.tail1234.ts.net.
+```
+
+The SRV target is the machine's MagicDNS FQDN — `--hostname` pins it explicitly, and
+without the flag the server auto-detects it from `tailscale status --json`
+(`Self.DNSName`), falling back to `localhost.` when the CLI is unavailable. The same
+status JSON supplies the node's tailscale IP, which the server returns as an A record for
+its own hostname, so SRV target resolution completes in one server.
+
+The directory:
+
+| SRV name | Ports | Service |
+|---|---|---|
+| `_conductor-mesh._tcp.mesh.internal.` | 8443, 8444 | conductord mesh peering (`--peer-discover-dns`) |
+| `_conductor._tcp.mesh.internal.` | 443 | conductor dashboard/API behind `tailscale serve` |
+| `_cairn-http._tcp.mesh.internal.` | 8443 | cairn HTTP API/UI |
+| `_cairn-p2p._tcp.mesh.internal.` | 9000 | cairn p2p |
+
+Set `MESH_DNS_SERVICES` (JSON, name → list of ports) to replace any of those or add new
+ones, e.g. `MESH_DNS_SERVICES='{"_mytool._tcp.mesh.internal.":[7777]}'`. Everything not
+in the directory gets NXDOMAIN.
+
+Conductor peers consume the `_conductor-mesh` set through the same
+`--peer-discover-dns` as on one machine: each daemon resolves the name on its DNS server,
+dials the discovered targets (`https://<target>:<port>`), and verifies identity through
+the mesh certificates rather than the DNS answer. A cairn node joining the mesh takes the
+`_cairn-p2p` answer and uses the MagicDNS name plus port 9000 as its seed:
+
+```bash
+CAIRN_SEEDS=host-a.tail1234.ts.net:9000
+```
+
+Binding mesh-dns to `0.0.0.0` is tailnet-trust: everyone the tailnet ACLs allow can read
+the directory (and reach the published ports). That is exactly the trust model of Serve
+itself, but keep it off Funnel — there is no reason for the public internet to enumerate
+your services.
 
 ## What Conductor does not build
 
