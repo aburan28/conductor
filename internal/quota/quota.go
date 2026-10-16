@@ -8,9 +8,9 @@
 // source and how far each can be trusted), normalises it into one Snapshot per window per
 // login, and decides when a reading is worth a warning.
 //
-// A snapshot carries numbers and labels only. The login is named by its state directory
-// ("default", "work"), never by an email or a token, and nothing a collector reads beyond
-// the rate-limit fields themselves is kept.
+// A snapshot carries numbers and labels. Locally observed login identifiers distinguish
+// credentials that occupy the same state directory at different times. An email hint is
+// attached only to the requesting owner's view and is not persisted with the reading.
 package quota
 
 import (
@@ -75,6 +75,11 @@ type Snapshot struct {
 	Source        string     `json:"source"`
 	SourceKind    SourceKind `json:"source_kind"`
 	ObservedAt    time.Time  `json:"observed_at"`
+	// IdentityEmail is filled only while serving the requesting owner's view, when the
+	// server is on the same machine as the current profile. It is never stored in quota
+	// tables or included in project-wide counts and events.
+	IdentityEmail  string `json:"identity_email,omitempty"`
+	IdentitySource string `json:"identity_source,omitempty"`
 
 	// StateDir is the harness state directory the reading came from. It is machine-local
 	// (a path can carry a user name) and never serialized: it exists so a resume command

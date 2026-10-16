@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -32,8 +33,45 @@ import (
 type ClaudeSource struct {
 	ConfigDir string
 	SessionID string
-	Path      string   // the transcript
-	Extras    []string // files under the sibling <session>/ directory, absolute
+	Path      string        // the transcript
+	Extras    []ClaudeExtra // sidecar files, including top-level agent transcripts
+}
+
+type ClaudeExtra struct {
+	Path string // absolute source path
+	Rel  string // safe path below native/claude/<session>/ in the checkpoint
+}
+
+// Native agent and tool transcripts are conversation history, not workspace files.
+// They may exceed the much smaller untracked-workspace-file allowance.
+const maxClaudeSidecarBytes = 64 << 20
+
+// LocateClaudePath pins an inventory row to its exact file. Session IDs alone can be
+// duplicated across project directories, and choosing the newest file is unsafe for a
+// migration. The path must be a regular transcript inside this config's projects tree.
+func LocateClaudePath(configDir, path, sessionID string) (ClaudeSource, error) {
+	projects, err := filepath.EvalSymlinks(filepath.Join(configDir, "projects"))
+	if err != nil {
+		return ClaudeSource{}, err
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return ClaudeSource{}, err
+	}
+	rel, err := filepath.Rel(projects, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) ||
+		filepath.Base(resolved) != sessionID+".jsonl" || len(strings.Split(rel, string(filepath.Separator))) != 2 {
+		return ClaudeSource{}, fmt.Errorf("Claude transcript %s is not the selected session under %s", path, projects)
+	}
+	st, err := os.Stat(resolved)
+	if err != nil || !st.Mode().IsRegular() {
+		return ClaudeSource{}, fmt.Errorf("Claude transcript %s is not a regular file", path)
+	}
+	src := ClaudeSource{ConfigDir: configDir, SessionID: sessionID, Path: resolved}
+	if err := collectClaudeExtras(&src); err != nil {
+		return ClaudeSource{}, err
+	}
+	return src, nil
 }
 
 // ClaudeSessionForPID reads the session id Claude Code records for a running process
@@ -99,19 +137,78 @@ func LocateClaude(configDir, cwd, sessionID string, since time.Time) (ClaudeSour
 		src.Path = newest
 		src.SessionID = strings.TrimSuffix(filepath.Base(newest), ".jsonl")
 	}
+	if err := collectClaudeExtras(&src); err != nil {
+		return ClaudeSource{}, err
+	}
+	return src, nil
+}
+
+func collectClaudeExtras(src *ClaudeSource) error {
 	// Subagent transcripts and spilled tool results live beside the transcript.
 	side := strings.TrimSuffix(src.Path, ".jsonl")
-	_ = filepath.WalkDir(side, func(p string, d os.DirEntry, err error) error {
+	err := filepath.WalkDir(side, func(p string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
-			return nil
+			return err
 		}
-		if info, err := d.Info(); err == nil && info.Mode().IsRegular() && info.Size() <= maxUntrackedFileBytes {
-			src.Extras = append(src.Extras, p)
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("Claude sidecar %s is not a regular file", p)
+		}
+		if info.Size() > maxClaudeSidecarBytes {
+			return fmt.Errorf("Claude sidecar %s exceeds checkpoint file limit (%d bytes)", p, maxClaudeSidecarBytes)
+		}
+		if rel, err := filepath.Rel(side, p); err == nil {
+			src.Extras = append(src.Extras, ClaudeExtra{Path: p, Rel: filepath.ToSlash(rel)})
 		}
 		return nil
 	})
-	sort.Strings(src.Extras)
-	return src, nil
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	// Claude Desktop remote-control mirrors may put agent-*.jsonl next to the
+	// parent transcript rather than inside its sidecar directory. The embedded
+	// sessionId binds each agent file to its parent, even when several chats share
+	// one project directory.
+	if entries, err := os.ReadDir(filepath.Dir(src.Path)); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasPrefix(entry.Name(), "agent-") || !strings.HasSuffix(entry.Name(), ".jsonl") {
+				continue
+			}
+			p := filepath.Join(filepath.Dir(src.Path), entry.Name())
+			info, err := entry.Info()
+			if err != nil || !info.Mode().IsRegular() || !claudeAgentBelongsTo(p, src.SessionID) {
+				continue
+			}
+			if info.Size() > maxClaudeSidecarBytes {
+				return fmt.Errorf("Claude agent transcript %s exceeds checkpoint file limit (%d bytes)", p, maxClaudeSidecarBytes)
+			}
+			src.Extras = append(src.Extras, ClaudeExtra{Path: p, Rel: "agents/" + entry.Name()})
+		}
+	}
+	sort.Slice(src.Extras, func(i, j int) bool { return src.Extras[i].Rel < src.Extras[j].Rel })
+	return nil
+}
+
+func claudeAgentBelongsTo(path, sessionID string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(io.LimitReader(f, 256<<10))
+	sc.Buffer(make([]byte, 4096), 256<<10)
+	for i := 0; i < 128 && sc.Scan(); i++ {
+		var line struct {
+			SessionID string `json:"sessionId"`
+		}
+		if json.Unmarshal(sc.Bytes(), &line) == nil && line.SessionID == sessionID {
+			return true
+		}
+	}
+	return false
 }
 
 // ParseClaude builds the neutral conversation from a transcript.
@@ -130,6 +227,7 @@ func ParseClaude(data []byte) *Conversation {
 		IsMeta      bool            `json:"isMeta"`
 		RequestID   string          `json:"requestId"`
 		AITitle     string          `json:"aiTitle"`
+		CustomTitle string          `json:"customTitle"`
 		Summary     string          `json:"summary"`
 		Message     json.RawMessage `json:"message"`
 	}
@@ -170,6 +268,9 @@ func ParseClaude(data []byte) *Conversation {
 		}
 		if l.AITitle != "" {
 			c.Title = l.AITitle
+		}
+		if l.CustomTitle != "" {
+			c.Title = l.CustomTitle
 		}
 		if !l.Timestamp.IsZero() {
 			if c.Started.IsZero() || l.Timestamp.Before(c.Started) {

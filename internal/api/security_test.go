@@ -429,7 +429,7 @@ func TestNoGETRouteLeaksAPrivateTask(t *testing.T) {
 	subst := map[string]string{
 		"{project}": h.project.ID, "{task}": started.TaskID, "{attempt}": started.AttemptID,
 		"{session}": session.ID, "{ticket}": ticket.ID, "{provider}": "google",
-		"{id}": string(h.alice.ID), "{name}": "does-not-exist",
+		"{id}": string(h.alice.ID), "{name}": "does-not-exist", "{ref}": "does-not-exist",
 	}
 	routes := []string{
 		"/v1/whoami", "/v1/projects", "/v1/projects/{project}", "/v1/projects/{project}/members",
@@ -441,6 +441,7 @@ func TestNoGETRouteLeaksAPrivateTask(t *testing.T) {
 		"/v1/projects/{project}/runners", "/v1/projects/{project}/sessions",
 		"/v1/projects/{project}/status", "/v1/projects/{project}/swarm",
 		"/v1/projects/{project}/tasks", "/v1/projects/{project}/usage",
+		"/v1/projects/{project}/external-observations",
 		"/v1/queue/{ticket}", "/v1/sessions/{session}/assignments?all=true",
 		"/v1/tasks/{task}", "/v1/tasks/{task}/attempts", "/v1/tasks/{task}/card",
 		"/v1/tasks/{task}/decisions", "/v1/tasks/{task}/handoff", "/v1/tasks/{task}/route/explain",
@@ -461,6 +462,13 @@ func TestNoGETRouteLeaksAPrivateTask(t *testing.T) {
 		// task private markers. Walked so a new GET cannot skip the privacy check.
 		"/v1/projects/{project}/secrets", "/v1/projects/{project}/secrets/export",
 		"/v1/projects/{project}/secrets/{name}",
+		// Inference endpoints and the models they serve: endpoint names and model ids, no task
+		// data. Walked so a new GET cannot skip the privacy check.
+		"/v1/projects/{project}/inference/endpoints", "/v1/projects/{project}/inference/models",
+		// Delphi delegations: refs, providers, models, token counts and labels, no task data;
+		// answers are fetched from the provider. Walked so a new GET cannot skip the check.
+		"/v1/projects/{project}/delphi", "/v1/projects/{project}/delphi/{ref}", "/v1/projects/{project}/delphi/profiles",
+		"/v1/projects/{project}/delphi/{ref}/answer",
 		// The stream is read separately below; it never ends on its own.
 	}
 	assertRoutesCovered(t, append(routes, "/v1/projects/{project}/events/stream"))

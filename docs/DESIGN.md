@@ -230,6 +230,13 @@ flowchart TB
 - explicit decisions and handoff notes;
 - hashes used for duplicate detection.
 
+An opt-in personal memory component may derive compact observations from local hook events.
+Its owner-side CLI encrypts those records into an owner-selected Redis or ElastiCache store;
+the shared API, Postgres schema, event log, backup channel, and HTTP MCP endpoint never handle
+their content. The stdio MCP gateway can search that private store on the owner's machine.
+Hooks keep raw payloads in process, omit arbitrary shell commands and sensitive paths, and
+only persist bounded tool-action metadata and assistant turn summaries.
+
 ---
 
 ## 7. Core components
@@ -2909,6 +2916,9 @@ Useful inside one harness, but insufficient across vendors, machines, and humans
 
 Rejected for privacy, security, context-volume, and provider-lock-in reasons. Explicit task cards, decisions, artifacts, and handoff bundles carry the necessary state.
 
+This does not preclude the opt-in owner-side memory described at the privacy boundary: it is
+not central transcript synchronization and cannot publish into team coordination state.
+
 ---
 
 ## 35. Relationship to OpenAI Symphony and existing harness features
@@ -2963,6 +2973,10 @@ The first pull request should contain:
 - fake runner and end-to-end test;
 - Docker Compose development environment;
 - no production model credentials or hardcoded model names.
+
+Model names stay out of code and, increasingly, out of policy files too: inference endpoints
+report what they serve and profiles may select by pattern rather than by id
+([docs/INFERENCE_ENDPOINTS.md](INFERENCE_ENDPOINTS.md)).
 
 ---
 

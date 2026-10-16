@@ -83,6 +83,10 @@ whatever is already up. In a clone of this repository, `make up` and `make down`
 `conductor doctor` checks everything at once: the control plane and its version, the
 database, `conductord`, git, Docker, and which coding tools are installed and connected.
 
+For a shared leader with local Postgres or Amazon RDS, and workers connecting through
+UPnP or Tailscale, see [leader deployment](docs/LEADER.md). `conductor leader` starts the
+leader here even when its advertised URL is remote; workers need only API credentials.
+
 ### Getting help
 
 ```bash
@@ -218,7 +222,14 @@ T-42 would route to:
 A dispatch candidate can never route *below* a hard floor: a security-sensitive task keeps its
 T4 floor whatever the ladder says. `conductor policy lint` validates the whole file — unknown
 facts, undefined lanes, malformed expressions — and `conductor models discover` finds the local
-models (Ollama today) worth adding to the ladder.
+model servers (Ollama, LM Studio, vLLM) worth adding to the ladder.
+
+Model ids need not be typed at all: register the inference APIs you use
+(`conductor models endpoints add anthropic`) and a profile that says
+`select: {endpoint: anthropic, match: ["claude-sonnet-*"]}` follows the newest matching model the
+provider lists, so a new release is adopted without editing a file. The dashboard's Fleet page
+has the same, with a dropdown of discovered models on every catalog profile.
+[docs/INFERENCE_ENDPOINTS.md](docs/INFERENCE_ENDPOINTS.md) has the details.
 
 ### Budgets bound the team, not the person
 
@@ -297,6 +308,9 @@ the event payload passes an allowlist, and the harness stream adapters drop assi
 the parse boundary before it can reach the store. Three tests assert this mechanically:
 `TestNoTranscriptFieldsInSharedTypes`, `TestNoTranscriptColumnsInSchema`, and
 `TestEventTypeHasNoContentField`.
+
+Optional personal memory has a separate Redis connection in the local CLI/MCP process. It
+does not add content columns to the team database or publish observations as task events.
 
 ---
 
@@ -700,6 +714,7 @@ conductor sessions save all                               # keep every session r
 conductor usage --by day,harness                          # tokens and cost over time, across claude/codex/opencode
 conductor sessions export                                 # the project's session history, as JSON
 conductor sessions install-hook                          # capture every session at shutdown (systemd/launchd)
+conductor systemd install --with-vllm qwen               # user units for postgres + conductord (+ vLLM), images pre-pulled
 conductor backup push | pull | status                    # copy this machine's resume records to/from S3
 conductor checkpoint capture --note "tests pass"         # snapshot a session: transcript + working tree, portable
 conductor checkpoint resume 9a474a --account work        # continue it under another login, or --harness codex
@@ -709,7 +724,12 @@ conductor github issues enable --label conductor          # labelled GitHub issu
 conductor integrate cursor                                # wire a coding tool to this project (MCP + hooks)
 conductor route T-42                                      # what would this route to, and why — before spending a token
 conductor dispatch T-42                                   # send work to a model by policy, through the queue
-conductor models                                          # the model catalog; `models discover` finds local ones
+conductor models                                          # the model catalog (profiles marked "auto" follow discovery)
+conductor models endpoints add anthropic                  # connect an inference API; its models are discovered, not typed
+conductor delphi ask --task T-42 "Is this sound? ..."      # delegate to a frontier model via a batch API (half price, answered later)
+conductor models available --new                          # models the endpoints started serving this week
+conductor models pin worker.general claude <model>        # choose a model yourself; `unpin` returns it to discovery
+conductor models discover                                 # find Ollama / LM Studio / vLLM on this machine
 conductor policy lint                                     # validate .conductor/ policy and dispatch rules
 conductor swarm                                           # the team's pooled capacity and who has budget to share
 conductor queue                                           # the admission line when the team is at capacity
@@ -1013,6 +1033,34 @@ fresh record — save again if it should survive the next reboot too. Saving is 
 touches nothing on the server; `conductor sessions export` is the other direction — the
 project's whole session history, everyone's, as a JSON file.
 
+### One button back — and onto a fresh account
+
+The dashboard's Overview page has a **Resume all sessions** button: one POST to
+`/v1/local/resume-all` does what `conductor resume` does — wake every paused or saved
+session on the machine, reopening the terminals a restart took away — after first moving any
+harness off an account that has run out of usage. The endpoint only exists on a control
+plane running on the machine with the terminals (`conductord` on the laptop); the sessions
+and the accounts it touches are that machine's.
+
+Accounts are named snapshots of a harness's own login, kept under `~/.conductor/accounts/`:
+
+```bash
+conductor accounts add claude main       # snapshot the login the harness is using now
+conductor accounts list                 # profiles, which is active, quota markers
+conductor accounts switch claude backup # make another account the live one
+conductor accounts exhaust claude main  # mark an account out of usage
+conductor accounts ok claude main       # window rolled over: usable again
+```
+
+Add accounts by logging in with the harness itself, then snapshotting — Conductor never
+performs a harness's login dance, it only moves credential files it can already read.
+Which account is live is read from the harness's own credential file, never tracked
+separately, so it cannot drift. `exhaust` drops a marker beside the profile; the
+resume-all button (and only it) avoids marked accounts when waking sessions — switching
+before resuming, because a harness reads its credentials at startup. Clear the marker with
+`ok` when the quota window rolls over. Nothing is sent anywhere: profiles live beside the
+machine's other local state, `0600`, like the credentials themselves.
+
 ### Surviving a shutdown, and the machine itself
 
 You should not have to remember to run `save` before a reboot. Three layers make a shutdown
@@ -1068,6 +1116,14 @@ step. The `CONDUCTOR_BACKUP_S3_*` variables above still work and take precedence
 conductor storage set --bucket my-team-conductor --region us-east-1 --auth profile --profile dev
 conductor storage test
 ```
+
+**The database, durable in the same bucket.** Postgres stays local and fast;
+`conductor db archiving --data-dir … --write` points its `archive_command` at Conductor, so
+every WAL segment reaches the bucket as it fills (at least once a minute), sealed with your
+passphrase. `conductor db base-backup` streams a base backup and prunes old ones. On another
+machine, `conductor db restore --data-dir …` rebuilds the database to the last archived
+segment, or to any moment with `--target-time`. See `conductor db status` and
+[docs/STORAGE.md](docs/STORAGE.md#the-database).
 
 Wrapped sessions stay honest with the team while paused: the sidecar keeps heartbeating as
 `waiting_for_input`, so presence shows a parked session that is not offered work, rather than
@@ -1250,6 +1306,56 @@ it, and `url` a dashboard link when conductord has a public `--public-url`.
 
 ---
 
+### Private memory and Redis
+
+Conductor can retain compact observations from coding sessions in a Redis store you control.
+This feature is **off until configured**. The local `conductor` process encrypts every record
+with AES-GCM before sending it to Redis and HMACs project and search-index keys. The shared
+Conductor API, Postgres database, event stream, S3 resume backup, and HTTP MCP endpoint never
+receive memory content. Keep `~/.conductor/memory.key` (mode 0600) to read the records again;
+for a second machine, copy that key and `memory.json` securely or provide the same base64 key
+through `CONDUCTOR_MEMORY_KEY` and the same `CONDUCTOR_MEMORY_NAMESPACE`. Automatic
+project scoping uses the local Git common directory, so registered worktrees share notes
+without trusting a repository's `project.yaml` ID. Set `CONDUCTOR_MEMORY_PROJECT` to a
+user-chosen stable name on each machine if you want the same project scope across machines.
+
+```bash
+# Redis on this machine. Start Redis separately with your preferred persistence settings.
+conductor memory configure --local
+conductor memory status
+
+# ElastiCache/Valkey or another TLS Redis. Pipe the URL from your secret manager to stdin.
+conductor memory configure --url-stdin --cluster   # cluster-mode configuration endpoint
+# Omit --cluster for a primary endpoint in cluster mode disabled.
+
+conductor integrate claude      # refresh capture and recall hooks
+conductor integrate codex       # adds project .codex/hooks.json; review/trust with /hooks
+conductor integrate opencode    # refreshes the local plugin
+
+conductor memory search 'index calculus'
+conductor memory timeline <observation-id>
+conductor memory show <observation-id>
+conductor memory forget <observation-id>
+conductor memory disable        # stops capture; keeps existing records and key
+```
+
+Use `redis://127.0.0.1:6379/0` for the local server. A remote address must use `rediss://`;
+TLS certificate verification stays on. For ElastiCache, the client must be able to reach the
+cache inside its VPC or through your network path, and a cluster-mode configuration endpoint
+needs `--cluster`. `CONDUCTOR_MEMORY_REDIS_URL` can override the saved URL at runtime for
+credential rotation. Redis persistence or ElastiCache snapshots remain your responsibility.
+
+Claude Code and Codex hooks capture bounded tool actions and the assistant's final turn
+summary, then inject a small project-scoped selection of earlier summaries and explicit notes
+at session start and on new prompts. OpenCode captures tool actions and injects recent context
+through its plugin. Retrieved observations are quoted as untrusted historical data. Hook capture
+skips sensitive file paths and arbitrary shell commands, never retains raw tool input or
+output, and fails open if Redis is unavailable. `conductor memory remember` accepts a note on
+stdin for explicit decisions. The local stdio MCP gateway exposes `memory_search`,
+`memory_timeline`, `memory_get`, and `memory_remember`; the HTTP MCP gateway does not.
+
+---
+
 ## How it holds together
 
 ```
@@ -1302,6 +1408,9 @@ Implemented and exercised by tests:
 - Conflict graph: scope overlap, duplicate intent, merge risk, with join/wait/split advice.
 - Presence, event log with gapless per-aggregate sequencing, SSE stream, live dashboard.
 - REST API, MCP gateway, CLI, session wrapper with heartbeat sidecar.
+- Delphi: delegation of prompts to frontier models through the Anthropic and OpenAI batch
+  APIs, with vault keys, spend in the usage ledger, and no request text or answer stored
+  ([docs/DELPHI.md](docs/DELPHI.md)).
 - Scheduler: reconcile (with outage recovery, so a control-plane outage does not reclaim
   live work), session reaping, stall detection, dependency gating, budget events announced
   once per threshold crossing, and retention.
@@ -1553,7 +1662,7 @@ that produced it.
 |---|---|
 | `.conductor/project.yaml` | lease TTLs, heartbeat cadence, visibility defaults, isolation |
 | `.conductor/policies.yaml` | conflict matrix, duplicate thresholds, hard routing rules, budgets |
-| `.conductor/models.yaml` | model aliases (roles), capability floors, concrete profiles |
+| `.conductor/models.yaml` | model aliases (roles), capability floors, profiles — each a fixed model or a `select` that [follows discovery](docs/INFERENCE_ENDPOINTS.md) |
 | `.conductor/WORKFLOW.md` | the prose contract every agent reads; required checks; protected scopes |
 
 **These files are code, not just settings, wherever a `conductor worker` runs.** The harness

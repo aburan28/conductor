@@ -22,7 +22,9 @@ import (
 
 	"github.com/aburan28/conductor/internal/coord"
 	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/delphi/hosted"
 	"github.com/aburan28/conductor/internal/domain"
+	"github.com/aburan28/conductor/internal/modelsrc"
 	"github.com/aburan28/conductor/internal/notify"
 	"github.com/aburan28/conductor/internal/peer"
 	"github.com/aburan28/conductor/internal/secrets"
@@ -58,12 +60,19 @@ type Server struct {
 	notify *notify.Notifier
 	// secrets is the project secret vault; nil serves its routes as not configured.
 	secrets *secrets.Vault
+	// models discovers what inference endpoints serve; nil serves its routes as not configured.
+	models *modelsrc.Service
+	// delphi delegates prompts to frontier models through batch APIs; nil serves its routes
+	// as not configured (delphi.go).
+	delphi *hosted.Service
 	// ops is the operational surface: lifetime context, background work, streams (observe.go).
 	ops *opsState
 	// sso is single sign-on; it has no providers when none are configured (sso.go).
 	sso *ssoState
 	// admin is organization policy and the config file's locks (admin*.go).
 	admin *adminState
+	// localResume is the machine-local resume hook; nil disables the endpoint.
+	localResume func() (any, error)
 }
 
 type Options struct {
@@ -90,6 +99,10 @@ type Options struct {
 	Notify *notify.Notifier
 	// Secrets is the project secret vault (secrets.go). Nil disables it.
 	Secrets *secrets.Vault
+	// Models is model discovery for inference endpoints (inference.go). Nil disables it.
+	Models *modelsrc.Service
+	// Delphi is batch delegation to frontier models (delphi.go). Nil disables it.
+	Delphi *hosted.Service
 	// Ops configures metrics, request deadlines, stream caps and the server lifetime
 	// (observe.go).
 	Ops OpsOptions
@@ -98,6 +111,10 @@ type Options struct {
 	// Admin configures organization policy: the config file's locks and the effective
 	// configuration the admin area shows (admin*.go).
 	Admin AdminOptions
+	// LocalResume is the machine-local, one-button reboot recovery: switch off
+	// exhausted harness accounts, then wake every paused or saved session. Nil
+	// disables the endpoint (e.g. for control planes not running on a laptop).
+	LocalResume func() (any, error)
 }
 
 func New(store *db.Store, svc *coord.Service, opts Options) *Server {
@@ -121,10 +138,15 @@ func New(store *db.Store, svc *coord.Service, opts Options) *Server {
 		sso:         newSSOState(opts.SSO, opts.SelfEndpoint),
 		notify:      opts.Notify,
 		secrets:     opts.Secrets,
+		models:      opts.Models,
+		delphi:      opts.Delphi,
 		admin:       newAdminState(opts.Admin),
+		localResume: opts.LocalResume,
 	}
 	s.ops = newOpsState(store, s, opts.Ops)
 	s.routes()
+	s.mux.HandleFunc("POST /v1/projects/{project}/external-observations", s.authenticate(s.recordExternalObservation))
+	s.mux.HandleFunc("GET /v1/projects/{project}/external-observations", s.authenticate(s.listExternalObservations))
 	s.opsRoutes(s.mux)
 	return s
 }

@@ -101,6 +101,10 @@ func Suggest(snaps []Snapshot, harness, account string, t Thresholds, now time.T
 		if !Resumable[l.Harness] || seen[l.Harness+"\x00"+l.Account] {
 			continue
 		}
+		if l.StateDir != "" && Identity(l.Harness, l.StateDir, home).Key != "" &&
+			AccountKey(l.Harness, l.StateDir, home) != l.Account {
+			continue // an old reading belongs to different credentials in this directory
+		}
 		seen[l.Harness+"\x00"+l.Account] = true
 		if l.Headroom != nil && *l.Headroom > 0 && l.Level != LevelExhausted {
 			known = append(known, l)
@@ -134,7 +138,7 @@ func Suggest(snaps []Snapshot, harness, account string, t Thresholds, now time.T
 	// Nothing has reported; offer a login that exists, same tool first.
 	for _, h := range []string{harness, "claude", "codex"} {
 		for _, dir := range AccountDirs(h, home, getenv) {
-			label := AccountLabel(h, dir, home)
+			label := AccountKey(h, dir, home)
 			if seen[h+"\x00"+label] {
 				continue
 			}

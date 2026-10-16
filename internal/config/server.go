@@ -31,20 +31,23 @@ import (
 // so the file can be committed, templated and reviewed like any other.
 type ServerFile struct {
 	// Version is 1. A file without it is refused, so a future format is never misread.
-	Version       int               `yaml:"version"`
-	Server        ServerSection     `yaml:"server"`
-	Database      DatabaseSection   `yaml:"database"`
-	Retention     RetentionSection  `yaml:"retention"`
-	Metrics       MetricsSection    `yaml:"metrics"`
-	Notifications NotifySection     `yaml:"notifications"`
-	SSO           SSOSection        `yaml:"sso"`
-	Features      map[string]bool   `yaml:"features"`
-	Branding      BrandingSection   `yaml:"branding"`
-	Policy        admin.Patch       `yaml:"policy"`
-	Path          string            `yaml:"-"`
-	logo          *admin.Logo       `yaml:"-"`
-	providers     []sso.Config      `yaml:"-"`
-	resolved      map[string]string `yaml:"-"`
+	Version        int                   `yaml:"version"`
+	Server         ServerSection         `yaml:"server"`
+	Database       DatabaseSection       `yaml:"database"`
+	NAT            NATSection            `yaml:"nat"`
+	Retention      RetentionSection      `yaml:"retention"`
+	Metrics        MetricsSection        `yaml:"metrics"`
+	Notifications  NotifySection         `yaml:"notifications"`
+	ModelDiscovery ModelDiscoverySection `yaml:"model_discovery"`
+	Delphi         DelphiSection         `yaml:"delphi"`
+	SSO            SSOSection            `yaml:"sso"`
+	Features       map[string]bool       `yaml:"features"`
+	Branding       BrandingSection       `yaml:"branding"`
+	Policy         admin.Patch           `yaml:"policy"`
+	Path           string                `yaml:"-"`
+	logo           *admin.Logo           `yaml:"-"`
+	providers      []sso.Config          `yaml:"-"`
+	resolved       map[string]string     `yaml:"-"`
 }
 
 // ServerSection is where and how conductord listens.
@@ -61,11 +64,23 @@ type ServerSection struct {
 
 // DatabaseSection names the database by reference, and bounds statements.
 type DatabaseSection struct {
+	Mode             string          `yaml:"mode"`
 	URLEnv           string          `yaml:"url_env"`
 	URLFile          string          `yaml:"url_file"`
 	URL              string          `yaml:"url"`
 	StatementTimeout *admin.Duration `yaml:"statement_timeout"`
 	LockTimeout      *admin.Duration `yaml:"lock_timeout"`
+}
+
+// NATSection configures connectivity for the leader's API. Database ports are never
+// mapped. Tailscale uses a local tailscaled installation for traversal and relay.
+type NATSection struct {
+	Mode         string          `yaml:"mode"`
+	InternalIP   string          `yaml:"internal_ip"`
+	ExternalPort *int            `yaml:"external_port"`
+	Lease        *admin.Duration `yaml:"lease"`
+	Timeout      *admin.Duration `yaml:"timeout"`
+	HTTPSPort    *int            `yaml:"https_port"`
 }
 
 // RetentionSection bounds how long history is kept (docs/OPERATIONS.md, "Retention").
@@ -90,6 +105,17 @@ type NotifySection struct {
 	AllowPrivateNetworks *bool           `yaml:"allow_private_networks"`
 	AllowHTTP            *bool           `yaml:"allow_http"`
 	Proxy                string          `yaml:"proxy"`
+}
+
+// ModelDiscoverySection configures the background refresh of inference endpoints.
+type ModelDiscoverySection struct {
+	Interval *admin.Duration `yaml:"interval"`
+}
+
+// DelphiSection configures delphi, batch delegation to frontier models (docs/DELPHI.md).
+type DelphiSection struct {
+	// Interval is how often open delegations are checked; negative disables delphi.
+	Interval *admin.Duration `yaml:"interval"`
 }
 
 // SSOSection configures single sign-on.
@@ -224,6 +250,16 @@ func ParseServerFile(body []byte, getenv func(string) string, dir string) (*Serv
 	}
 
 	s := sf.Server
+	switch sf.Database.Mode {
+	case "", "local", "external", "rds":
+	default:
+		add("database.mode must be local, external or rds, not %q", sf.Database.Mode)
+	}
+	switch sf.NAT.Mode {
+	case "", "off", "upnp", "tailscale":
+	default:
+		add("nat.mode must be off, upnp or tailscale, not %q", sf.NAT.Mode)
+	}
 	switch s.SecurityMode {
 	case "", "local", "enhanced":
 	default:
@@ -409,6 +445,13 @@ func (sf *ServerFile) FlagValues() map[string]string {
 	str("tls-key", s.TLSKey)
 	str("secret-key-file", s.SecretKeyFile)
 	str("dsn", sf.resolved["dsn"])
+	str("database", sf.Database.Mode)
+	str("nat-mode", sf.NAT.Mode)
+	str("nat-internal-ip", sf.NAT.InternalIP)
+	num("nat-external-port", sf.NAT.ExternalPort)
+	dur("nat-lease", sf.NAT.Lease)
+	dur("nat-timeout", sf.NAT.Timeout)
+	num("nat-https-port", sf.NAT.HTTPSPort)
 	dur("db-statement-timeout", sf.Database.StatementTimeout)
 	dur("db-lock-timeout", sf.Database.LockTimeout)
 	num("retention-days", sf.Retention.EventsDays)
@@ -421,6 +464,8 @@ func (sf *ServerFile) FlagValues() map[string]string {
 	boolean("notify-allow-private-networks", sf.Notifications.AllowPrivateNetworks)
 	boolean("notify-allow-http", sf.Notifications.AllowHTTP)
 	str("notify-proxy", sf.Notifications.Proxy)
+	dur("model-discovery-interval", sf.ModelDiscovery.Interval)
+	dur("delphi-interval", sf.Delphi.Interval)
 	dur("sso-token-ttl", sf.SSO.TokenTTL)
 	str("sso-auto-provision", sf.SSO.AutoProvision)
 	str("sso-default-project", sf.SSO.DefaultProject)

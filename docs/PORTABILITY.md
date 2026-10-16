@@ -114,6 +114,55 @@ conductor checkpoint resume latest --harness codex
 Codex cannot read a Claude Code transcript (and the reverse), so it starts from the
 continuation. The native transcript is still in the bundle for a same-harness resume later.
 
+### Migrate live Claude Code chats to Codex
+
+`conductor checkpoint migrate` inventories native Claude Code transcripts by exact session
+ID and path, including Claude Desktop remote-control mirrors in `projects/ssh-*/`. It reads
+the default `~/.claude` directory and existing `~/.claude-*` directories; repeat
+`--source-state-dir` to select other locations. Inventory reports the title, source working
+directory, last transcript activity, SHA-256, and status. Status is `unknown` unless the
+source ID matches a local Conductor process record; a recent transcript write by itself is
+not proof that a session is still running. A fork can contain its parent session ID in its
+history; the inventory records that embedded ID while keeping the fork's filename ID as
+its own identity. Top-level `agent-*.jsonl` files are included in the parent checkpoint,
+not counted as separate chats. An unreadable or malformed main transcript appears as a
+problem row and makes the batch command fail rather than disappear from the count.
+
+```
+conductor checkpoint migrate --all --since 2026-10-16 --json
+conductor checkpoint migrate --session UUID --dir /path/to/checkout --codex-home /path/to/codex-state --execute
+conductor checkpoint migrate --all --map /old/root=/new/root --execute --json
+```
+
+`--execute` takes a checkpoint of each exact transcript and starts a **separate** Codex
+thread for each. The first Codex turn reads the continuation and reports its understanding
+of the current task without editing. Conductor waits for that turn to complete, then uses
+a fresh app-server process to check that the thread can be resumed. The local owner-only
+receipt under `~/.conductor/migrations/` binds the source path, transcript hash, and
+sidecar-file digest to the
+checkpoint hash, target directory, Codex thread ID, and result. When the source workspace
+is available, a distinct target checkout must already exist and be clean. Conductor
+restores the checkpoint's Git commit, tracked patch, and captured untracked files there
+before Codex starts, and refuses a checkpoint whose workspace layer was skipped. Repeating the command for
+the same source snapshot verifies and reuses its target. A source append gets a new hash
+and therefore a new snapshot and receipt; a changed agent or tool sidecar does too. A batch reports every row, including failures,
+and exits nonzero if any selected conversation did not reach a resumable Codex thread.
+
+The source Claude session keeps running. Migration does not transfer live process state or
+make the native Claude transcript into a native Codex transcript. The full original
+transcript remains in the checkpoint; the Codex thread starts with a bounded continuation
+and a pointer to that checkpoint. If the source continues after capture, its later work is
+outside that snapshot; inventory again and migrate the newer snapshot if needed. A remote
+Desktop mirror may have a working directory that does not exist on this machine. Run the
+command on the source host to include its workspace, or explicitly pass `--transcript-only`
+and `--dir` (or `--map`) to mark the workspace gap. Use a distinct target checkout for
+sessions that will write concurrently.
+
+`--capture-only` records the source snapshots and receipts without opening Codex threads;
+the same selection with `--execute` continues them later. These files contain private
+conversation material and remain on the machine that ran the command. Run the inventory
+on every machine with Claude sessions before claiming that `--all` covers the fleet.
+
 ## Formats this build understands
 
 | Harness | Located by | Parsed records |

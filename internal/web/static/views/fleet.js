@@ -4,22 +4,25 @@ import { card, empty, kpi } from '../components/ui.js';
 import { pill, chip, chips, tierChip, effortChip } from '../components/pill.js';
 import { table } from '../components/table.js';
 import { relTime } from '../lib/format.js';
+import { loadDiscovery, endpointsCard, modelPicker } from './models.js';
 
 export default defineView({
   title: 'Fleet',
   async load(ctx) {
     // Mesh peering is a feature an organization turns on (Admin → Features).
     const mesh = !!(ctx.org && ctx.org.features && ctx.org.features.mesh);
-    const [caps, runners, models, peers] = await settle([
+    const [caps, runners, models, peers, disc] = await settle([
       ctx.api.get(ctx.api.project(ctx.project, '/capabilities')),
       ctx.api.get(ctx.api.project(ctx.project, '/runners')),
       ctx.api.get(ctx.api.project(ctx.project, '/models')),
       mesh ? ctx.api.get('/v1/peers') : Promise.resolve(null),
+      loadDiscovery(ctx, settle),
     ]);
     return { inv: (caps && caps.inventory) || {}, sessions: (caps && caps.sessions) || [], runners: (runners && runners.runners) || [],
-      profiles: (models && models.profiles) || [], peers: peers ? peers.peers || [] : null };
+      profiles: (models && models.profiles) || [], peers: peers ? peers.peers || [] : null,
+      disc: disc || { endpoints: null, presets: [], available: [] } };
   },
-  draw({ inv, sessions, runners, profiles, peers }, ctx) {
+  draw({ inv, sessions, runners, profiles, peers, disc }, ctx, { refresh }) {
     const kpis = h('div', { class: 'kpis' },
       kpi({ label: 'Sessions accepting', value: inv.available || 0, unit: `of ${inv.sessions || 0}` }),
       kpi({ label: 'Ceiling tier', value: inv.max_tier || '—', kind: 'accent', sub: 'highest tier accepting work' }),
@@ -67,13 +70,16 @@ export default defineView({
       h('div', { class: 'row' },
         h('div', { class: 'who', style: { minWidth: '170px' } }, h('span', { class: 'mono' }, alias), h('small', {}, `${list.length} profile${list.length === 1 ? '' : 's'}`)),
         h('div', { class: 'what' }, list.map(p => h('div', { class: 'chips', style: { marginBottom: '4px' } },
-          chip(p.model || '(no model id)', { kind: p.enabled ? '' : 'warn' }), chip(p.harness, { mono: false }), p.provider ? chip(p.provider, { mono: false }) : null, tierChip(p.tier),
+          chip(p.model || (p.select ? '(awaiting discovery)' : '(no model id)'), { kind: p.enabled ? '' : 'warn' }), chip(p.harness, { mono: false }),
+          p.pinned ? chip('pinned', { kind: 'info', mono: false, title: 'A person chose this model; discovery leaves it alone' })
+            : p.select ? chip('auto · ' + p.select.endpoint, { kind: 'ok', mono: false, title: `Follows the newest ${p.select.match.join(', ')} that ${p.select.endpoint} serves` }) : null, p.provider ? chip(p.provider, { mono: false }) : null, tierChip(p.tier),
           p.reasoning_effort ? chip('effort ' + p.reasoning_effort, { mono: false }) : null,
           p.input_cost_per_mtok != null ? chip(`$${p.input_cost_per_mtok}/${p.output_cost_per_mtok ?? '?'} per Mtok`, { mono: false }) : chip(p.billing || 'tokens', { mono: false }),
           ...(p.capabilities || []).map(c => chip(c, { mono: false, kind: 'info' })),
-          !p.enabled ? chip('disabled', { kind: 'danger', mono: false }) : null))))))
+          !p.enabled ? chip('disabled', { kind: 'danger', mono: false }) : null,
+          modelPicker(p, disc, ctx, refresh)))))))
       : empty('The catalog is empty. Declare profiles in .conductor/models.yaml and re-run bootstrap.', 'conductor models'),
-      footer: 'Aliases are roles (worker.fast, planner.frontier); profiles bind them to a concrete model on a harness. Policies name aliases, never models.' });
+      footer: 'Aliases are roles (worker.fast, planner.frontier); profiles bind them to a concrete model on a harness. Policies name aliases, never models. "auto" profiles follow what their endpoint serves; the dropdown pins a model instead.' });
 
     const peersCard = peers ? card({ title: 'Mesh peers', flush: true, body: peers.length ? table({ caption: 'Peer links', columns: [
       { key: 'name', label: 'Peer' },
@@ -81,8 +87,8 @@ export default defineView({
       { key: 'rtt_ms', label: 'Round trip', num: true, render: p => p.rtt_ms ? p.rtt_ms + ' ms' : '—' },
       { key: 'last_check', label: 'Checked', render: p => relTime(p.last_check), sort: p => new Date(p.last_check) },
       { key: 'last_error', label: 'Problem', render: p => p.last_error || '' },
-    ], rows: peers }) : empty('This daemon has no peers. Peering joins daemons on other machines into one view of the work.', 'conductord --peer-ca ca.pem --peer-cert me.pem --peer-key me.key --peer NAME=URL') }) : null;
+    ], rows: peers }) : empty('This daemon has no peer links. Peering reports another daemon’s identity and reachability; shared tasks require one control plane or replicas using the same PostgreSQL database.', 'See docs/REMOTE_ACCESS.md for tailnet and peer setup.') }) : null;
 
-    return h('div', { class: 'stack', style: { gap: '20px' } }, kpis, modelsLive, sessionCard, runnersCard, peersCard, catalog);
+    return h('div', { class: 'stack', style: { gap: '20px' } }, kpis, modelsLive, sessionCard, runnersCard, peersCard, endpointsCard(disc, ctx, refresh), catalog);
   },
 });

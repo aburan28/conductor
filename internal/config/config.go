@@ -235,6 +235,20 @@ type ProfileSpec struct {
 	OutputCostPerMTok *float64 `yaml:"output_cost_per_mtok"`
 	Billing           string   `yaml:"billing"`
 	Enabled           *bool    `yaml:"enabled"`
+	// Select names the models this profile wants instead of one fixed id. Discovery picks the
+	// newest model the named inference endpoint serves that fits, so a new release is adopted
+	// without editing this file. `model`, if also given, is the fallback until the first
+	// refresh succeeds.
+	Select *SelectSpec `yaml:"select"`
+}
+
+// SelectSpec mirrors domain.ModelSelector in models.yaml.
+type SelectSpec struct {
+	Endpoint string   `yaml:"endpoint"`
+	Match    []string `yaml:"match"`
+	Exclude  []string `yaml:"exclude"`
+	Pick     string   `yaml:"pick"`
+	Prefix   string   `yaml:"prefix"`
 }
 
 // WorkflowFile is WORKFLOW.md: YAML frontmatter plus prose.
@@ -457,13 +471,23 @@ func ScopePolicyFrom(c domain.ProjectConfig) resource.Policy {
 // design forbids hardcoding provider model names we have not verified (§36), so the shipped
 // codex and opencode entries are declarations an operator fills in, not defaults.
 func (b Bundle) ModelProfiles(orgID domain.ID) []domain.ModelProfile {
+	return b.ModelProfilesFor(orgID, "")
+}
+
+// ModelProfilesFor is ModelProfiles for a profile set loaded into one project: a profile
+// that selects its model searches that project's inference endpoints.
+//
+// A profile with a selector is kept even with no model id, since discovery supplies it; it
+// cannot be routed to until then (the router skips profiles without a model).
+func (b Bundle) ModelProfilesFor(orgID, projectID domain.ID) []domain.ModelProfile {
 	var out []domain.ModelProfile
 	for _, spec := range b.Models.Profiles {
-		enabled := spec.Model != ""
+		selects := spec.Select != nil
+		enabled := spec.Model != "" || selects
 		if spec.Enabled != nil {
-			enabled = *spec.Enabled && spec.Model != ""
+			enabled = *spec.Enabled && (spec.Model != "" || selects)
 		}
-		if spec.Model == "" {
+		if spec.Model == "" && !selects {
 			continue
 		}
 		tier := spec.Tier
@@ -487,7 +511,7 @@ func (b Bundle) ModelProfiles(orgID domain.ID) []domain.ModelProfile {
 		if billing == "" {
 			billing = "tokens"
 		}
-		out = append(out, domain.ModelProfile{
+		profile := domain.ModelProfile{
 			OrganizationID:    orgID,
 			Alias:             spec.Alias,
 			Harness:           spec.Harness,
@@ -502,7 +526,14 @@ func (b Bundle) ModelProfiles(orgID domain.ID) []domain.ModelProfile {
 			Billing:           billing,
 			Enabled:           enabled,
 			CatalogVersion:    b.ModelsSHA,
-		})
+		}
+		if selects {
+			profile.Select = &domain.ModelSelector{
+				Endpoint: spec.Select.Endpoint, Match: spec.Select.Match, Exclude: spec.Select.Exclude,
+				Pick: spec.Select.Pick, Prefix: spec.Select.Prefix, ProjectID: projectID,
+			}
+		}
+		out = append(out, profile)
 	}
 	return out
 }

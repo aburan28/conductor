@@ -106,15 +106,15 @@ func Collect(ctx context.Context, opts Options) Result {
 	for _, dir := range AccountDirs("codex", o.Home, o.Getenv) {
 		dir := dir
 		run(CollectorStatus{Name: "codex-rollout", Harness: "codex", Kind: KindLocalFile, Enabled: true,
-			Account: AccountLabel("codex", dir, o.Home)}, func() ([]Snapshot, error) {
-			return ReadCodex(dir, AccountLabel("codex", dir, o.Home), now), nil
+			Account: AccountKey("codex", dir, o.Home)}, func() ([]Snapshot, error) {
+			return ReadCodex(dir, AccountKey("codex", dir, o.Home), now), nil
 		})
 	}
 	for _, dir := range AccountDirs("claude", o.Home, o.Getenv) {
 		dir := dir
 		run(CollectorStatus{Name: "claude-transcript", Harness: "claude", Kind: KindLocalFile, Enabled: true,
-			Account: AccountLabel("claude", dir, o.Home)}, func() ([]Snapshot, error) {
-			return ReadClaudeTranscripts(dir, AccountLabel("claude", dir, o.Home), now), nil
+			Account: AccountKey("claude", dir, o.Home)}, func() ([]Snapshot, error) {
+			return ReadClaudeTranscripts(dir, AccountKey("claude", dir, o.Home), now), nil
 		})
 	}
 

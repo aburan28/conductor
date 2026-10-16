@@ -36,10 +36,14 @@ import (
 	"github.com/aburan28/conductor/internal/config"
 	"github.com/aburan28/conductor/internal/coord"
 	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/delphi/hosted"
 	"github.com/aburan28/conductor/internal/domain"
 	"github.com/aburan28/conductor/internal/githubapp"
+	"github.com/aburan28/conductor/internal/modelsrc"
+	"github.com/aburan28/conductor/internal/nat"
 	"github.com/aburan28/conductor/internal/notify"
 	"github.com/aburan28/conductor/internal/peer"
+	"github.com/aburan28/conductor/internal/resume"
 	"github.com/aburan28/conductor/internal/scheduler"
 	"github.com/aburan28/conductor/internal/secretbox"
 	"github.com/aburan28/conductor/internal/secrets"
@@ -77,6 +81,8 @@ func main() {
 // serveConfig is everything serve reads from its flags and environment, validated.
 type serveConfig struct {
 	addr, dsn         string
+	databaseMode      string
+	nat               nat.Options
 	tick, detect      time.Duration
 	tickTimeout       time.Duration
 	outageAfter       time.Duration
@@ -102,6 +108,8 @@ type serveConfig struct {
 	secretKeyFile     string
 	secretKeyEnv      string
 	notifyPoll        time.Duration
+	modelDiscovery    time.Duration
+	delphiInterval    time.Duration
 	notifyNetwork     notify.NetworkPolicy
 	verbose           bool
 	// sso is single sign-on, with its providers built from --sso-provider.
@@ -154,6 +162,16 @@ func parseServeConfigMode(args []string, output io.Writer, checkOnly bool) (*ser
 			"its features, branding and policy sections lock those settings for every organization")
 	fs.StringVar(&c.addr, "addr", envOr("CONDUCTOR_ADDR", "127.0.0.1:8080"), "listen address")
 	fs.StringVar(&c.dsn, "dsn", envOr("DATABASE_URL", ""), "PostgreSQL connection string")
+	fs.StringVar(&c.databaseMode, "database", envOr("CONDUCTOR_DATABASE_MODE", "external"),
+		"database mode: local, external, or rds (RDS requires verified TLS and a CA bundle)")
+	fs.StringVar(&c.nat.Mode, "nat-mode", envOr("CONDUCTOR_NAT_MODE", "off"),
+		"API connectivity: off, upnp (router mapping), or tailscale (private HTTPS with traversal and relay)")
+	fs.StringVar(&c.nat.InternalIP, "nat-internal-ip", envOr("CONDUCTOR_NAT_INTERNAL_IP", ""),
+		"LAN IPv4 address to map with UPnP (default: route to the gateway)")
+	fs.IntVar(&c.nat.ExternalPort, "nat-external-port", 0, "UPnP external TCP port (default: API listen port)")
+	fs.DurationVar(&c.nat.Lease, "nat-lease", 30*time.Minute, "UPnP mapping lease, renewed while running")
+	fs.DurationVar(&c.nat.Timeout, "nat-timeout", 5*time.Second, "timeout for one NAT discovery or control operation")
+	fs.IntVar(&c.nat.HTTPSPort, "nat-https-port", 443, "Tailscale Serve HTTPS port (must be unused)")
 	fs.DurationVar(&c.tick, "tick", 2*time.Second, "scheduler tick interval")
 	fs.DurationVar(&c.detect, "detect-every", 15*time.Second, "conflict graph recomputation interval")
 	fs.DurationVar(&c.tickTimeout, "tick-timeout", 30*time.Second, "longest one scheduler pass may run before it is cancelled")
@@ -218,6 +236,10 @@ func parseServeConfigMode(args []string, output io.Writer, checkOnly bool) (*ser
 		"key that seals secrets conductord stores in the database (the GitHub App's private key); created 0600 on first use. "+
 			"Every replica must use the same key. Default: secret.key in CONDUCTOR_STATE_DIR or ~/.conductor. "+
 			secretbox.EnvKey+" (the base64 key itself) takes precedence")
+	fs.DurationVar(&c.modelDiscovery, "model-discovery-interval", time.Hour,
+		"how often inference endpoints are asked which models they serve, so new releases appear in the catalog without anyone editing it (negative disables the background refresh; endpoints can still be refreshed on request)")
+	fs.DurationVar(&c.delphiInterval, "delphi-interval", time.Minute,
+		"how often open delphi delegations are checked with their provider's batch API (negative disables delphi: its routes answer not configured)")
 	fs.DurationVar(&c.notifyPoll, "notify-poll", 3*time.Second,
 		"how often the notification relay sends undelivered events to webhook and Slack channels (negative disables the relay)")
 	fs.BoolVar(&c.notifyNetwork.AllowPrivate, "notify-allow-private-networks", false,
@@ -267,6 +289,16 @@ Flags:
 			return nil, errors.New("no database configured: pass --dsn, set DATABASE_URL, or set database.url_env in the config file")
 		}
 		c.warnings = append(c.warnings, "no database is configured (--dsn, DATABASE_URL, or database.url_env); the server would refuse to start")
+	}
+	switch c.databaseMode {
+	case "local", "external", "rds":
+	default:
+		return nil, fmt.Errorf("--database must be local, external or rds, not %q", c.databaseMode)
+	}
+	if c.dsn != "" && c.databaseMode == "rds" {
+		if err := db.ValidateDSN(c.databaseMode, c.dsn); err != nil {
+			return nil, err
+		}
 	}
 	c.secretKeyEnv = os.Getenv(secretbox.EnvKey)
 	if c.secretKeyFile == "" {
@@ -342,6 +374,21 @@ Binding 127.0.0.1 needs none of these.`, c.addr)
 	case "", db.SecurityLocal, db.SecurityEnhanced:
 	default:
 		return nil, fmt.Errorf("--security-mode must be local or enhanced, not %q", c.securityMode)
+	}
+	if c.nat.Mode != "" && c.nat.Mode != "off" && c.securityMode == "" {
+		// A loopback proxy request must not activate local-owner authentication.
+		// Force bearer authentication even if the database previously selected local mode.
+		c.securityMode = db.SecurityEnhanced
+	}
+	c.nat.Addr, c.nat.TLSEnabled, c.nat.SecurityMode = c.addr, c.tlsEnabled, c.securityMode
+	if err := c.nat.Validate(); err != nil {
+		return nil, fmt.Errorf("NAT configuration: %w", err)
+	}
+	if c.nat.Mode != "" && c.nat.Mode != "off" && c.publicURL != "" {
+		u, err := url.Parse(c.publicURL)
+		if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+			return nil, errors.New("NAT public URL must be an HTTPS origin without credentials, query, fragment or path")
+		}
 	}
 	if c.shutdownTimeout <= 0 {
 		return nil, errors.New("--shutdown-timeout must be positive")
@@ -456,13 +503,32 @@ func serve(args []string) error {
 	logger.Info("database ready")
 	api.RegisterPoolMetrics(store)
 
-	scheme := "http"
+	// Bind before publishing any route. A busy port or invalid certificate must not
+	// leave a router mapping or proxy pointing at an unrelated process.
 	if cfg.tlsEnabled {
-		scheme = "https"
+		if _, err := tls.LoadX509KeyPair(cfg.tlsCert, cfg.tlsKey); err != nil {
+			return fmt.Errorf("load listener certificate: %w", err)
+		}
 	}
-	selfEndpoint := cfg.publicURL
-	if selfEndpoint == "" {
-		selfEndpoint = scheme + "://" + displayHost(cfg.addr)
+	listener, err := net.Listen("tcp", cfg.addr)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+	connectivity, err := nat.Start(life, cfg.nat, logger)
+	if err != nil {
+		return fmt.Errorf("start NAT connectivity: %w", err)
+	}
+	defer connectivity.Close()
+	// Revoke public routes immediately on shutdown, before draining long requests.
+	goBackground("NAT cleanup", func(ctx context.Context) error {
+		<-ctx.Done()
+		return connectivity.Close()
+	})
+
+	selfEndpoint := cfg.clientEndpoint(connectivity.Status().Endpoint)
+	if err := api.ValidateSSOOptions(cfg.sso); err != nil {
+		return err
 	}
 
 	// Mesh identity and, when peers are configured, the link keeper that dials them.
@@ -561,6 +627,25 @@ func serve(args []string) error {
 		Poll: cfg.notifyPoll, Logger: logger,
 	})
 	vault := secrets.New(store, secretKey)
+	discovery := &modelsrc.Service{
+		Store: store, Lister: modelsrc.NewHTTPLister(), Logger: logger,
+		Key: func(ctx context.Context, project domain.Project, name string) (string, error) {
+			opened, err := vault.Open(ctx, project, name)
+			return opened.Value, err
+		},
+	}
+	// delphi delegates prompts to frontier models through provider batch APIs, with keys
+	// from the same vault. A negative interval switches it off entirely.
+	var delphiSvc *hosted.Service
+	if cfg.delphiInterval >= 0 {
+		delphiSvc = &hosted.Service{
+			Store: store, Logger: logger,
+			Key: func(ctx context.Context, project domain.Project, name string) (string, error) {
+				opened, err := vault.Open(ctx, project, name)
+				return opened.Value, err
+			},
+		}
+	}
 	server := api.New(store, svc, api.Options{
 		Logger:       logger,
 		Web:          web.Handler(),
@@ -573,9 +658,15 @@ func serve(args []string) error {
 		GitHub:       gh,
 		Notify:       notifier,
 		Secrets:      vault,
+		Models:       discovery,
+		Delphi:       delphiSvc,
 		Ops:          ops,
 		SSO:          cfg.sso,
 		Admin:        cfg.admin,
+		// The one-button reboot recovery: this daemon runs on the laptop whose
+		// terminals hold the sessions, so the dashboard's resume-all button
+		// reaches the real machine.
+		LocalResume: func() (any, error) { return resume.AllFresh() },
 	})
 	if ghErr == nil {
 		ghErr = gh.Refresh(life)
@@ -612,6 +703,18 @@ func serve(args []string) error {
 	if cfg.notifyPoll >= 0 {
 		goBackground("notification relay", notifier.Run)
 	}
+	if delphiSvc != nil && cfg.delphiInterval > 0 && !cfg.noScheduler {
+		goBackground("delphi", func(ctx context.Context) error {
+			delphiSvc.Run(ctx, cfg.delphiInterval)
+			return nil
+		})
+	}
+	if cfg.modelDiscovery > 0 && !cfg.noScheduler {
+		goBackground("model discovery", func(ctx context.Context) error {
+			discovery.Run(ctx, cfg.modelDiscovery)
+			return nil
+		})
+	}
 
 	httpServer := &http.Server{
 		Addr:              cfg.addr,
@@ -646,12 +749,13 @@ func serve(args []string) error {
 	}
 	logger.Info("conductor listening",
 		"addr", cfg.addr, "tls", cfg.tlsEnabled, "behind_proxy", cfg.behindProxy,
+		"nat", cfg.nat.Mode,
 		"mesh", cfg.meshOn,
 		"dashboard", selfEndpoint+"/", "mcp", selfEndpoint+"/mcp")
 
-	listen := httpServer.ListenAndServe
+	listen := func() error { return httpServer.Serve(listener) }
 	if cfg.tlsEnabled {
-		listen = func() error { return httpServer.ListenAndServeTLS(cfg.tlsCert, cfg.tlsKey) }
+		listen = func() error { return httpServer.ServeTLS(listener, cfg.tlsCert, cfg.tlsKey) }
 	}
 	// Background work started by requests (webhook checks) is awaited with the rest.
 	background.Add(1)
@@ -661,6 +765,24 @@ func serve(args []string) error {
 		server.Wait()
 	}()
 	return runServer(life, endLife, httpServer, listen, &background, cfg.shutdownTimeout, logger)
+}
+
+// clientEndpoint keeps callbacks and the advertised API on the same route, including
+// when Tailscale discovers its DNS name after configuration has been parsed.
+func (c *serveConfig) clientEndpoint(discovered string) string {
+	endpoint := c.publicURL
+	if endpoint == "" {
+		endpoint = discovered
+	}
+	if endpoint == "" {
+		scheme := "http"
+		if c.tlsEnabled {
+			scheme = "https"
+		}
+		endpoint = scheme + "://" + displayHost(c.addr)
+	}
+	c.sso.PublicURL = endpoint
+	return endpoint
 }
 
 // runServer serves until ctx ends or the listener fails, then shuts down in order:
@@ -916,10 +1038,19 @@ func bootstrap(args []string) error {
 			return fmt.Errorf("workflow: %w", err)
 		}
 	}
-	for _, profile := range bundle.ModelProfiles(org.ID) {
+	for _, profile := range bundle.ModelProfilesFor(org.ID, project.ID) {
+		if profile.Select != nil {
+			if err := modelsrc.ValidateSelector(*profile.Select); err != nil {
+				return fmt.Errorf("model profile %s/%s: %w", profile.Alias, profile.Harness, err)
+			}
+		}
 		if _, err := store.UpsertModelProfile(ctx, profile); err != nil {
 			return fmt.Errorf("model profile %s/%s: %w", profile.Alias, profile.Harness, err)
 		}
+	}
+	// Models discovered earlier may already satisfy a profile that was just declared.
+	if _, err := modelsrc.ResolveProject(ctx, store, project); err != nil {
+		fmt.Fprintf(os.Stderr, "bootstrap: could not resolve discovered models: %v\n", err)
 	}
 
 	// Re-running bootstrap is how a lost login is recovered, so the token it printed last

@@ -51,6 +51,32 @@ public enum Tailscale {
         while name.hasSuffix(".") { name.removeLast() }
         return name.isEmpty ? nil : name
     }
+
+    /// The backend URL `conductor publish` proxies to. Always a full URL, never a bare
+    /// port: `tailscale funnel --bg 8443` treats the number as a backend target and would
+    /// re-point the public route at plain HTTP. `tls` is the loopback daemon's own
+    /// self-signed HTTPS, so serve reaches it with `https+insecure` (that hop only).
+    public static func publishBackend(port: Int, tls: Bool) -> String {
+        tls ? "https+insecure://127.0.0.1:\(port)" : "http://127.0.0.1:\(port)"
+    }
+
+    /// `tailscale serve --bg --https=443 <backend>`: tailnet only.
+    public static func publishServeArguments(backend: String) -> [String] {
+        ["serve", "--bg", "--https=443", backend]
+    }
+
+    /// `tailscale funnel --bg <backend>`: the public internet. The backend stays the full
+    /// URL form (the bare-port footgun above).
+    public static func publishFunnelArguments(backend: String) -> [String] {
+        ["funnel", "--bg", backend]
+    }
+
+    /// Whether `tailscale serve status --json` shows Funnel allowed for a site, e.g.
+    /// `{"AllowFunnel": {"mac.tailnet.ts.net:443": true}}`.
+    public static func funnelOn(hostPort: String, serveStatusJSON: Data) -> Bool {
+        guard let v = try? JSONValue.decode(serveStatusJSON) else { return false }
+        return v["AllowFunnel"]?[hostPort]?.boolValue == true
+    }
 }
 
 /// Where a teammate could reach this Mac's control plane, best first: an explicit public URL

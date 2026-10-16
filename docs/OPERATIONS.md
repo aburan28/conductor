@@ -96,6 +96,21 @@ files predate that rule and cannot be renamed (the file name is the version a da
 recorded). The version is the whole name, applied in byte-wise order, so they are distinct
 and deterministically ordered.
 
+**Hosting.** On a personal or single-machine deployment, prefer a dedicated
+Postgres instance that does not depend on a container runtime. A Docker
+Desktop-backed database fails whenever the VM wedges or restarts — under heavy
+host load the VM can hang while the port forward stays open, so conductord sees
+brief `connection refused` windows: every request during one returns
+`internal error` with a request id, and leases that expire during one are
+reclaimed. A native instance under launchd/systemd does not share that failure
+mode. Run it bound to `127.0.0.1` on a fixed port and point the DSN at
+`127.0.0.1` (not `localhost`) so nothing else on the machine can claim the
+`::1` side of the name. On macOS, a launchd agent running the postgres binary
+directly needs `LC_ALL=C` in its environment, or the postmaster aborts with
+"postmaster became multithreaded during startup". When migrating, take a
+`pg_dump -Fc` first and verify row counts of a few core tables against the
+source before cutting over.
+
 **Upgrades and rollback.** Back up, then start the new version; it migrates. There are no
 down migrations, so rolling back means restoring the backup taken before the upgrade and
 starting the old binary against it. Anything recorded between the upgrade and the rollback
@@ -176,6 +191,27 @@ URL, and whichever claims an event sends it. `conductor_notifications_total{kind
 counts sends (`delivered`, `retry`, `failed`, `expired`) and
 `conductor_notify_relay_errors_total` counts failed passes.
 
+## Model discovery
+
+`conductord` asks each registered inference endpoint which models it serves every
+`--model-discovery-interval` (default one hour; a negative value turns the background refresh
+off, and endpoints can still be refreshed on request). It reads model names only, with the key
+from the project secret vault, and connects to `https` addresses and to loopback and private
+addresses over plain `http`; link-local addresses (cloud metadata) are always refused. An
+environment proxy (`HTTPS_PROXY`) is honoured, with the destination checked before the proxy is
+asked for it. See [INFERENCE_ENDPOINTS.md](INFERENCE_ENDPOINTS.md).
+
+## Delphi
+
+`conductord` checks open delphi delegations — prompts members delegated to frontier models
+through provider batch APIs — every `--delphi-interval` (default one minute; a negative value
+switches delphi off and its routes answer `not_configured`). One replica works at a time
+(a session advisory lock), so it is safe to run several. Keys come from the project secret
+vault (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or the secret an enabled inference endpoint of
+that kind names), and requests go to the providers' own API hosts; `ANTHROPIC_BASE_URL` and
+`OPENAI_BASE_URL` in the server's environment redirect them through a proxy. Request text and
+answers pass through and are never written to the database. See [DELPHI.md](DELPHI.md).
+
 ## The config file
 
 `conductord --config conductor.yaml` (or `CONDUCTOR_CONFIG=conductor.yaml`) reads a YAML file
@@ -209,6 +245,8 @@ inline, or a reference to an empty variable or unreadable file is an error namin
 | `retention.idempotency_ttl` | `--idempotency-ttl` | |
 | `metrics.token_env` / `metrics.token_file` | `--metrics-token` | by reference only |
 | `notifications.poll`, `.allow_private_networks`, `.allow_http`, `.proxy` | `--notify-poll`, `--notify-allow-private-networks`, `--notify-allow-http`, `--notify-proxy` | a proxy URL with credentials is refused in the file |
+| `model_discovery.interval` | `--model-discovery-interval` | how often inference endpoints are asked which models they serve (default 1h; negative disables the background refresh) |
+| `delphi.interval` | `--delphi-interval` | how often open delphi delegations are checked with their provider (default 1m; negative disables delphi) |
 | `sso.token_ttl`, `sso.auto_provision`, `sso.default_project` | `--sso-token-ttl`, `--sso-auto-provision`, `--sso-default-project` | |
 | `sso.providers[]` | `--sso-provider` | `name`, `type`, `label`, `issuer`, `client_id`, `client_secret_env` or `client_secret_file` (default `CONDUCTOR_SSO_<NAME>_CLIENT_SECRET`), `domains`, `orgs`, `api_url`, `web_url`, `groups_claim`, `trusted_email_domains`. Providers given by `--sso-provider` or `CONDUCTOR_SSO_PROVIDERS` replace the file's rather than adding to them |
 | `features.<name>` | — | locks a feature flag for every organization |

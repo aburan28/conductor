@@ -41,7 +41,7 @@ const hookTimeout = 5 * time.Second
 
 func cmdHook(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: conductor hook <pre-tool|session-start|session-end|checkpoint>")
+		return errors.New("usage: conductor hook <pre-tool|session-start|session-end|checkpoint|memory-observe|memory-context>")
 	}
 	switch args[0] {
 	case "pre-tool":
@@ -52,6 +52,10 @@ func cmdHook(ctx context.Context, args []string) error {
 		return hookSessionEnd(ctx, args[1:])
 	case "checkpoint":
 		return hookCheckpoint(ctx, args[1:])
+	case "memory-observe":
+		return hookMemoryObserve(ctx, args[1:])
+	case "memory-context":
+		return hookMemoryContext(ctx, args[1:])
 	default:
 		return fmt.Errorf("unknown hook event %q", args[0])
 	}
@@ -639,15 +643,23 @@ func hookSessionStart(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("hook session-start", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	project := fs.String("project", "", "project id or slug")
+	noStdin := fs.Bool("no-stdin", false, "use the process working directory when the harness has no session payload")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	var in hookInput
+	if !*noStdin {
+		in, _ = readHookInput(os.Stdin, stdinIsTerminal())
+	}
+	memoryContext := memoryStartupContext(ctx, in.Cwd, firstNonEmptyString(in.SessionID, os.Getenv("CONDUCTOR_SESSION_ID")))
 	creds := client.LoadCredentials()
 	if creds.Token == "" {
+		fmt.Print(memoryContext)
 		return nil
 	}
 	ref, err := projectRef(*project, creds)
 	if err != nil {
+		fmt.Print(memoryContext)
 		return nil
 	}
 	api := client.New(creds.Endpoint, creds.Token)
@@ -684,6 +696,10 @@ func hookSessionStart(ctx context.Context, args []string) error {
 	}
 	b.WriteString("\nBefore editing any file, call conductor_check_conflicts (or run `conductor check --scope path:<file>`); " +
 		"claim work with coord_start_work. Prompts and output stay local; only task titles, scopes, and evidence are shared.\n")
+	if memoryContext != "" {
+		b.WriteString("\n")
+		b.WriteString(memoryContext)
+	}
 	fmt.Print(b.String())
 	return nil
 }

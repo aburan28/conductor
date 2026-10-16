@@ -361,3 +361,16 @@ func TestRepositoryRulesRaiseFloorsAndEscalate(t *testing.T) {
 		t.Fatal("expected a compile error from a malformed rule")
 	}
 }
+
+// A profile written for delphi delegation shares the catalog but is never an agent's model,
+// even when it is the cheapest under the alias.
+func TestDelphiProfilesAreNotRouted(t *testing.T) {
+	c := testCatalog()
+	c.Profiles = append(c.Profiles, domain.ModelProfile{ID: "d1", Alias: "worker.fast", Harness: domain.DelphiHarness,
+		Provider: "anthropic", Model: "claude-haiku-5-5", Capabilities: []string{"code_edit"}, Tier: domain.TierT1,
+		ReasoningEffort: domain.EffortMax, Enabled: true, InputCostPerMTok: price(0.01), OutputCostPerMTok: price(0.01)})
+	p, err := c.Resolve("worker.fast", domain.TierT1, Request{})
+	if err != nil || p.ID != "p1" {
+		t.Fatalf("resolved %+v, %v", p, err)
+	}
+}

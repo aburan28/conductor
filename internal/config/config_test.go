@@ -264,3 +264,58 @@ func TestRepositoryDispatchPolicyLintsClean(t *testing.T) {
 		}
 	}
 }
+
+// A profile may name the models it wants instead of one id. The repository's own anthropic
+// profiles do, so a provider release is adopted by discovery rather than by editing models.yaml,
+// and each keeps a fixed model as the fallback until the endpoint has been listed.
+func TestModelProfilesCanSelectTheirModelByDiscovery(t *testing.T) {
+	bundle, err := Load(repoRoot(t))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	selecting := 0
+	for _, p := range bundle.ModelProfilesFor("org-1", "proj-1") {
+		if p.Select == nil {
+			continue
+		}
+		selecting++
+		if p.Select.ProjectID != "proj-1" || p.Select.Endpoint == "" || len(p.Select.Match) == 0 {
+			t.Errorf("%s/%s: selector %+v is incomplete", p.Alias, p.Harness, p.Select)
+		}
+		if p.Model == "" {
+			t.Errorf("%s/%s: a selecting profile needs a fallback model until discovery runs", p.Alias, p.Harness)
+		}
+	}
+	if selecting == 0 {
+		t.Fatal("no profile in .conductor/models.yaml selects its model by discovery")
+	}
+	// Without a project the selector has nowhere to look; ModelProfiles is the old API.
+	for _, p := range bundle.ModelProfiles("org-1") {
+		if p.Select != nil && p.Select.ProjectID != "" {
+			t.Errorf("%s/%s: ModelProfiles must not invent a project", p.Alias, p.Harness)
+		}
+	}
+}
+
+func TestSelectOnlyProfileIsKeptAndWaitsForDiscovery(t *testing.T) {
+	var b Bundle
+	b.Models.Profiles = []ProfileSpec{
+		{Alias: "worker.fast", Harness: "opencode", Provider: "ollama",
+			Select: &SelectSpec{Endpoint: "ollama", Match: []string{"qwen*"}, Prefix: "ollama/"}},
+		{Alias: "worker.fast", Harness: "claude"}, // neither model nor select: still skipped
+		{Alias: "worker.general", Harness: "opencode", Enabled: boolPtr(false),
+			Select: &SelectSpec{Endpoint: "ollama", Match: []string{"*"}}},
+	}
+	got := b.ModelProfilesFor("org-1", "proj-1")
+	if len(got) != 2 {
+		t.Fatalf("profiles = %+v", got)
+	}
+	if got[0].Model != "" || !got[0].Enabled || got[0].Select.Prefix != "ollama/" {
+		t.Errorf("select-only profile: %+v", got[0])
+	}
+	if got[1].Enabled {
+		t.Errorf("an operator's enabled:false must survive a selector: %+v", got[1])
+	}
+}
+
+func boolPtr(v bool) *bool { return &v }

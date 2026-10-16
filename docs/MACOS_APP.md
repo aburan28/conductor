@@ -10,8 +10,9 @@ Conductor is a CLI, a daemon, a database, and a dashboard. For the person who ju
 their agents to stop colliding, that is four things to install, start, and keep running, and
 a token to find. The app makes it one thing:
 
-- **Install, open, done.** The app runs the control plane and its database for you, starts
-  them at login, and signs you in without a token (local security mode, see
+- **Install, choose, open.** On a first run the app asks whether to connect to an
+  existing control plane or start a new one with its own database. A local instance
+  starts at login and signs you in without a token (local security mode, see
   `conductor security`).
 - **Always visible.** A menu bar item shows who is live, what is contested, and work offered
   to you, without opening a browser.
@@ -135,7 +136,7 @@ event.
 | Menu bar icon | that mark tinted by status: brand green (all clear), amber (conflict or offer), grey (daemon down); popover also shows the state in words | SSE + `/v1/projects/{p}/status` |
 | Menu bar popover | live sessions; open conflicts with "join / wait / split"; offers with accept/decline; Pause all / Resume all; Open dashboard | status, presence, inbox APIs; `conductor pause/resume` |
 | Main window | the dashboard in a web view | conductord |
-| First run | 1. start database and daemon; 2. sign in (automatic); 3. pick a repository folder (`conductor init` + bootstrap); 4. connect tools; 5. optional GitHub | `up`, `init`, `integrate`, `github setup` |
+| First run | 1. connect to an existing endpoint or start a new database and daemon; 2. sign in; 3. pick a repository folder (`conductor init` + bootstrap) if needed; 4. connect tools; 5. optional GitHub | `up`, `init`, `integrate`, `github setup` |
 | Invite sheet | handle, role, expiry; share sheet; reachability hint | members API |
 | Connect tools sheet | per-tool status from `conductor doctor --json`, one Connect button each, or all | `integrate` |
 | GitHub sheet | Create app, Install, linked repositories, last poll | `github status/setup/link` |
@@ -227,11 +228,11 @@ older SDK than CI's — kept because CI's SDK needs it). The resulting binary, a
 hand into a bundle with Sparkle's framework and the Go commands, launches as a real app:
 AppKit brings up its `MenuBarExtra` scene (confirmed through Control Center's scene
 messages), it restores its last window frame from `UserDefaults`, and its `APIClient` probes
-`127.0.0.1:<daemonPort>` exactly as documented — including, once a real `conductord` was
-started by hand against a local PostgreSQL, picking a different port to avoid it when the
-app's own first-run flow meant to start a second instance (expected: this smoke test could
-not click through onboarding to choose "attach" instead, since the environment has no
-Accessibility access for UI automation). `swift test` itself could not run here: this
+`127.0.0.1:<daemonPort>` exactly as documented. Before the first-run choice was added,
+a real `conductord` started by hand against local PostgreSQL caused the app to pick a
+different port and start a second instance. The first-run gate now waits for an explicit
+choice when the app owns no daemon or database; interactive verification on a Mac is still
+owed. `swift test` itself could not run in that earlier smoke test: this
 machine has only the Command Line Tools, and the macOS `XCTest.framework` ships with Xcode,
 not with them — CI's `macos-latest` runner has Xcode, which is why the test job lives there
 and not in a Command Line Tools-only check. Before that, what could be checked without a Mac:

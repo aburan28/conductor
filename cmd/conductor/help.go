@@ -41,6 +41,25 @@ var commandGroups = []string{"Get started", "Coordinate", "Work", "Territory", "
 
 var commands = []command{
 	// Get started
+	{name: "leader", group: "Get started", short: true, flags: true,
+		summary: "run the control-plane leader with local Postgres, external Postgres or RDS",
+		topic: `conductor leader — run the team's control plane in the foreground
+
+The leader manages a local loopback Postgres database by default. Use --database external
+or --database rds with DATABASE_URL or a config secret reference to skip Docker entirely.
+Workers join the leader's authenticated API without receiving database credentials.
+Server config, TLS and NAT flags are forwarded to conductord. Authentication defaults to
+enhanced. --bootstrap initializes this operator's project and saves its login once.
+
+Usage:
+  conductor leader [--database local|external|rds] [--config FILE] [server flags]
+
+Example:
+  conductor leader --bootstrap --project myrepo
+  conductor leader --database rds --config leader.yaml
+
+See docs/LEADER.md for TLS, RDS, UPnP and Tailscale deployment examples.
+`},
 	{name: "up", group: "Get started", short: true, flags: true,
 		summary: "start Postgres (when none is reachable), the control plane, and log in",
 		topic: `conductor up — one command from nothing to a running, logged-in control plane
@@ -268,6 +287,45 @@ cloud product's own secret store.
 
 Run ` + "`conductor secrets <subcommand> -h`" + ` for its flags.
 `},
+	{name: "delphi", group: "Coordinate",
+		subs:    []string{"ask", "show", "answer", "list", "profiles", "cancel", "reconcile"},
+		summary: "delegate a prompt to a frontier model through a batch API (half price, answered later)",
+		topic: `conductor delphi — delegate prompts to frontier models through provider batch APIs
+
+conductord submits each request to the provider's batch API (Anthropic Message Batches,
+OpenAI Batch) with the project's key from the secret vault, and checks it every minute.
+Batches cost half the interactive price and finish within 24 hours, usually much sooner.
+The request text goes straight to the provider and the answer is fetched from it when you
+ask; neither is stored in Conductor. Spend appears in conductor usage as "delegation".
+
+Usage:
+  conductor delphi ask [--profile ALIAS | --provider anthropic|openai --model M] [--effort E]
+                       [--task T] [--label k=v] [--wait [--fallback T1,T2]]
+                       PROMPT...                (or --file F, or stdin)
+  conductor delphi profiles                    tiers from the model catalog
+  conductor delphi show REF                    state, tokens, cost
+  conductor delphi answer [--wait] REF         the answer, fetched from the provider
+  conductor delphi [list] [--state S]
+  conductor delphi cancel REF
+  conductor delphi reconcile REF (--adopt BATCH_ID | --abandon)   maintainers
+
+Example:
+  conductor secrets set ANTHROPIC_API_KEY
+  ref=$(conductor delphi ask --task T-42 "Is this reduction sound? ...")
+  conductor delphi answer --wait "$ref"
+
+Keys: ANTHROPIC_API_KEY / OPENAI_API_KEY in the vault, or the secret an enabled inference
+endpoint of that kind names. The anthropic default model is claude-mythos-5-1; openai needs
+--model. A request whose submit outcome was lost stays "submitting" and is never resent:
+OpenAI batches are found again automatically, Anthropic ones need reconcile.
+
+Tiers: --profile names a model-catalog alias (.conductor/models.yaml); a profile with
+harness: delphi wins over agent profiles under the same alias. Fallback: with --wait, a
+refusal is resubmitted to each --fallback target in turn ("provider:model[@effort]" or a
+profile; default $CONDUCTOR_DELPHI_FALLBACK) as REF-fb1, REF-fb2, ...
+
+Run ` + "`conductor delphi <subcommand> -h`" + ` for its flags.
+`},
 	{name: "usage", group: "Coordinate", subs: []string{"sync"},
 		summary: "tokens and cost over time, by day, harness, model, or person"},
 	{name: "quota", group: "Coordinate",
@@ -345,8 +403,8 @@ Example:
 		summary: "plan work, then send it to models by policy"},
 	{name: "route", group: "Dispatch",
 		summary: "show what the dispatch policy would decide, and why"},
-	{name: "models", group: "Dispatch", subs: []string{"discover"},
-		summary: "the model catalog; models discover finds local ones"},
+	{name: "models", group: "Dispatch", subs: []string{"discover", "endpoints", "available", "pin", "unpin"},
+		summary: "the model catalog; endpoints discover new models for it"},
 	{name: "swarm", group: "Dispatch", subs: []string{"status", "join"},
 		summary: "contribute this machine's sessions to the team's queue"},
 	{name: "queue", group: "Dispatch", subs: []string{"cancel"},
@@ -384,6 +442,39 @@ Example:
 		summary: "freeze every agent terminal on this machine; save how to revive them"},
 	{name: "resume", group: "Sessions and machines",
 		summary: "wake paused sessions, reopening any closed terminals"},
+	{name: "systemd", group: "Sessions and machines", subs: []string{"install", "pull-images", "status"},
+		summary: "user units for postgres + conductord (+ vLLM) with image pre-pulls",
+		topic: `conductor systemd — user units for postgres + conductord (+ vLLM)
+
+Usage:
+  conductor systemd install      write the user units (postgres, conductord, optional vLLM)
+  conductor systemd pull-images  pre-pull every image the units need
+  conductor systemd status       which unit images are cached locally
+
+Example:
+  conductor systemd install
+
+Run ` + "`conductor systemd <subcommand> -h`" + ` for its flags.
+`},
+	{name: "accounts", group: "Sessions and machines", subs: []string{"add", "list", "switch", "exhaust", "ok"},
+		summary: "harness login profiles: switch accounts when usage runs out",
+		topic: `conductor accounts — harness login profiles resume-all can switch between
+
+Usage:
+  conductor accounts add <harness> <name>          snapshot the harness's current login as <name>
+  conductor accounts list [harness]               profiles, which is active, and quota markers
+  conductor accounts switch <harness> <name>       make <name> the harness's live account
+  conductor accounts exhaust <harness> <name>      mark an account out of usage
+  conductor accounts ok <harness> <name>           mark an account usable again
+
+Harnesses: claude, codex, opencode. An account is added by logging in with the harness
+itself, then snapshotting; a quota marker makes resume-all prefer another account when
+waking sessions after a restart.
+
+Example:
+  conductor accounts add claude main
+
+Run ` + "`conductor accounts <subcommand> -h`" + ` for its flags.`},
 	{name: "sessions", group: "Sessions and machines", subs: []string{"save", "list", "export", "install-hook"},
 		summary: "keep agent sessions resumable past a closed terminal or reboot",
 		topic: `conductor sessions — keep agent sessions resumable on this machine
@@ -398,6 +489,24 @@ Example:
   conductor sessions save all
 
 Run ` + "`conductor sessions <subcommand> -h`" + ` for its flags.
+`},
+	{name: "memory", group: "Sessions and machines", subs: []string{"configure", "disable", "status", "remember", "search", "timeline", "show", "forget", "context"},
+		summary: "private coding-session observations in your Redis or ElastiCache store",
+		topic: `conductor memory — private observations in an owner-selected Redis store
+
+Memory is off until configured. Records are encrypted locally before Redis receives them.
+Remote endpoints require verified TLS.
+
+Usage:
+  conductor memory configure --local
+  conductor memory configure --url-stdin [--cluster]
+  conductor memory status | disable
+  conductor memory remember < note.txt
+  conductor memory search WORDS | timeline ID | show ID | forget ID
+
+Example:
+  conductor memory configure --local
+  conductor memory search parser
 `},
 	{name: "checkpoint", group: "Sessions and machines",
 		subs:    []string{"capture", "list", "show", "resume", "export", "import", "push", "pull", "prune"},
@@ -452,6 +561,35 @@ Example:
   conductor storage test
 
 Settings live in ~/.conductor/storage.json; CONDUCTOR_BACKUP_S3_* variables override it.
+See docs/STORAGE.md.
+`},
+	{name: "db", group: "Sessions and machines",
+		subs:    []string{"status", "backups", "base-backup", "restore", "prune", "archiving", "archive-wal", "fetch-wal"},
+		summary: "keep the control-plane database durable in the storage bucket",
+		topic: `conductor db — keep the control-plane database durable in the storage bucket
+
+Postgres stays the local database. Every WAL segment is archived to the bucket as Postgres
+finishes it, and base backups are streamed on a schedule, so a lost machine is rebuilt on
+another to within about a minute (or to any chosen moment). Sealed with your passphrase
+unless turned off. The bucket is the one ` + "`conductor storage`" + ` configures.
+
+Usage:
+  conductor db status [--json]                    last archived segment, base backups, failures
+  conductor db backups [--json]                   base backups and the archived WAL range
+  conductor db base-backup [--dsn DSN]            stream a base backup now (then prune)
+  conductor db restore --data-dir DIR [--target-time 2026-10-07T12:00:00Z]
+  conductor db prune [--keep N]
+  conductor db archiving --data-dir DIR --write   point Postgres's archive_command here
+
+Postgres runs these itself (set up by ` + "`db archiving --write`" + `):
+  archive_command = 'conductor db archive-wal %p %f'
+  restore_command = 'conductor db fetch-wal %f %p'
+
+Example:
+  conductor db archiving --data-dir ~/pgdata --write && pg_ctl -D ~/pgdata restart
+  conductor db base-backup
+  conductor db restore --data-dir ~/pgdata-restored     # on the replacement machine
+
 See docs/STORAGE.md.
 `},
 	{name: "serve", group: "Sessions and machines",
@@ -514,12 +652,28 @@ Example:
 
 Run ` + "`conductor sso <subcommand> -h`" + ` for its flags.
 `},
+	{name: "publish", group: "Team and access", flags: true,
+		summary: "share the control plane over Tailscale (serve, and optionally funnel)",
+		topic: `conductor publish — share the control plane over Tailscale in one command
+
+Runs ` + "`tailscale serve --bg --https=443 <backend>`" + ` against the loopback daemon so the
+dashboard and MCP are reachable at https://<magicdns>/ from your tailnet, and with
+--funnel also from the public internet. Prints the resulting dashboard and MCP URLs and
+the --public-url / invite --endpoint commands to go with them.
+
+Usage:
+  conductor publish
+  conductor publish --funnel
+
+Example:
+  conductor publish --funnel
+`},
 	{name: "github", group: "Team and access", subs: []string{"setup", "install", "link", "status", "check", "issues"},
 		nested:  map[string][]string{"issues": {"enable", "disable", "status", "sync"}},
 		summary: "create the GitHub App, link a repo, sync its issues into tasks"},
 
 	// Other
-	{name: "hook", group: "Other", subs: []string{"pre-tool", "session-start", "session-end", "checkpoint"},
+	{name: "hook", group: "Other", subs: []string{"pre-tool", "session-start", "session-end", "checkpoint", "memory-observe", "memory-context"},
 		summary: "entry points for harness hooks (installed by conductor integrate)",
 		topic: `conductor hook — entry points a coding tool's hooks call
 
@@ -528,6 +682,7 @@ Codex, and other tools that support hooks.
 
 Usage:
   conductor hook pre-tool | session-start | session-end | checkpoint
+  conductor hook memory-observe | memory-context
 
 Example:
   conductor integrate claude    # installs the hooks

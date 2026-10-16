@@ -21,6 +21,12 @@ import Glibc
 final class IntegrationTests: XCTestCase {
     var env: [String: String] { ProcessInfo.processInfo.environment }
 
+    /// Names each step on stderr as it starts. stderr is not buffered, so when a step hangs the
+    /// job log shows which one did: a hung run once showed no test output at all.
+    func announce(_ step: String) {
+        FileHandle.standardError.write(Data("integration step: \(step)\n".utf8))
+    }
+
     /// argv run as the configured user when there is one.
     func spec(_ exe: URL, _ args: [String], environment: [String: String]? = nil, stdin: Data? = nil) -> CommandSpec {
         if let user = env["CONDUCTOR_IT_RUN_AS"], !user.isEmpty {
@@ -58,9 +64,11 @@ final class IntegrationTests: XCTestCase {
         }
 
         // initdb, exactly the kit's arguments.
+        announce("initdb")
         let initdb = try await runner.run(spec(setup.executable("initdb"), setup.initdbArguments))
         XCTAssertEqual(initdb.status, 0, initdb.stderrText)
 
+        announce("postgres configuration")
         // The configuration the supervisor writes.
         let conf = setup.dataDirectory.appendingPathComponent(PostgresSetup.configFileName)
         let main = setup.dataDirectory.appendingPathComponent("postgresql.conf")
@@ -71,6 +79,7 @@ final class IntegrationTests: XCTestCase {
             _ = try await runner.run(CommandSpec(URL(fileURLWithPath: "/bin/chown"), ["-R", "\(runAsUID)", root.path]))
         }
 
+        announce("postgres start")
         // Postgres in the foreground, as launchd runs it.
         let pgSpec = spec(URL(fileURLWithPath: setup.postgresArguments[0]), Array(setup.postgresArguments.dropFirst()))
         let pg = Process()
@@ -86,6 +95,7 @@ final class IntegrationTests: XCTestCase {
             pg.waitUntilExit()
         }
 
+        announce("pg_isready")
         var ready = false
         for _ in 0..<120 {
             if try await runner.run(CommandSpec(setup.executable("pg_isready"), setup.isReadyArguments)).succeeded { ready = true; break }
@@ -94,10 +104,12 @@ final class IntegrationTests: XCTestCase {
         XCTAssertTrue(ready, (try? String(contentsOf: pgLog, encoding: .utf8)) ?? "")
         let sockets = try fm.contentsOfDirectory(atPath: paths.socketDirectory.path)
         XCTAssertTrue(sockets.contains(".s.PGSQL.5432"), "listens on the socket in the private folder: \(sockets)")
+        announce("createdb")
         let created = try await runner.run(CommandSpec(setup.executable("createdb"), setup.createDatabaseArguments))
         XCTAssertTrue(PostgresSetup.isAlreadyExists(created), created.stderrText)
         let again = try await runner.run(CommandSpec(setup.executable("createdb"), setup.createDatabaseArguments))
         XCTAssertTrue(PostgresSetup.isAlreadyExists(again), "a second start tolerates the database: \(again.stderrText)")
+        announce("psql: pg_is_in_recovery")
         let recovery = try await runner.run(CommandSpec(setup.executable("psql"), setup.inRecoveryArguments))
         XCTAssertEqual(recovery.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines), "f", recovery.stderrText)
 
@@ -121,6 +133,7 @@ final class IntegrationTests: XCTestCase {
         try daemon.run()
         defer { daemon.terminate(); daemon.waitUntilExit() }
 
+        announce("conductord start, waiting for /v1/health")
         let api = APIClient(endpoint: URL(string: endpoint)!)
         var healthy = false
         for _ in 0..<240 {
@@ -131,6 +144,7 @@ final class IntegrationTests: XCTestCase {
         guard healthy else { return }
 
         // A fresh database: nobody owns the machine, so onboarding goes to the repository.
+        announce("local status before bootstrap")
         let before = try await api.localStatus()
         XCTAssertEqual(OnboardingFlow.signIn(before), .needsOwner, "\(before)")
 
@@ -138,16 +152,19 @@ final class IntegrationTests: XCTestCase {
         // environment, exactly as the supervisor runs it.
         let repo = home.appendingPathComponent("src/my-app", isDirectory: true)
         try fm.createDirectory(at: repo, withIntermediateDirectories: true)
+        announce("conductor init")
         let initRepo = try await runner.run(CommandSpec(conductor, ConductorCommands.initRepository(repo), environment: cliEnv))
         XCTAssertEqual(initRepo.status, 0, initRepo.stderrText)
         var bootEnv = cliEnv
         bootEnv["DATABASE_URL"] = setup.dsn
         bootEnv["USER"] = "ada"
+        announce("conductord bootstrap")
         let boot = try await runner.run(CommandSpec(conductord, ConductorCommands.bootstrap(repository: repo, endpoint: endpoint),
                                                     environment: bootEnv, currentDirectory: repo))
         XCTAssertEqual(boot.status, 0, boot.stderrText)
 
         // Local sign-in, as the app does it.
+        announce("local sign-in")
         let after = try await api.localStatus()
         XCTAssertEqual(OnboardingFlow.signIn(after), .automatic, "\(after)")
         let session = try await api.localSession()
@@ -159,20 +176,24 @@ final class IntegrationTests: XCTestCase {
         XCTAssertEqual(project, "my-app")
 
         // Something on the event stream: a task, created through the CLI's own login.
+        announce("conductor task create")
         let task = try await runner.run(CommandSpec(conductor, ["task", "create", "--project", project, "--title", "Try the app", "--scope", "path:README.md"],
                                                     environment: cliEnv))
         XCTAssertEqual(task.status, 0, task.stderrText + task.stdoutText)
 
         // A login that hit its limit, reported the way `conductor wrap` reports it: the server
         // turns it into a quota.exhausted event on the project's stream.
+        announce("usage-limit quota POST")
         let now = ISO8601DateFormatter().string(from: Date())
         let quota = #"{"project":"\#(project)","snapshots":[{"harness":"claude","account":"default","window":"five_hour","window_minutes":300,"used_percent":100,"limit_reached":true,"source":"integration-test","source_kind":"manual","observed_at":"\#(now)"}]}"#
         let (qBody, qStatus) = try await authed.send(authed.request("POST", "/v1/quota", body: Data(quota.utf8)))
         XCTAssertEqual(qStatus, 200, String(decoding: qBody, as: UTF8.self))
 
+        announce("project status")
         let status = try await authed.status(project: project)
         XCTAssertEqual(status.project.map { !$0.isEmpty }, true)
 
+        announce("event stream")
         let received = Received()
         let stream = EventStream(url: authed.eventStreamURL(project: project), token: session.token,
                                  onEvent: { received.add($0) }, onState: { received.state($0) })
@@ -190,6 +211,7 @@ final class IntegrationTests: XCTestCase {
         XCTAssertEqual(harness, "claude")
 
         // Invite someone, and the link joins from another login.
+        announce("invite")
         let invite = try await authed.invite(project: project, InviteRequest(handle: "rachel", role: "contributor", tokenTTL: InviteExpiry.week.ttl))
         let token = try XCTUnwrap(invite.token)
         let link = InviteLink.web(endpoint: endpoint, project: project, token: token)
@@ -197,6 +219,7 @@ final class IntegrationTests: XCTestCase {
         XCTAssertEqual(try InviteLink.parse(appLink).get().webLink, link)
         let otherHome = root.appendingPathComponent("Rachel", isDirectory: true)
         try fm.createDirectory(at: otherHome, withIntermediateDirectories: true)
+        announce("conductor join")
         let joined = try await runner.run(CommandSpec(conductor, ConductorCommands.join,
                                                       environment: ["HOME": otherHome.path, "PATH": "/usr/bin:/bin"],
                                                       stdin: ConductorCommands.joinInput(link: link)))

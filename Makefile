@@ -5,7 +5,7 @@ DATABASE_URL ?= postgres://conductor:conductor@localhost:55432/conductor?sslmode
 ENDPOINT ?= http://localhost:8080
 INSTALL_PREFIX ?= $(HOME)/.local
 INSTALL_BIN := $(INSTALL_PREFIX)/bin
-CONDUCTOR_BINS := conductord conductor conductor-mcp
+CONDUCTOR_BINS := conductord conductor conductor-mcp conductor-mesh-dns
 TOKEN_FILE := .conductor/.bootstrap-token
 
 # Upstream holding the GitHub releases `make install` downloads. Derived from
@@ -28,7 +28,7 @@ BUILD_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || ech
 BUILD_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null)
 LDFLAGS := -X $(MODULE)/internal/version.version=$(BUILD_VERSION) -X $(MODULE)/internal/version.commit=$(BUILD_COMMIT)
 
-.PHONY: all build test unit vet fmt check ci hooks db-up db-down db-wait bootstrap setup run serve login up down mcp wrap claude codex opencode clean e2e install install-local uninstall
+.PHONY: all build test unit vet fmt check ci hooks db-up db-down db-wait pull-images bootstrap setup run serve login up down mcp wrap claude codex opencode clean e2e install install-local uninstall
 
 all: vet build test
 
@@ -37,7 +37,8 @@ build:
 	$(GO) build -ldflags "$(LDFLAGS)" -o $(BIN)/conductord ./cmd/conductord
 	$(GO) build -ldflags "$(LDFLAGS)" -o $(BIN)/conductor ./cmd/conductor
 	$(GO) build -ldflags "$(LDFLAGS)" -o $(BIN)/conductor-mcp ./cmd/conductor-mcp
-	@echo "built: $(BIN)/conductord $(BIN)/conductor $(BIN)/conductor-mcp"
+	$(GO) build -ldflags "$(LDFLAGS)" -o $(BIN)/conductor-mesh-dns ./cmd/conductor-mesh-dns
+	@echo "built: $(BIN)/conductord $(BIN)/conductor $(BIN)/conductor-mcp $(BIN)/conductor-mesh-dns"
 
 vet:
 	$(GO) vet ./...
@@ -92,6 +93,16 @@ db-wait:
 
 db-down:
 	docker compose down -v
+
+# Pre-pull every image the systemd units need (postgres + vLLM) so a first
+# enable or an offline reboot never races a download against a start timeout.
+# VLLM=flash|glm53|qwen|all selects vLLM images (default: none, db only).
+pull-images: build
+	@if [ -n "$(VLLM)" ]; then \
+	  $(BIN)/conductor systemd pull-images --with-vllm "$(VLLM)"; \
+	else \
+	  $(BIN)/conductor systemd pull-images; \
+	fi
 
 # Bootstrap the database and first tenant/project/principal/token. The DSN
 # comes from DATABASE_URL (exported above); pass extra bootstrap flags via

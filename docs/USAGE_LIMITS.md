@@ -121,8 +121,8 @@ allowance ([billing usage API](https://docs.github.com/en/rest/billing/usage)). 
 Not used, deliberately:
 
 - **Claude's OAuth usage endpoint.** It returns nothing the documented status line does not,
-  and calling it means reading Claude Code's OAuth token out of its credential store.
-  Conductor never reads another tool's credentials.
+  and calling it means using Claude Code's OAuth token. Conductor reads cached profile
+  metadata for the optional identity hint but does not use that token or call this endpoint.
 - **`anthropic-ratelimit-unified-*` headers.** Only a proxy sees them.
 - **Harvesting Cursor's session cookie** from `state.vscdb` or `auth.json`. The Cursor
   collector runs only when you hand it the cookie yourself.
@@ -178,7 +178,7 @@ One **snapshot** is one window of one login of one tool on one machine:
 | Field | Meaning |
 |---|---|
 | `harness` | `claude`, `codex`, `cursor`, `opencode`, `gemini`, `copilot`, … |
-| `account` | a label for the login, never the login itself (below) |
+| `account` | a state-directory label with a short opaque login suffix when local identity metadata exists (below) |
 | `machine` | the host name the wrap sessions already report |
 | `window` | `5h`, `weekly`, `monthly`, `daily`, `spend`, or `<limit id>:<window>` for a model-specific bucket |
 | `window_minutes` | the window's length when known |
@@ -190,12 +190,27 @@ One **snapshot** is one window of one login of one tool on one machine:
 | `source`, `source_kind` | which collector, and documented / local_file / undocumented / manual |
 | `observed_at` | when the reading was taken |
 
-**Account labels.** The login is named by its state directory, the same convention
-`checkpoint resume --account` uses: `~/.claude` is `default`, `~/.claude-work` is `work`,
-`~/.conductor/accounts/claude/work` is `work`. Any other directory becomes `dir-` plus the
-first ten hex digits of a SHA-256 of its path, so a path with a user name in it never leaves
-the machine. No email, token, organization id or prompt text is read for this, and none is
-sent.
+**Account identity.** The location part is the state-directory label that
+`checkpoint resume --account` uses: `~/.claude` is `default`, `~/.claude-work` is `work`.
+When local metadata provides a stable account identifier, the quota key appends `-id-`
+and twelve hex digits. Switching credentials in `default` then creates a distinct quota
+row and alert key, while refreshing a Codex token for the same account keeps the key.
+Codex rollout collection checks `session_meta.creator_account_id` against the active
+profile before assigning historical usage to it; rollouts without a matching account ID
+cannot establish that profile's readiness. Old rows with only a directory label remain
+unattributed; they are not silently relabelled as the newly active account.
+Claude transcript fallback readings likewise require a matching `bridge-session` owner
+account and organization when cached profile IDs are available. The status line still
+depends on the cached profile identity; it does not itself authenticate an account ID.
+
+The Usage card shows an email under the label only for the requesting owner's rows when
+the server can read matching local profile metadata on the reporting machine. Claude's
+`~/.claude.json.oauthAccount` and Codex's local `auth.json` ID-token claims are observed
+file formats, not authenticated identity APIs. The email is therefore marked as an
+unverified local hint; a missing or stale hint does not prove readiness. The collector
+does not retain tokens or add email to stored quota readings, team counts, or project
+events. A server on another machine may show only the opaque account key. The Conductor
+user's sign-in email is unrelated to the Claude or Codex login.
 
 ### Levels and thresholds
 
