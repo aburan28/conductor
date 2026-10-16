@@ -139,11 +139,18 @@ func Capture(ctx context.Context, req Request) (Result, error) {
 		if cfg == "" {
 			cfg = usage.ClaudeConfigDir(req.Getenv)
 		}
+		// On macOS, /var is a symlink to /private/var. LocateClaudePath resolves
+		// the transcript, so use the same canonical root when recording its
+		// native relative path in the checkpoint manifest.
+		canonicalCfg, err := filepath.EvalSymlinks(cfg)
+		if err != nil {
+			return Result{}, fmt.Errorf("resolve Claude config directory: %w", err)
+		}
+		cfg = canonicalCfg
 		if req.SessionID == "" && req.PID > 0 {
 			req.SessionID, _ = ClaudeSessionForPID(cfg, req.PID)
 		}
 		var src ClaudeSource
-		var err error
 		if req.ClaudePath != "" {
 			src, err = LocateClaudePath(cfg, req.ClaudePath, req.SessionID)
 		} else {
