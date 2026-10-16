@@ -56,7 +56,7 @@ jobs:
           ldflags="-s -w -X ${module}/internal/version.version=${VERSION} -X ${module}/internal/version.commit=${COMMIT}"
           name="conductor_${VERSION}_${GOOS}_${GOARCH}"
           mkdir -p "dist/$name"
-          for bin in conductord conductor conductor-mcp; do
+          for bin in conductord conductor conductor-mcp conductor-mesh-dns; do
             go build -trimpath -ldflags "$ldflags" -o "dist/$name/$bin" "./cmd/$bin"
           done
           cp LICENSE NOTICE README.md "dist/$name/"
