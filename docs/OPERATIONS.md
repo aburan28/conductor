@@ -201,6 +201,17 @@ addresses over plain `http`; link-local addresses (cloud metadata) are always re
 environment proxy (`HTTPS_PROXY`) is honoured, with the destination checked before the proxy is
 asked for it. See [INFERENCE_ENDPOINTS.md](INFERENCE_ENDPOINTS.md).
 
+## Delphi
+
+`conductord` checks open delphi delegations — prompts members delegated to frontier models
+through provider batch APIs — every `--delphi-interval` (default one minute; a negative value
+switches delphi off and its routes answer `not_configured`). One replica works at a time
+(a session advisory lock), so it is safe to run several. Keys come from the project secret
+vault (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or the secret an enabled inference endpoint of
+that kind names), and requests go to the providers' own API hosts; `ANTHROPIC_BASE_URL` and
+`OPENAI_BASE_URL` in the server's environment redirect them through a proxy. Request text and
+answers pass through and are never written to the database. See [DELPHI.md](DELPHI.md).
+
 ## The config file
 
 `conductord --config conductor.yaml` (or `CONDUCTOR_CONFIG=conductor.yaml`) reads a YAML file
@@ -235,6 +246,7 @@ inline, or a reference to an empty variable or unreadable file is an error namin
 | `metrics.token_env` / `metrics.token_file` | `--metrics-token` | by reference only |
 | `notifications.poll`, `.allow_private_networks`, `.allow_http`, `.proxy` | `--notify-poll`, `--notify-allow-private-networks`, `--notify-allow-http`, `--notify-proxy` | a proxy URL with credentials is refused in the file |
 | `model_discovery.interval` | `--model-discovery-interval` | how often inference endpoints are asked which models they serve (default 1h; negative disables the background refresh) |
+| `delphi.interval` | `--delphi-interval` | how often open delphi delegations are checked with their provider (default 1m; negative disables delphi) |
 | `sso.token_ttl`, `sso.auto_provision`, `sso.default_project` | `--sso-token-ttl`, `--sso-auto-provision`, `--sso-default-project` | |
 | `sso.providers[]` | `--sso-provider` | `name`, `type`, `label`, `issuer`, `client_id`, `client_secret_env` or `client_secret_file` (default `CONDUCTOR_SSO_<NAME>_CLIENT_SECRET`), `domains`, `orgs`, `api_url`, `web_url`, `groups_claim`, `trusted_email_domains`. Providers given by `--sso-provider` or `CONDUCTOR_SSO_PROVIDERS` replace the file's rather than adding to them |
 | `features.<name>` | — | locks a feature flag for every organization |

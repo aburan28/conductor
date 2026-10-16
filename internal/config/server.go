@@ -39,6 +39,7 @@ type ServerFile struct {
 	Metrics        MetricsSection        `yaml:"metrics"`
 	Notifications  NotifySection         `yaml:"notifications"`
 	ModelDiscovery ModelDiscoverySection `yaml:"model_discovery"`
+	Delphi         DelphiSection         `yaml:"delphi"`
 	SSO            SSOSection            `yaml:"sso"`
 	Features       map[string]bool       `yaml:"features"`
 	Branding       BrandingSection       `yaml:"branding"`
@@ -108,6 +109,12 @@ type NotifySection struct {
 
 // ModelDiscoverySection configures the background refresh of inference endpoints.
 type ModelDiscoverySection struct {
+	Interval *admin.Duration `yaml:"interval"`
+}
+
+// DelphiSection configures delphi, batch delegation to frontier models (docs/DELPHI.md).
+type DelphiSection struct {
+	// Interval is how often open delegations are checked; negative disables delphi.
 	Interval *admin.Duration `yaml:"interval"`
 }
 
@@ -458,6 +465,7 @@ func (sf *ServerFile) FlagValues() map[string]string {
 	boolean("notify-allow-http", sf.Notifications.AllowHTTP)
 	str("notify-proxy", sf.Notifications.Proxy)
 	dur("model-discovery-interval", sf.ModelDiscovery.Interval)
+	dur("delphi-interval", sf.Delphi.Interval)
 	dur("sso-token-ttl", sf.SSO.TokenTTL)
 	str("sso-auto-provision", sf.SSO.AutoProvision)
 	str("sso-default-project", sf.SSO.DefaultProject)

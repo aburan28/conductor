@@ -726,6 +726,7 @@ conductor route T-42                                      # what would this rout
 conductor dispatch T-42                                   # send work to a model by policy, through the queue
 conductor models                                          # the model catalog (profiles marked "auto" follow discovery)
 conductor models endpoints add anthropic                  # connect an inference API; its models are discovered, not typed
+conductor delphi ask --task T-42 "Is this sound? ..."      # delegate to a frontier model via a batch API (half price, answered later)
 conductor models available --new                          # models the endpoints started serving this week
 conductor models pin worker.general claude <model>        # choose a model yourself; `unpin` returns it to discovery
 conductor models discover                                 # find Ollama / LM Studio / vLLM on this machine
@@ -1407,6 +1408,9 @@ Implemented and exercised by tests:
 - Conflict graph: scope overlap, duplicate intent, merge risk, with join/wait/split advice.
 - Presence, event log with gapless per-aggregate sequencing, SSE stream, live dashboard.
 - REST API, MCP gateway, CLI, session wrapper with heartbeat sidecar.
+- Delphi: delegation of prompts to frontier models through the Anthropic and OpenAI batch
+  APIs, with vault keys, spend in the usage ledger, and no request text or answer stored
+  ([docs/DELPHI.md](docs/DELPHI.md)).
 - Scheduler: reconcile (with outage recovery, so a control-plane outage does not reclaim
   live work), session reaping, stall detection, dependency gating, budget events announced
   once per threshold crossing, and retention.

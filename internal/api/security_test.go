@@ -429,7 +429,7 @@ func TestNoGETRouteLeaksAPrivateTask(t *testing.T) {
 	subst := map[string]string{
 		"{project}": h.project.ID, "{task}": started.TaskID, "{attempt}": started.AttemptID,
 		"{session}": session.ID, "{ticket}": ticket.ID, "{provider}": "google",
-		"{id}": string(h.alice.ID), "{name}": "does-not-exist",
+		"{id}": string(h.alice.ID), "{name}": "does-not-exist", "{ref}": "does-not-exist",
 	}
 	routes := []string{
 		"/v1/whoami", "/v1/projects", "/v1/projects/{project}", "/v1/projects/{project}/members",
@@ -465,6 +465,10 @@ func TestNoGETRouteLeaksAPrivateTask(t *testing.T) {
 		// Inference endpoints and the models they serve: endpoint names and model ids, no task
 		// data. Walked so a new GET cannot skip the privacy check.
 		"/v1/projects/{project}/inference/endpoints", "/v1/projects/{project}/inference/models",
+		// Delphi delegations: refs, providers, models, token counts and labels, no task data;
+		// answers are fetched from the provider. Walked so a new GET cannot skip the check.
+		"/v1/projects/{project}/delphi", "/v1/projects/{project}/delphi/{ref}",
+		"/v1/projects/{project}/delphi/{ref}/answer",
 		// The stream is read separately below; it never ends on its own.
 	}
 	assertRoutesCovered(t, append(routes, "/v1/projects/{project}/events/stream"))

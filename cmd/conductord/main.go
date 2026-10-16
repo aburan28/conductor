@@ -36,6 +36,7 @@ import (
 	"github.com/aburan28/conductor/internal/config"
 	"github.com/aburan28/conductor/internal/coord"
 	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/delphi/hosted"
 	"github.com/aburan28/conductor/internal/domain"
 	"github.com/aburan28/conductor/internal/githubapp"
 	"github.com/aburan28/conductor/internal/modelsrc"
@@ -108,6 +109,7 @@ type serveConfig struct {
 	secretKeyEnv      string
 	notifyPoll        time.Duration
 	modelDiscovery    time.Duration
+	delphiInterval    time.Duration
 	notifyNetwork     notify.NetworkPolicy
 	verbose           bool
 	// sso is single sign-on, with its providers built from --sso-provider.
@@ -236,6 +238,8 @@ func parseServeConfigMode(args []string, output io.Writer, checkOnly bool) (*ser
 			secretbox.EnvKey+" (the base64 key itself) takes precedence")
 	fs.DurationVar(&c.modelDiscovery, "model-discovery-interval", time.Hour,
 		"how often inference endpoints are asked which models they serve, so new releases appear in the catalog without anyone editing it (negative disables the background refresh; endpoints can still be refreshed on request)")
+	fs.DurationVar(&c.delphiInterval, "delphi-interval", time.Minute,
+		"how often open delphi delegations are checked with their provider's batch API (negative disables delphi: its routes answer not configured)")
 	fs.DurationVar(&c.notifyPoll, "notify-poll", 3*time.Second,
 		"how often the notification relay sends undelivered events to webhook and Slack channels (negative disables the relay)")
 	fs.BoolVar(&c.notifyNetwork.AllowPrivate, "notify-allow-private-networks", false,
@@ -630,6 +634,18 @@ func serve(args []string) error {
 			return opened.Value, err
 		},
 	}
+	// delphi delegates prompts to frontier models through provider batch APIs, with keys
+	// from the same vault. A negative interval switches it off entirely.
+	var delphiSvc *hosted.Service
+	if cfg.delphiInterval >= 0 {
+		delphiSvc = &hosted.Service{
+			Store: store, Logger: logger,
+			Key: func(ctx context.Context, project domain.Project, name string) (string, error) {
+				opened, err := vault.Open(ctx, project, name)
+				return opened.Value, err
+			},
+		}
+	}
 	server := api.New(store, svc, api.Options{
 		Logger:       logger,
 		Web:          web.Handler(),
@@ -643,6 +659,7 @@ func serve(args []string) error {
 		Notify:       notifier,
 		Secrets:      vault,
 		Models:       discovery,
+		Delphi:       delphiSvc,
 		Ops:          ops,
 		SSO:          cfg.sso,
 		Admin:        cfg.admin,
@@ -685,6 +702,12 @@ func serve(args []string) error {
 	}
 	if cfg.notifyPoll >= 0 {
 		goBackground("notification relay", notifier.Run)
+	}
+	if delphiSvc != nil && cfg.delphiInterval > 0 && !cfg.noScheduler {
+		goBackground("delphi", func(ctx context.Context) error {
+			delphiSvc.Run(ctx, cfg.delphiInterval)
+			return nil
+		})
 	}
 	if cfg.modelDiscovery > 0 && !cfg.noScheduler {
 		goBackground("model discovery", func(ctx context.Context) error {

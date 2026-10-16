@@ -22,6 +22,7 @@ import (
 
 	"github.com/aburan28/conductor/internal/coord"
 	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/delphi/hosted"
 	"github.com/aburan28/conductor/internal/domain"
 	"github.com/aburan28/conductor/internal/modelsrc"
 	"github.com/aburan28/conductor/internal/notify"
@@ -61,6 +62,9 @@ type Server struct {
 	secrets *secrets.Vault
 	// models discovers what inference endpoints serve; nil serves its routes as not configured.
 	models *modelsrc.Service
+	// delphi delegates prompts to frontier models through batch APIs; nil serves its routes
+	// as not configured (delphi.go).
+	delphi *hosted.Service
 	// ops is the operational surface: lifetime context, background work, streams (observe.go).
 	ops *opsState
 	// sso is single sign-on; it has no providers when none are configured (sso.go).
@@ -97,6 +101,8 @@ type Options struct {
 	Secrets *secrets.Vault
 	// Models is model discovery for inference endpoints (inference.go). Nil disables it.
 	Models *modelsrc.Service
+	// Delphi is batch delegation to frontier models (delphi.go). Nil disables it.
+	Delphi *hosted.Service
 	// Ops configures metrics, request deadlines, stream caps and the server lifetime
 	// (observe.go).
 	Ops OpsOptions
@@ -133,6 +139,7 @@ func New(store *db.Store, svc *coord.Service, opts Options) *Server {
 		notify:      opts.Notify,
 		secrets:     opts.Secrets,
 		models:      opts.Models,
+		delphi:      opts.Delphi,
 		admin:       newAdminState(opts.Admin),
 		localResume: opts.LocalResume,
 	}

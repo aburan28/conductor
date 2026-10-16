@@ -287,6 +287,38 @@ cloud product's own secret store.
 
 Run ` + "`conductor secrets <subcommand> -h`" + ` for its flags.
 `},
+	{name: "delphi", group: "Coordinate",
+		subs:    []string{"ask", "show", "answer", "list", "cancel", "reconcile"},
+		summary: "delegate a prompt to a frontier model through a batch API (half price, answered later)",
+		topic: `conductor delphi — delegate prompts to frontier models through provider batch APIs
+
+conductord submits each request to the provider's batch API (Anthropic Message Batches,
+OpenAI Batch) with the project's key from the secret vault, and checks it every minute.
+Batches cost half the interactive price and finish within 24 hours, usually much sooner.
+The request text goes straight to the provider and the answer is fetched from it when you
+ask; neither is stored in Conductor. Spend appears in conductor usage as "delegation".
+
+Usage:
+  conductor delphi ask [--provider anthropic|openai] [--model M] [--effort E] [--task T]
+                       [--label k=v] [--wait] PROMPT...     (or --file F, or stdin)
+  conductor delphi show REF                    state, tokens, cost
+  conductor delphi answer [--wait] REF         the answer, fetched from the provider
+  conductor delphi [list] [--state S]
+  conductor delphi cancel REF
+  conductor delphi reconcile REF (--adopt BATCH_ID | --abandon)   maintainers
+
+Example:
+  conductor secrets set ANTHROPIC_API_KEY
+  ref=$(conductor delphi ask --task T-42 "Is this reduction sound? ...")
+  conductor delphi answer --wait "$ref"
+
+Keys: ANTHROPIC_API_KEY / OPENAI_API_KEY in the vault, or the secret an enabled inference
+endpoint of that kind names. The anthropic default model is claude-mythos-5-1; openai needs
+--model. A request whose submit outcome was lost stays "submitting" and is never resent:
+OpenAI batches are found again automatically, Anthropic ones need reconcile.
+
+Run ` + "`conductor delphi <subcommand> -h`" + ` for its flags.
+`},
 	{name: "usage", group: "Coordinate", subs: []string{"sync"},
 		summary: "tokens and cost over time, by day, harness, model, or person"},
 	{name: "quota", group: "Coordinate",
