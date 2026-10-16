@@ -42,7 +42,9 @@ export function quotaCard(data) {
     const pct = usedPercent(s);
     const lvl = LEVEL[s.level];
     return h('div', { class: 'quota-row', style: { display: 'grid', gridTemplateColumns: 'minmax(9em, 1.4fr) 5em minmax(6em, 2fr) 4em 5.5em', gap: '10px', alignItems: 'center', padding: '6px 0' } },
-      h('div', {}, h('strong', {}, s.harness), ' ', h('span', { class: 'muted' }, s.account),
+	      h('div', {}, h('strong', {}, s.harness), ' ', h('span', { class: 'muted' }, s.account),
+	        h('div', { class: 'muted', title: s.identity_email ? 'Email from local profile metadata; current authentication is not verified' : 'Account email is unavailable on this server' },
+	          s.identity_email || 'account email unknown', s.machine ? ` · ${s.machine}` : ''),
         s.source_kind === 'undocumented' ? h('span', { class: 'muted', title: 'read from an endpoint the vendor does not document' }, ' · undocumented') : null),
       h('span', { class: 'mono' }, s.window),
       pct == null ? h('span', { class: 'muted' }, 'unknown') : meter(pct, 100, { warnAt: th.warn_percent / 100, dangerAt: th.critical_percent / 100 }),

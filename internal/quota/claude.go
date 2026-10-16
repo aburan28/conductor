@@ -319,6 +319,8 @@ const (
 // login in configDir. Readings whose window has already reset are dropped.
 func ReadClaudeTranscripts(configDir, account string, now time.Time) []Snapshot {
 	root := filepath.Join(configDir, "projects")
+	home, _ := os.UserHomeDir()
+	current := Identity("claude", configDir, home)
 	type file struct {
 		path string
 		mod  time.Time
@@ -350,6 +352,13 @@ func ReadClaudeTranscripts(configDir, account string, now time.Time) []Snapshot 
 	}
 	var all []Snapshot
 	for _, f := range files {
+		if current.ProviderAccountID != "" {
+			id, org := claudeTranscriptAccount(f.path)
+			if id != current.ProviderAccountID ||
+				(current.ProviderOrgID != "" && org != current.ProviderOrgID) {
+				continue // a previous login's limit is not this profile's limit
+			}
+		}
 		all = append(all, readTail(f.path, func(r io.Reader) []Snapshot { return ClaudeLimitSnapshots(r, account) })...)
 	}
 	var out []Snapshot
@@ -363,4 +372,25 @@ func ReadClaudeTranscripts(configDir, account string, now time.Time) []Snapshot 
 		out = append(out, s)
 	}
 	return out
+}
+
+func claudeTranscriptAccount(path string) (string, string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", ""
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(io.LimitReader(f, 256<<10))
+	sc.Buffer(make([]byte, 4096), 256<<10)
+	for i := 0; i < 128 && sc.Scan(); i++ {
+		var rec struct {
+			Type      string `json:"type"`
+			AccountID string `json:"ownerAccountUuid"`
+			OrgID     string `json:"ownerOrganizationUuid"`
+		}
+		if json.Unmarshal(sc.Bytes(), &rec) == nil && rec.Type == "bridge-session" {
+			return rec.AccountID, rec.OrgID
+		}
+	}
+	return "", ""
 }

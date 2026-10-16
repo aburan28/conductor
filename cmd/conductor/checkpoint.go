@@ -38,7 +38,7 @@ import (
 
 func cmdCheckpoint(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: conductor checkpoint <capture|list|show|resume|export|import|push|pull|prune>")
+		return errors.New("usage: conductor checkpoint <capture|list|show|resume|migrate|export|import|push|pull|prune>")
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
@@ -50,6 +50,8 @@ func cmdCheckpoint(ctx context.Context, args []string) error {
 		return checkpointShow(ctx, rest)
 	case "resume", "restore":
 		return checkpointResume(ctx, rest)
+	case "migrate":
+		return checkpointMigrate(ctx, rest)
 	case "export":
 		return checkpointExport(ctx, rest)
 	case "import":

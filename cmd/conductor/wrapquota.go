@@ -54,7 +54,7 @@ func startQuotaWatch(ctx context.Context, api *client.Client, project string, se
 	repoRoot, _ := config.FindRoot(cwd)
 	w := &quotaWatcher{
 		api: api, project: project, harness: h, cwd: cwd, pid: pid, session: session,
-		account: quota.AccountLabel(h, harnessStateDir(h, os.Getenv), home),
+		account: quota.AccountKey(h, harnessStateDir(h, os.Getenv), home),
 		started: time.Now().Add(-time.Minute), th: quota.LoadThresholds(repoRoot, os.Getenv), home: home,
 		collect:  func(ctx context.Context) quota.Result { return quota.Collect(ctx, quota.Options{}) },
 		raise:    quota.RaiseLocal,

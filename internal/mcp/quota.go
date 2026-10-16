@@ -74,9 +74,9 @@ func (s *Server) quotaTool(ctx context.Context, _ json.RawMessage) (any, error) 
 		home, _ = os.UserHomeDir()
 		switch harness {
 		case "claude":
-			account = quota.AccountLabel(harness, usage.ClaudeConfigDir(os.Getenv), home)
+			account = quota.AccountKey(harness, usage.ClaudeConfigDir(os.Getenv), home)
 		case "codex":
-			account = quota.AccountLabel(harness, usage.CodexHome(os.Getenv), home)
+			account = quota.AccountKey(harness, usage.CodexHome(os.Getenv), home)
 		}
 	} else {
 		var mine quota.View
