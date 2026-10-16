@@ -42,6 +42,10 @@ type ClaudeExtra struct {
 	Rel  string // safe path below native/claude/<session>/ in the checkpoint
 }
 
+// Native agent and tool transcripts are conversation history, not workspace files.
+// They may exceed the much smaller untracked-workspace-file allowance.
+const maxClaudeSidecarBytes = 64 << 20
+
 // LocateClaudePath pins an inventory row to its exact file. Session IDs alone can be
 // duplicated across project directories, and choosing the newest file is unsafe for a
 // migration. The path must be a regular transcript inside this config's projects tree.
@@ -153,8 +157,8 @@ func collectClaudeExtras(src *ClaudeSource) error {
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("Claude sidecar %s is not a regular file", p)
 		}
-		if info.Size() > maxUntrackedFileBytes {
-			return fmt.Errorf("Claude sidecar %s exceeds checkpoint file limit (%d bytes)", p, maxUntrackedFileBytes)
+		if info.Size() > maxClaudeSidecarBytes {
+			return fmt.Errorf("Claude sidecar %s exceeds checkpoint file limit (%d bytes)", p, maxClaudeSidecarBytes)
 		}
 		if rel, err := filepath.Rel(side, p); err == nil {
 			src.Extras = append(src.Extras, ClaudeExtra{Path: p, Rel: filepath.ToSlash(rel)})
@@ -178,8 +182,8 @@ func collectClaudeExtras(src *ClaudeSource) error {
 			if err != nil || !info.Mode().IsRegular() || !claudeAgentBelongsTo(p, src.SessionID) {
 				continue
 			}
-			if info.Size() > maxUntrackedFileBytes {
-				return fmt.Errorf("Claude agent transcript %s exceeds checkpoint file limit (%d bytes)", p, maxUntrackedFileBytes)
+			if info.Size() > maxClaudeSidecarBytes {
+				return fmt.Errorf("Claude agent transcript %s exceeds checkpoint file limit (%d bytes)", p, maxClaudeSidecarBytes)
 			}
 			src.Extras = append(src.Extras, ClaudeExtra{Path: p, Rel: "agents/" + entry.Name()})
 		}
