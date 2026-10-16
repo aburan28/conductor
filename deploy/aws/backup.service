@@ -1,0 +1,15 @@
+[Unit]
+Description=Back up and verify Conductor PostgreSQL in private S3
+After=postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=oneshot
+User=conductor
+Group=conductor
+EnvironmentFile=/etc/conductor/backup.env
+ExecStart=/opt/conductor/bootstrap/backup.sh
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true

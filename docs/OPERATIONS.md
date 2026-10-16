@@ -111,6 +111,11 @@ directly needs `LC_ALL=C` in its environment, or the postmaster aborts with
 `pg_dump -Fc` first and verify row counts of a few core tables against the
 source before cutting over.
 
+For a private single-host EC2 deployment with native PostgreSQL, SSM, Tailscale
+Serve, and verified S3 dumps, follow the [AWS control-plane runbook](../deploy/aws/README.md).
+Its cutover keeps the source database available for rollback until the restored
+service and client connections have been checked.
+
 **Upgrades and rollback.** Back up, then start the new version; it migrates. There are no
 down migrations, so rolling back means restoring the backup taken before the upgrade and
 starting the old binary against it. Anything recorded between the upgrade and the rollback
