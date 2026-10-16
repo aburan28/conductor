@@ -668,6 +668,27 @@ Usage:
 Example:
   conductor publish --funnel
 `},
+	{name: "wif", group: "Team and access", subs: []string{"exec", "local"},
+		summary: "launch Claude Code with OIDC workload credentials",
+		topic: `conductor wif — authenticate Claude Code with workload federation
+
+Usage:
+  conductor wif local init [--key-file PATH]       create a local issuer key
+  conductor wif local jwks [--key-file PATH]       export public JWKS only
+  conductor wif exec --provider gcp|aws|file|local [--aws-region REGION] \
+    [--identity-token-file PATH] [--key-file PATH] [--issuer URL --subject SUB] \
+    --rule-id fdrl_... --organization-id UUID --service-account-id svac_... \
+    [--workspace-id wrkspc_...] -- conductor wrap claude
+
+For local, register a separate issuer with inline JWKS in Claude Console and
+match the exact issuer, subject, and audience. Keep the private key on this
+laptop; it is a persistent signing credential. See docs/ANTHROPIC_WIF.md.
+
+Example:
+  conductor wif exec --provider local --issuer https://laptop.example.org/wif \
+    --subject conductor:laptop:adam --rule-id fdrl_... --organization-id UUID \
+    --service-account-id svac_... -- claude
+`},
 	{name: "github", group: "Team and access", subs: []string{"setup", "install", "link", "status", "check", "issues"},
 		nested:  map[string][]string{"issues": {"enable", "disable", "status", "sync"}},
 		summary: "create the GitHub App, link a repo, sync its issues into tasks"},
