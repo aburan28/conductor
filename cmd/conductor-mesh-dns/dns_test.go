@@ -99,9 +99,13 @@ func TestSRVForEachService(t *testing.T) {
 		}
 		records := parseSRVAnswers(t, resp)
 		var gotPorts []uint16
+		wantTarget := s.hostname
+		if name == "_conductor-mesh._tcp.mesh.internal." {
+			wantTarget = "localhost."
+		}
 		for _, rec := range records {
-			if rec.target != s.hostname {
-				t.Fatalf("%s: SRV target = %q, want %q", name, rec.target, s.hostname)
+			if rec.target != wantTarget {
+				t.Fatalf("%s: SRV target = %q, want %q", name, rec.target, wantTarget)
 			}
 			gotPorts = append(gotPorts, rec.port)
 		}
@@ -117,7 +121,8 @@ func TestSRVForEachService(t *testing.T) {
 }
 
 // TestConductorMeshCompat pins the record shape internal/peer's discovery
-// consumes: _conductor-mesh answers with two SRV records targeting this host.
+// consumes: _conductor-mesh answers with two SRV records targeting localhost,
+// the loopback daemon the local resolver (127.0.0.1:15353) fronts.
 func TestConductorMeshCompat(t *testing.T) {
 	s := testServer()
 	resp := s.answer(buildQuery(1, "_conductor-mesh._tcp.mesh.internal.", 33))
@@ -128,7 +133,7 @@ func TestConductorMeshCompat(t *testing.T) {
 	if records[0].port != 8443 || records[1].port != 8444 {
 		t.Fatalf("ports = %d/%d, want 8443/8444", records[0].port, records[1].port)
 	}
-	if records[0].target != "host-a.tail1234.ts.net." {
+	if records[0].target != "localhost." {
 		t.Fatalf("target = %q", records[0].target)
 	}
 }
@@ -274,7 +279,7 @@ func TestOverTheWireWithNetResolver(t *testing.T) {
 	if len(records) != 2 {
 		t.Fatalf("net.Resolver saw %d records, want 2", len(records))
 	}
-	if records[0].Target != "host-a.tail1234.ts.net." {
+	if records[0].Target != "localhost." {
 		t.Fatalf("net.Resolver target = %q", records[0].Target)
 	}
 	if records[0].Port != 8443 || records[1].Port != 8444 {

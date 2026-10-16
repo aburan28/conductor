@@ -104,6 +104,11 @@ func (s *dnsServer) answer(query []byte) []byte {
 	}
 	question := query[12:off]
 
+	// meshTarget keeps the loopback-peering record on localhost even when the
+	// tailnet target is a MagicDNS name: a remote peer dialing the mesh ports
+	// through serve would hit whatever serve publishes there (8443 is cairn's
+	// tailnet HTTPS in the standard layout), not the loopback daemon.
+	meshName := "_conductor-mesh._tcp.mesh.internal."
 	resp := make([]byte, 0, 512)
 	resp = append(resp, id[0], id[1])
 	rcode := byte(0)
@@ -114,6 +119,9 @@ func (s *dnsServer) answer(query []byte) []byte {
 		case qtype == 33: // SRV
 			if ports, ok := s.services[name]; ok {
 				target := encodeName(s.hostname)
+				if name == meshName {
+					target = encodeName("localhost.")
+				}
 				for _, port := range ports {
 					rdata := make([]byte, 0, 6+len(target))
 					var tmp [2]byte
