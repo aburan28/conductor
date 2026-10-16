@@ -47,8 +47,9 @@ and checkouts that need one task ledger.
    `tailscale serve reset`.
 
 `conductor doctor` reports Tailscale when it is connected and, for a loopback endpoint,
-prints the `tailscale serve` + `invite --endpoint` commands. `conductor invite` does the
-same when the join URL would otherwise point at `127.0.0.1`.
+prints the `tailscale serve` + `invite --endpoint` commands. `conductor publish` runs the
+serve step itself (and `conductor invite` prints the same advice when the join URL would
+otherwise point at `127.0.0.1`).
 
 | Surface | URL on the tailnet |
 |---|---|
@@ -119,6 +120,40 @@ If a private tailnet is not an option, put a tunnel in front of loopback and set
 `--public-url` to the tunnel hostname. Same invite and MCP URLs as above. Prefer Tailscale
 when every teammate can join the overlay; a public tunnel exposes more surface than a
 tailnet ACL.
+
+## Publish on the internet (Funnel)
+
+`tailscale funnel` takes the Serve setup above and exposes the same HTTPS endpoint on the
+public internet, no port forwarding or DNS of your own. `conductor publish --funnel` runs
+the whole recipe; by hand it is (for the self-signed-TLS daemon on `127.0.0.1:8443`):
+
+```bash
+tailscale serve --bg --https=443 https+insecure://127.0.0.1:8443   # tailnet only
+tailscale funnel --bg https+insecure://127.0.0.1:8443               # public internet
+```
+
+The MagicDNS name comes from `tailscale status --json` (`Self.DNSName`, minus the
+trailing dot); afterwards the dashboard is `https://<magicdns>/` and MCP is
+`https://<magicdns>/mcp`, and `--public-url` / `conductor invite … --endpoint` use the
+same URL as with Serve. Funnel needs HTTPS certificates and Funnel enabled for the tailnet
+in the admin console. Stop publishing with `tailscale funnel off` (or
+`tailscale serve reset` to also drop the tailnet route).
+
+Two footguns, both learned the hard way:
+
+- **Always pass the full URL form to funnel.** `tailscale funnel --bg 8443` treats the
+  number as a *backend target* and re-points the public route at plain
+  `http://127.0.0.1:8443`, breaking the TLS backend. Same for serve: pass
+  `https+insecure://127.0.0.1:8443`, not the port.
+- **Re-running funnel commands can clobber the root route.** After any funnel change,
+  check `tailscale serve status` (or re-run `conductor publish`, which verifies it) to
+  confirm `<magicdns>:443` still proxies to the intended backend.
+- On macOS the CLI lives at `/Applications/Tailscale.app/Contents/MacOS/Tailscale`.
+  Invoke it by that absolute path or through PATH; a plain symlink **crashes** with
+  "bundleIdentifier unknown to the registry".
+
+Prefer plain Serve (tailnet only) whenever teammates can join the tailnet: Funnel exposes
+the endpoint to everyone on the internet, so use it only for machines that cannot join.
 
 ## What Conductor does not build
 
