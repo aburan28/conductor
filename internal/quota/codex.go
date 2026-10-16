@@ -163,14 +163,44 @@ const (
 // ReadCodex returns the latest reading of every window of the login in codexHome.
 func ReadCodex(codexHome, account string, now time.Time) []Snapshot {
 	files := codexRecentRollouts(filepath.Join(codexHome, "sessions"), now)
+	home, _ := os.UserHomeDir()
+	current := Identity("codex", codexHome, home)
 	var all []Snapshot
 	for _, path := range files {
+		// A Codex state directory can contain rollouts created by a previous login.
+		// When the active account is known, only its own rollout headers may provide
+		// a readiness reading. Unknown headers cannot establish ownership.
+		if current.ProviderAccountID != "" && codexRolloutAccount(path) != current.ProviderAccountID {
+			continue
+		}
 		all = append(all, readTail(path, func(r io.Reader) []Snapshot { return CodexSnapshots(r, account) })...)
 	}
 	for i := range all {
 		all[i].StateDir = codexHome
 	}
 	return Latest(all)
+}
+
+func codexRolloutAccount(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(io.LimitReader(f, 256<<10))
+	sc.Buffer(make([]byte, 4096), 256<<10)
+	for i := 0; i < 4 && sc.Scan(); i++ {
+		var rec struct {
+			Type    string `json:"type"`
+			Payload struct {
+				CreatorAccountID string `json:"creator_account_id"`
+			} `json:"payload"`
+		}
+		if json.Unmarshal(sc.Bytes(), &rec) == nil && rec.Type == "session_meta" {
+			return rec.Payload.CreatorAccountID
+		}
+	}
+	return ""
 }
 
 // codexRecentRollouts lists the newest rollouts under the day directories Codex files them in

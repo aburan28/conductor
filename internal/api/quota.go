@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"os"
 	"regexp"
 	"time"
 
@@ -115,6 +116,14 @@ func (s *Server) quotaView(r *http.Request, p domain.Principal) (quota.View, err
 	snaps, err := s.store.ListQuota(r.Context(), p.ID)
 	if err != nil {
 		return quota.View{}, err
+	}
+	home, _ := os.UserHomeDir()
+	for i := range snaps {
+		if email, matched := quota.CurrentIdentity(snaps[i].Harness, snaps[i].Account,
+			snaps[i].Machine, home, os.Getenv); matched {
+			snaps[i].IdentityEmail = email
+			snaps[i].IdentitySource = "unverified_local_metadata"
+		}
 	}
 	// The server does not know each person's thresholds; the defaults classify here, and
 	// the CLI reclassifies with the owner's own.

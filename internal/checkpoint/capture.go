@@ -24,6 +24,10 @@ type Request struct {
 	SessionID string
 	PID       int
 	Since     time.Time
+	// ClaudePath pins an inventory row to the exact native transcript. It is used by
+	// migration and must be inside ClaudeConfigDir/projects.
+	ClaudePath      string
+	ClaudeConfigDir string
 
 	Reason      string
 	Note        string
@@ -121,20 +125,34 @@ func Capture(ctx context.Context, req Request) (Result, error) {
 
 	// 1. The native transcript.
 	var (
-		transcript []byte
-		nativePath string // inside the bundle
-		relPath    string
-		extras     = map[string][]byte{}
-		title      string
-		conv       *Conversation
+		transcript       []byte
+		claudeSourcePath string
+		nativePath       string // inside the bundle
+		relPath          string
+		extras           = map[string][]byte{}
+		title            string
+		conv             *Conversation
 	)
 	switch req.Harness {
 	case "claude":
-		cfg := usage.ClaudeConfigDir(req.Getenv)
+		cfg := req.ClaudeConfigDir
+		if cfg == "" {
+			cfg = usage.ClaudeConfigDir(req.Getenv)
+		}
 		if req.SessionID == "" && req.PID > 0 {
 			req.SessionID, _ = ClaudeSessionForPID(cfg, req.PID)
 		}
-		src, err := LocateClaude(cfg, req.Cwd, req.SessionID, req.Since)
+		var src ClaudeSource
+		var err error
+		if req.ClaudePath != "" {
+			src, err = LocateClaudePath(cfg, req.ClaudePath, req.SessionID)
+		} else {
+			src, err = LocateClaude(cfg, req.Cwd, req.SessionID, req.Since)
+		}
+		if err != nil {
+			return Result{}, err
+		}
+		before, err := os.Stat(src.Path)
 		if err != nil {
 			return Result{}, err
 		}
@@ -142,20 +160,20 @@ func Capture(ctx context.Context, req Request) (Result, error) {
 		if err != nil {
 			return Result{}, err
 		}
+		after, err := os.Stat(src.Path)
+		if err != nil || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
+			return Result{}, fmt.Errorf("Claude transcript changed during capture; retry")
+		}
 		transcript = data
+		claudeSourcePath = src.Path
 		req.SessionID = src.SessionID
 		nativePath = NativeDir + "/claude/" + src.SessionID + ".jsonl"
 		if rel, err := filepath.Rel(cfg, src.Path); err == nil {
 			relPath = filepath.ToSlash(rel)
 		}
-		side := strings.TrimSuffix(src.Path, ".jsonl")
-		for _, p := range src.Extras {
-			rel, err := filepath.Rel(side, p)
-			if err != nil {
-				continue
-			}
-			if data, err := os.ReadFile(p); err == nil {
-				extras[NativeDir+"/claude/"+src.SessionID+"/"+filepath.ToSlash(rel)] = data
+		for _, extra := range src.Extras {
+			if data, err := os.ReadFile(extra.Path); err == nil {
+				extras[NativeDir+"/claude/"+src.SessionID+"/"+extra.Rel] = data
 			}
 		}
 		conv = ParseClaude(transcript)
@@ -256,6 +274,14 @@ func Capture(ctx context.Context, req Request) (Result, error) {
 	}
 	if err := b.Add(ContinuationPath, RenderContinuation(m, conv, filesNow)); err != nil {
 		return Result{}, err
+	}
+	if claudeSourcePath != "" {
+		// A live source may append while its workspace is being captured. Do not
+		// publish a checkpoint that already trails the selected transcript.
+		latest, err := os.ReadFile(claudeSourcePath)
+		if err != nil || !bytes.Equal(latest, transcript) {
+			return Result{}, fmt.Errorf("Claude transcript changed during capture; retry")
+		}
 	}
 
 	// 4. Seal, store, prune.

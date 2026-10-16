@@ -384,7 +384,7 @@ func quotaSuggest(ctx context.Context, args []string) error {
 	home, _ := os.UserHomeDir()
 	acct := *account
 	if acct == "" {
-		acct = quota.AccountLabel(h, harnessStateDir(h, os.Getenv), home)
+		acct = quota.AccountKey(h, harnessStateDir(h, os.Getenv), home)
 	}
 	repoRoot, _ := config.FindRoot(".")
 	th := quota.LoadThresholds(repoRoot, os.Getenv)
@@ -449,7 +449,7 @@ func runStatuslineShim(ctx context.Context, in io.Reader, out, errOut io.Writer,
 	cfg := usage.ClaudeConfigDir(getenv)
 	home, _ := os.UserHomeDir()
 	now := time.Now()
-	snaps := quota.StatuslineSnapshots(payload, quota.AccountLabel("claude", cfg, home), now)
+	snaps := quota.StatuslineSnapshots(payload, quota.AccountKey("claude", cfg, home), now)
 	for i := range snaps {
 		snaps[i].Machine, snaps[i].StateDir = quotaMachine(), cfg
 	}
