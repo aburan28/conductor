@@ -38,6 +38,7 @@ type migrationReceipt struct {
 	CheckpointPath          string                        `json:"checkpoint_path,omitempty"`
 	CheckpointSHA           string                        `json:"checkpoint_sha256,omitempty"`
 	Workspace               checkpoint.Workspace          `json:"workspace"`
+	WorkspaceRestoredTo     string                        `json:"workspace_restored_to,omitempty"`
 	Conductor               checkpoint.ConductorRef       `json:"conductor,omitempty"`
 	TargetHarness           string                        `json:"target_harness"`
 	TargetDir               string                        `json:"target_dir,omitempty"`
@@ -304,6 +305,9 @@ func migrateClaudeRow(ctx context.Context, row checkpoint.ClaudeInventoryRow, ta
 			if captureOnly {
 				return old, nil
 			}
+			if !old.TranscriptOnly && old.TargetDir != old.Source.Cwd && old.WorkspaceRestoredTo != old.TargetDir {
+				return old, errors.New("previous migration has no verified target workspace restoration")
+			}
 			if digest, err := migrationHashFile(old.CheckpointPath); err != nil || digest != old.CheckpointSHA {
 				return old, errors.New("previous migration checkpoint is missing or changed")
 			}
@@ -365,6 +369,9 @@ func migrateClaudeRow(ctx context.Context, row checkpoint.ClaudeInventoryRow, ta
 		}
 		return receipt, nil
 	}
+	if !receipt.TranscriptOnly && receipt.Workspace.Skipped != "" {
+		return receipt, fmt.Errorf("checkpoint omitted workspace state (%s); repair the source checkout or explicitly use --transcript-only", receipt.Workspace.Skipped)
+	}
 	st, err := os.Stat(targetDir)
 	if err != nil || !st.IsDir() {
 		return receipt, fmt.Errorf("target checkout %s is unavailable; use --dir or --map", targetDir)
@@ -387,6 +394,14 @@ func migrateClaudeRow(ctx context.Context, row checkpoint.ClaudeInventoryRow, ta
 	}
 	bundle, err := checkpoint.OpenFile(receipt.CheckpointPath, nil)
 	if err != nil {
+		return receipt, err
+	}
+	if !receipt.TranscriptOnly {
+		if gap := migrationWorkspaceGap(bundle.Manifest); gap != "" {
+			return receipt, fmt.Errorf("checkpoint workspace is incomplete (%s); repair the source checkout or explicitly use --transcript-only", gap)
+		}
+	}
+	if err := restoreMigrationWorkspace(ctx, &receipt, row.Cwd, targetDir, bundle, file); err != nil {
 		return receipt, err
 	}
 	data, ok := bundle.File(checkpoint.ContinuationPath)
@@ -430,6 +445,48 @@ func migrateClaudeRow(ctx context.Context, row checkpoint.ClaudeInventoryRow, ta
 		return receipt, err
 	}
 	return receipt, nil
+}
+
+func migrationWorkspaceGap(m checkpoint.Manifest) string {
+	if m.Workspace.Skipped != "" {
+		return m.Workspace.Skipped
+	}
+	if m.Repo.Root == "" || m.Repo.Head == "" {
+		return "Git root or commit missing"
+	}
+	if m.Repo.Ahead > 0 && !m.Workspace.CommitsBundle {
+		return "unpushed commits missing"
+	}
+	if m.Repo.Modified > 0 && m.Workspace.PatchBytes == 0 {
+		return "tracked patch missing"
+	}
+	if m.Repo.Untracked > len(m.Workspace.UntrackedFiles) {
+		return "untracked files missing"
+	}
+	return ""
+}
+
+func restoreMigrationWorkspace(ctx context.Context, receipt *migrationReceipt, sourceDir, targetDir string, bundle *checkpoint.Bundle, receiptFile string) error {
+	if receipt.TranscriptOnly || targetDir == sourceDir {
+		return nil
+	}
+	if receipt.WorkspaceRestoredTo != "" {
+		if receipt.WorkspaceRestoredTo != targetDir {
+			return fmt.Errorf("checkpoint workspace was already restored to %s; use that target checkout", receipt.WorkspaceRestoredTo)
+		}
+		return nil
+	}
+	if bundle.Manifest.Repo.Root == "" || bundle.Manifest.Repo.Head == "" {
+		return errors.New("checkpoint has no complete Git workspace; explicitly use --transcript-only")
+	}
+	if _, err := checkpoint.RestoreWorkspace(ctx, bundle, checkpoint.RestoreOptions{Dir: targetDir}); err != nil {
+		return fmt.Errorf("restore target workspace: %w", err)
+	}
+	if head, err := checkpoint.Git(ctx, targetDir, "rev-parse", "HEAD"); err != nil || strings.TrimSpace(string(head)) != bundle.Manifest.Repo.Head {
+		return errors.New("restored target checkout does not match checkpoint commit")
+	}
+	receipt.WorkspaceRestoredTo = targetDir
+	return saveMigrationReceipt(receiptFile, *receipt)
 }
 
 func migrationSourceStatus(row checkpoint.ClaudeInventoryRow, records []localstate.Record) (string, checkpoint.ConductorRef) {

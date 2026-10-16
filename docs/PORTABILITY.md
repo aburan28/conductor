@@ -140,7 +140,10 @@ of the current task without editing. Conductor waits for that turn to complete, 
 a fresh app-server process to check that the thread can be resumed. The local owner-only
 receipt under `~/.conductor/migrations/` binds the source path, transcript hash, and
 sidecar-file digest to the
-checkpoint hash, target directory, Codex thread ID, and result. Repeating the command for
+checkpoint hash, target directory, Codex thread ID, and result. When the source workspace
+is available, a distinct target checkout must already exist and be clean. Conductor
+restores the checkpoint's Git commit, tracked patch, and captured untracked files there
+before Codex starts, and refuses a checkpoint whose workspace layer was skipped. Repeating the command for
 the same source snapshot verifies and reuses its target. A source append gets a new hash
 and therefore a new snapshot and receipt; a changed agent or tool sidecar does too. A batch reports every row, including failures,
 and exits nonzero if any selected conversation did not reach a resumable Codex thread.

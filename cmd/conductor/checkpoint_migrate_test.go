@@ -98,3 +98,84 @@ func TestCheckpointMigrationCaptureIsExactAndIdempotent(t *testing.T) {
 		t.Fatalf("new source snapshot reused the old checkpoint: %+v, %v", updated, err)
 	}
 }
+
+func TestCheckpointMigrationRestoresCapturedWorkspace(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	t.Setenv("CONDUCTOR_STATE_DIR", filepath.Join(root, "conductor"))
+	source := filepath.Join(root, "source")
+	target := filepath.Join(root, "target")
+	if err := os.Mkdir(source, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"init", "-b", "main"}, {"config", "user.email", "test@example.invalid"}, {"config", "user.name", "Test"}} {
+		if _, err := checkpoint.Git(ctx, source, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tracked := filepath.Join(source, "tracked.txt")
+	if err := os.WriteFile(tracked, []byte("before\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "tracked.txt"}, {"commit", "-m", "base"}} {
+		if _, err := checkpoint.Git(ctx, source, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := checkpoint.Git(ctx, root, "clone", source, target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tracked, []byte("after\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "new.txt"), []byte("new\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configDir := filepath.Join(root, "claude")
+	project := filepath.Join(configDir, "projects", "source")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcript := filepath.Join(project, "session.jsonl")
+	if err := os.WriteFile(transcript, []byte(`{"type":"user","sessionId":"session","cwd":"`+source+`","message":{"role":"user","content":"continue"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := checkpoint.Capture(ctx, checkpoint.Request{Harness: "claude", SessionID: "session", Cwd: source, ClaudePath: transcript, ClaudeConfigDir: configDir, Force: true})
+	if err != nil || result.Manifest.Workspace.Skipped != "" {
+		t.Fatalf("capture omitted workspace: %+v, %v", result.Manifest.Workspace, err)
+	}
+	if gap := migrationWorkspaceGap(result.Manifest); gap != "" {
+		t.Fatalf("captured workspace is incomplete: %s", gap)
+	}
+	missing := result.Manifest
+	missing.Workspace.PatchBytes = 0
+	if gap := migrationWorkspaceGap(missing); gap != "tracked patch missing" {
+		t.Fatalf("missing tracked patch was accepted: %q", gap)
+	}
+	missing = result.Manifest
+	missing.Workspace.UntrackedFiles = nil
+	if gap := migrationWorkspaceGap(missing); gap != "untracked files missing" {
+		t.Fatalf("missing untracked file was accepted: %q", gap)
+	}
+	bundle, err := checkpoint.OpenFile(result.Path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptFile := filepath.Join(root, "receipt.json")
+	receipt := migrationReceipt{TargetDir: target, Workspace: result.Manifest.Workspace}
+	if err := restoreMigrationWorkspace(ctx, &receipt, source, target, bundle, receiptFile); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{"tracked.txt": "after\n", "new.txt": "new\n"} {
+		got, err := os.ReadFile(filepath.Join(target, name))
+		if err != nil || string(got) != want {
+			t.Fatalf("restored %s = %q, %v", name, got, err)
+		}
+	}
+	if receipt.WorkspaceRestoredTo != target {
+		t.Fatalf("missing restoration receipt: %+v", receipt)
+	}
+	if err := restoreMigrationWorkspace(ctx, &receipt, source, target, bundle, receiptFile); err != nil {
+		t.Fatalf("same target was not idempotent: %v", err)
+	}
+}
