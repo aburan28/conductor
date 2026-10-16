@@ -21,6 +21,7 @@ struct MainWindow: View {
             case .tools: ConnectToolsSheet()
             case .github: GitHubSheet()
             case .join: JoinSheet()
+            case .publish: PublishSheet()
             }
         }
         .onChange(of: model.windowRequest) { request in
