@@ -288,7 +288,7 @@ cloud product's own secret store.
 Run ` + "`conductor secrets <subcommand> -h`" + ` for its flags.
 `},
 	{name: "delphi", group: "Coordinate",
-		subs:    []string{"ask", "show", "answer", "list", "cancel", "reconcile"},
+		subs:    []string{"ask", "show", "answer", "list", "profiles", "cancel", "reconcile"},
 		summary: "delegate a prompt to a frontier model through a batch API (half price, answered later)",
 		topic: `conductor delphi — delegate prompts to frontier models through provider batch APIs
 
@@ -299,8 +299,10 @@ The request text goes straight to the provider and the answer is fetched from it
 ask; neither is stored in Conductor. Spend appears in conductor usage as "delegation".
 
 Usage:
-  conductor delphi ask [--provider anthropic|openai] [--model M] [--effort E] [--task T]
-                       [--label k=v] [--wait] PROMPT...     (or --file F, or stdin)
+  conductor delphi ask [--profile ALIAS | --provider anthropic|openai --model M] [--effort E]
+                       [--task T] [--label k=v] [--wait [--fallback T1,T2]]
+                       PROMPT...                (or --file F, or stdin)
+  conductor delphi profiles                    tiers from the model catalog
   conductor delphi show REF                    state, tokens, cost
   conductor delphi answer [--wait] REF         the answer, fetched from the provider
   conductor delphi [list] [--state S]
@@ -316,6 +318,11 @@ Keys: ANTHROPIC_API_KEY / OPENAI_API_KEY in the vault, or the secret an enabled 
 endpoint of that kind names. The anthropic default model is claude-mythos-5-1; openai needs
 --model. A request whose submit outcome was lost stays "submitting" and is never resent:
 OpenAI batches are found again automatically, Anthropic ones need reconcile.
+
+Tiers: --profile names a model-catalog alias (.conductor/models.yaml); a profile with
+harness: delphi wins over agent profiles under the same alias. Fallback: with --wait, a
+refusal is resubmitted to each --fallback target in turn ("provider:model[@effort]" or a
+profile; default $CONDUCTOR_DELPHI_FALLBACK) as REF-fb1, REF-fb2, ...
 
 Run ` + "`conductor delphi <subcommand> -h`" + ` for its flags.
 `},

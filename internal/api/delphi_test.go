@@ -25,12 +25,13 @@ type fakeBatches struct {
 	mu      sync.Mutex
 	keys    []string
 	batches map[string][]map[string]any
+	refuse  map[string]bool // custom ids the model declines
 	srv     *httptest.Server
 }
 
 func newFakeBatches(t *testing.T) *fakeBatches {
 	t.Helper()
-	f := &fakeBatches{batches: map[string][]map[string]any{}}
+	f := &fakeBatches{batches: map[string][]map[string]any{}, refuse: map[string]bool{}}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -54,6 +55,10 @@ func newFakeBatches(t *testing.T) *fakeBatches {
 		case r.Method == http.MethodGet && len(parts) == 5 && parts[4] == "results":
 			w.Header().Set("content-type", "application/binary")
 			for _, req := range f.batches[parts[3]] {
+				if f.refuse[req["custom_id"].(string)] {
+					fmt.Fprintf(w, `{"custom_id":%q,"result":{"type":"succeeded","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-mythos-5-1","content":[],"stop_reason":"refusal","stop_sequence":null,"stop_details":{"type":"refusal","category":"cyber","explanation":"declined"},"usage":{"input_tokens":100,"output_tokens":0}}}}`+"\n", req["custom_id"])
+					continue
+				}
 				msg := req["params"].(map[string]any)["messages"].([]any)[0].(map[string]any)
 				text := msg["content"].([]any)[0].(map[string]any)["text"].(string)
 				fmt.Fprintf(w, `{"custom_id":%q,"result":{"type":"succeeded","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-mythos-5-1","content":[{"type":"text","text":%q}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":100,"output_tokens":200}}}}`+"\n",
@@ -180,5 +185,99 @@ func TestDelphiEndToEnd(t *testing.T) {
 	}
 	if code, _ := h.do(maintTok, http.MethodPost, h.projectPath("/delphi/q1/reconcile"), map[string]any{"abandon": true}); code != http.StatusConflict {
 		t.Fatalf("reconcile of a finished delegation = %d", code)
+	}
+}
+
+func TestDelphiProfilesAndFallback(t *testing.T) {
+	h := newHarness(t)
+	svc := h.withDelphi(t)
+	fake := newFakeBatches(t)
+	t.Setenv("ANTHROPIC_BASE_URL", fake.srv.URL)
+	_, maintTok := h.member("mia", domain.RoleMaintainer)
+	if code, resp := h.do(maintTok, http.MethodPost, h.projectPath("/secrets"),
+		map[string]any{"name": "ANTHROPIC_API_KEY", "value": "sk-ant-vault"}); code != http.StatusCreated {
+		t.Fatalf("seed secret = %d %s", code, resp)
+	}
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_, _ = h.store.Pool().Exec(context.Background(), `DELETE FROM model_profiles WHERE organization_id = $1::uuid AND alias LIKE 'dt-%'`, h.project.OrganizationID)
+	})
+	for _, p := range []domain.ModelProfile{
+		{Alias: "dt-implementer", Harness: "claude", Provider: "anthropic", Model: "claude-sonnet-5", ReasoningEffort: "medium", Billing: "tokens", Tier: "T2", Enabled: true},
+		{Alias: "dt-implementer", Harness: "delphi", Provider: "anthropic", Model: "claude-haiku-5-5", ReasoningEffort: "max", Billing: "tokens", Tier: "T2", Enabled: true},
+		{Alias: "dt-local", Harness: "opencode", Provider: "vllm", Model: "vllm/x", ReasoningEffort: "low", Billing: "tokens", Tier: "T2", Enabled: true},
+		{Alias: "dt-off", Harness: "delphi", Provider: "anthropic", Model: "claude-opus-5-5", ReasoningEffort: "high", Billing: "tokens", Tier: "T2", Enabled: false},
+	} {
+		p.OrganizationID = h.project.OrganizationID
+		if _, err := h.store.UpsertModelProfile(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	code, resp := h.do(h.bobTok, http.MethodGet, h.projectPath("/delphi/profiles"), nil)
+	if code != http.StatusOK {
+		t.Fatalf("profiles = %d %s", code, resp)
+	}
+	var list struct{ Profiles []hosted.Profile }
+	_ = json.Unmarshal(resp, &list)
+	got := map[string]hosted.Profile{}
+	for _, p := range list.Profiles {
+		got[p.Name] = p
+	}
+	if p := got["dt-implementer"]; p.Model != "claude-haiku-5-5" || p.Effort != "max" || p.Harness != "delphi" {
+		t.Fatalf("the delphi profile should win: %+v", list.Profiles)
+	}
+	if _, ok := got["dt-local"]; ok {
+		t.Fatalf("a vllm profile is not a delphi tier: %+v", list.Profiles)
+	}
+	if _, ok := got["dt-off"]; ok {
+		t.Fatalf("a disabled profile is listed: %+v", list.Profiles)
+	}
+
+	if code, resp := h.do(h.bobTok, http.MethodPost, h.projectPath("/delphi"),
+		map[string]any{"ref": "x", "text": "q", "profile": "dt-off"}); code != http.StatusBadRequest || !strings.Contains(string(resp), "dt-off") {
+		t.Fatalf("disabled profile = %d %s", code, resp)
+	}
+	fake.refuse["q2"] = true
+	code, resp = h.do(h.bobTok, http.MethodPost, h.projectPath("/delphi"), map[string]any{"ref": "q2", "text": "probe it", "profile": "dt-implementer"})
+	if code != http.StatusCreated {
+		t.Fatalf("submit by profile = %d %s", code, resp)
+	}
+	var d domain.DelphiDelegation
+	_ = json.Unmarshal(resp, &d)
+	sent := fake.batches[d.BatchID][0]["params"].(map[string]any)
+	if d.Model != "claude-haiku-5-5" || d.Profile != "dt-implementer" || sent["output_config"].(map[string]any)["effort"] != "max" {
+		t.Fatalf("profile submit: %+v %v", d, sent)
+	}
+	// An explicit model overrides the profile's.
+	code, resp = h.do(h.bobTok, http.MethodPost, h.projectPath("/delphi"),
+		map[string]any{"ref": "q3", "text": "other", "profile": "dt-implementer", "model": "claude-opus-5-5"})
+	if _ = json.Unmarshal(resp, &d); code != http.StatusCreated || d.Model != "claude-opus-5-5" {
+		t.Fatalf("model over profile = %d %+v", code, d)
+	}
+	// fallback_of must name a refused delegation.
+	if code, _ := h.do(h.bobTok, http.MethodPost, h.projectPath("/delphi"),
+		map[string]any{"ref": "q2-fb1", "text": "probe it", "fallback_of": "q2"}); code != http.StatusBadRequest {
+		t.Fatalf("fallback of a running delegation = %d", code)
+	}
+	if err := svc.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	code, resp = h.do(h.bobTok, http.MethodGet, h.projectPath("/delphi/q2"), nil)
+	if _ = json.Unmarshal(resp, &d); code != http.StatusOK || d.Status != "refused" || d.RefusalCategory != "cyber" {
+		t.Fatalf("refused = %d %+v", code, d)
+	}
+	code, resp = h.do(h.bobTok, http.MethodPost, h.projectPath("/delphi"),
+		map[string]any{"ref": "q2-fb1", "text": "probe it", "model": "claude-opus-5-5", "fallback_of": "q2"})
+	if _ = json.Unmarshal(resp, &d); code != http.StatusCreated || d.FallbackOf != "q2" {
+		t.Fatalf("fallback = %d %s", code, resp)
+	}
+	if code, _ := h.do(h.bobTok, http.MethodPost, h.projectPath("/delphi"),
+		map[string]any{"ref": "q4", "text": "x", "fallback_of": "q3"}); code != http.StatusBadRequest {
+		t.Fatalf("fallback of a succeeded delegation = %d", code)
+	}
+	if code, _ := h.do(h.bobTok, http.MethodPost, h.projectPath("/delphi"),
+		map[string]any{"ref": "profiles", "text": "x"}); code != http.StatusBadRequest {
+		t.Fatalf("reserved ref = %d", code)
 	}
 }

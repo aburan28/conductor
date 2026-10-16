@@ -132,6 +132,81 @@ type SubmitRequest struct {
 	Params    map[string]any    `json:"params,omitempty"`
 	Labels    map[string]string `json:"labels,omitempty"`
 	TaskID    domain.ID         `json:"task_id,omitempty"`
+	// Profile names a model-catalog alias; it supplies provider, model and effort, and the
+	// fields above override it.
+	Profile string `json:"profile,omitempty"`
+	// FallbackOf is the ref of a delegation whose model refused this same request.
+	FallbackOf string `json:"fallback_of,omitempty"`
+}
+
+// Profile is a tier delphi can submit to: a model-catalog alias with an Anthropic or
+// OpenAI profile.
+type Profile struct {
+	Name     string `json:"name"`
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	Effort   string `json:"effort,omitempty"`
+	Tier     string `json:"tier,omitempty"`
+	// Harness is the catalog harness the profile came from; "delphi" profiles are written
+	// for delegation and win over agent profiles under the same alias.
+	Harness string `json:"harness"`
+}
+
+// Profiles lists the tiers the organization's model catalog offers delphi, one per alias:
+// the enabled profile with harness "delphi" if there is one, otherwise the first enabled
+// Anthropic or OpenAI profile under that alias.
+func (s *Service) Profiles(ctx context.Context, project domain.Project) ([]Profile, error) {
+	all, err := s.Store.ListModelProfiles(ctx, project.OrganizationID)
+	if err != nil {
+		return nil, err
+	}
+	best := map[string]domain.ModelProfile{}
+	for _, p := range all {
+		if !p.Enabled || DefaultSecret[p.Provider] == "" || p.Model == "" {
+			continue
+		}
+		cur, seen := best[p.Alias]
+		if !seen || (p.Harness == domain.DelphiHarness && cur.Harness != domain.DelphiHarness) {
+			best[p.Alias] = p
+		}
+	}
+	out := make([]Profile, 0, len(best))
+	for alias, p := range best {
+		effort := string(p.ReasoningEffort)
+		if effort == "none" {
+			effort = ""
+		}
+		out = append(out, Profile{Name: alias, Provider: p.Provider, Model: p.Model, Effort: effort, Tier: string(p.Tier), Harness: p.Harness})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// resolveProfile fills the request from a catalog profile; fields the caller set win.
+func (s *Service) resolveProfile(ctx context.Context, project domain.Project, in *SubmitRequest) error {
+	profiles, err := s.Profiles(ctx, project)
+	if err != nil {
+		return err
+	}
+	var names []string
+	for _, p := range profiles {
+		if p.Name != in.Profile {
+			names = append(names, p.Name)
+			continue
+		}
+		if in.Provider == "" || in.Provider == p.Provider {
+			in.Provider = p.Provider
+			if in.Model == "" {
+				in.Model = p.Model
+			}
+		}
+		if in.Effort == "" && in.Provider == p.Provider {
+			in.Effort = p.Effort
+		}
+		return nil
+	}
+	return fmt.Errorf("%w: profile %q has no enabled anthropic or openai model in the catalog (delphi profiles: %s); add one to .conductor/models.yaml with harness: delphi",
+		domain.ErrInvalidArgument, in.Profile, strings.Join(names, ", "))
 }
 
 // Limits on caller labels, which are stored: they are for ids and tags, not content.
@@ -185,12 +260,29 @@ func (s *Service) Submit(ctx context.Context, project domain.Project, by domain.
 	if in.Ref == "" {
 		in.Ref = newRef()
 	}
+	if in.Ref == "profiles" {
+		return d, false, fmt.Errorf("%w: ref \"profiles\" is reserved", domain.ErrInvalidArgument)
+	}
 	if len(in.Labels) > maxLabels {
 		return d, false, fmt.Errorf("%w: at most %d labels", domain.ErrInvalidArgument, maxLabels)
 	}
 	for k, v := range in.Labels {
 		if len(k)+len(v) > maxLabelBytes {
 			return d, false, fmt.Errorf("%w: label %q is too long (labels hold ids and tags, not content)", domain.ErrInvalidArgument, k)
+		}
+	}
+	if in.Profile != "" {
+		if err := s.resolveProfile(ctx, project, &in); err != nil {
+			return d, false, err
+		}
+	}
+	if in.FallbackOf != "" {
+		prev, err := s.Store.GetDelphiDelegation(ctx, project.ID, in.FallbackOf)
+		if err != nil {
+			return d, false, fmt.Errorf("%w: fallback_of %q is not a delegation in this project", domain.ErrInvalidArgument, in.FallbackOf)
+		}
+		if prev.Status != string(delphi.Refused) {
+			return d, false, fmt.Errorf("%w: fallback_of %q was not refused (it is %s %s)", domain.ErrInvalidArgument, in.FallbackOf, prev.State, prev.Status)
 		}
 	}
 	if in.TaskID != "" {
@@ -210,7 +302,7 @@ func (s *Service) Submit(ctx context.Context, project domain.Project, by domain.
 	}
 	row := domain.DelphiDelegation{OrganizationID: project.OrganizationID, ProjectID: project.ID, Ref: req.ID,
 		PrincipalID: by, TaskID: in.TaskID, Provider: req.Provider, Model: req.Model,
-		BodySHA256: delphi.Hash(req), Label: newLabel(), Labels: in.Labels}
+		BodySHA256: delphi.Hash(req), Label: newLabel(), Labels: in.Labels, Profile: in.Profile, FallbackOf: in.FallbackOf}
 	d, err = s.Store.CreateDelphiDelegation(ctx, row)
 	if errors.Is(err, domain.ErrDuplicate) {
 		if d.BodySHA256 == row.BodySHA256 {

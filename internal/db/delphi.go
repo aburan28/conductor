@@ -20,7 +20,7 @@ const delphiColumns = `
 	COALESCE(task_id::text, ''), provider, model, body_sha256, label, batch_id, state, status,
 	truncated, stop_reason, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
 	cost_usd::float8, error_type, error_detail, refusal_category, labels, submitted_at,
-	finished_at, updated_at`
+	finished_at, updated_at, profile, fallback_of`
 
 func scanDelphi(scan func(...any) error) (domain.DelphiDelegation, error) {
 	var d domain.DelphiDelegation
@@ -29,7 +29,7 @@ func scanDelphi(scan func(...any) error) (domain.DelphiDelegation, error) {
 		&d.Provider, &d.Model, &d.BodySHA256, &d.Label, &d.BatchID, &d.State, &d.Status,
 		&d.Truncated, &d.StopReason, &d.InputTokens, &d.OutputTokens, &d.CacheReadTokens,
 		&d.CacheWriteTokens, &d.CostUSD, &d.ErrorType, &d.ErrorDetail, &d.RefusalCategory,
-		&labels, &d.SubmittedAt, &d.FinishedAt, &d.UpdatedAt)
+		&labels, &d.SubmittedAt, &d.FinishedAt, &d.UpdatedAt, &d.Profile, &d.FallbackOf)
 	if err == nil && len(labels) > 0 {
 		err = json.Unmarshal(labels, &d.Labels)
 	}
@@ -50,11 +50,11 @@ func (s *Store) CreateDelphiDelegation(ctx context.Context, d domain.DelphiDeleg
 	}
 	out, err := scanDelphi(s.pool.QueryRow(ctx, `
 		INSERT INTO delphi_delegations (organization_id, project_id, ref, principal_id, task_id,
-		        provider, model, body_sha256, label, state, labels)
-		VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5::uuid, $6, $7, $8, $9, 'submitting', $10::jsonb)
+		        provider, model, body_sha256, label, state, labels, profile, fallback_of)
+		VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5::uuid, $6, $7, $8, $9, 'submitting', $10::jsonb, $11, $12)
 		RETURNING `+delphiColumns,
 		d.OrganizationID, d.ProjectID, d.Ref, nullable(d.PrincipalID), nullable(d.TaskID),
-		d.Provider, d.Model, d.BodySHA256, d.Label, labels).Scan)
+		d.Provider, d.Model, d.BodySHA256, d.Label, labels, d.Profile, d.FallbackOf).Scan)
 	if isUniqueViolation(err, "delphi_delegations_project_id_ref_key") {
 		existing, gerr := s.GetDelphiDelegation(ctx, d.ProjectID, d.Ref)
 		if gerr != nil {

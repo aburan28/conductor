@@ -430,3 +430,59 @@ func TestSubmitRejectionFinishesAsError(t *testing.T) {
 		t.Fatalf("%v", r)
 	}
 }
+
+func TestProfileAndFallbackOnRefusal(t *testing.T) {
+	fa, fo := servers(t)
+	fa.outcome = func(id string) string {
+		return claudeMsg("", "refusal", `,"stop_details":{"type":"refusal","category":"cyber","explanation":"declined"}`)
+	}
+	profiles := filepath.Join(t.TempDir(), "profiles.json")
+	t.Setenv("DELPHI_PROFILES", profiles)
+	os.WriteFile(profiles, []byte(`{
+	  "implementer": {"provider": "anthropic", "model": "claude-haiku-5-5", "effort": "max"},
+	  "frontier": {"provider": "anthropic", "model": "claude-mythos-5-1", "effort": "high",
+	               "fallback": ["openai:gpt-daybreak@high"]}}`), 0o644)
+
+	code, so, _ := cli(t, "", "profiles")
+	if code != 0 || !strings.Contains(so, "frontier       anthropic:claude-mythos-5-1 effort high -> openai:gpt-daybreak@high") ||
+		!strings.Contains(so, "implementer    anthropic:claude-haiku-5-5 effort max") {
+		t.Fatalf("profiles: %d %s", code, so)
+	}
+	if code, _, se := cli(t, "", "run", "-prompt", "x", "-out", t.TempDir(), "-profile", "ghost"); code != exitUsage || !strings.Contains(se, "ghost") {
+		t.Fatalf("unknown profile: %d %s", code, se)
+	}
+	// Haiku 5.5 takes only default sampling.
+	if code, _, se := cli(t, `{"id":"a","prompt":"x","params":{"temperature":0}}`, "validate", "-in", "-", "-profile", "implementer"); code != exitUsage || !strings.Contains(se, "sampling") {
+		t.Fatalf("haiku 5.5 temperature: %d %s", code, se)
+	}
+
+	out := filepath.Join(t.TempDir(), "run")
+	code, so, se := cli(t, "", "run", "-prompt", "probe the parser", "-out", out, "-every", "1ms", "-profile", "frontier")
+	if code != 0 {
+		t.Fatalf("run: %d %s %s", code, so, se)
+	}
+	res := lines(t, filepath.Join(out, "results.jsonl"))
+	if len(res) != 1 || res[0]["status"] != "succeeded" || res[0]["provider"] != "openai" || res[0]["text"] != "gpt says prompt-1" {
+		t.Fatalf("results: %v", res)
+	}
+	if ff, _ := res[0]["fallback_from"].([]any); len(ff) != 1 || ff[0] != "anthropic:claude-mythos-5-1 refused (cyber)" {
+		t.Fatalf("fallback_from: %v", res[0]["fallback_from"])
+	}
+	sent := fa.bodies[0]["params"].(map[string]any)
+	if sent["model"] != "claude-mythos-5-1" || sent["output_config"].(map[string]any)["effort"] != "high" {
+		t.Fatalf("anthropic body: %v", sent)
+	}
+	body := fo.lines[0]["body"].(map[string]any)
+	if body["model"] != "gpt-daybreak" || body["reasoning"].(map[string]any)["effort"] != "high" {
+		t.Fatalf("openai body: %v", body)
+	}
+
+	// An explicit flag beats the profile, and -fallback replaces its chain.
+	code, so, se = cli(t, `{"id":"a","prompt":"x"}`, "validate", "-in", "-", "-profile", "frontier", "-model", "claude-opus-5-5")
+	if code != 0 || !strings.Contains(so, "anthropic claude-opus-5-5") {
+		t.Fatalf("flag over profile: %d %s %s", code, so, se)
+	}
+	if code, _, se := cli(t, `{"id":"a","prompt":"x"}`, "validate", "-in", "-", "-fallback", "nosuch"); code != exitUsage || !strings.Contains(se, "nosuch") {
+		t.Fatalf("bad fallback: %d %s", code, se)
+	}
+}

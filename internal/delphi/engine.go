@@ -55,6 +55,7 @@ func newLabel(now time.Time) string {
 // TickReport says what one Tick did.
 type TickReport struct {
 	Submitted, Collected, Requeued, Finished int
+	FellBack                                 int      // refused requests resent to their next fallback
 	Stuck                                    []string // flights needing `delphi reconcile`
 }
 
@@ -127,6 +128,7 @@ func (e *Engine) collect(ctx context.Context, prov Provider, f Flight, rep *Tick
 	now := e.now()
 	var done []Result
 	var retries []Request
+	fellBack := 0
 	for _, req := range f.Requests {
 		r, ok := got[req.ID]
 		switch {
@@ -136,7 +138,7 @@ func (e *Engine) collect(ctx context.Context, prov Provider, f Flight, rep *Tick
 		case !ok:
 			r = Result{ID: req.ID, Status: Missing}
 		}
-		r.Provider, r.BatchID, r.Attempt, r.Meta, r.Hash = f.Provider, f.BatchID, req.Attempt+1, req.Meta, Hash(req)
+		r.Provider, r.BatchID, r.Attempt, r.Meta, r.Hash, r.FallbackFrom = f.Provider, f.BatchID, req.Attempt+1, req.Meta, OriginHash(req), req.FallbackFrom
 		if r.Model == "" {
 			r.Model = req.Model
 		}
@@ -146,6 +148,16 @@ func (e *Engine) collect(ctx context.Context, prov Provider, f Flight, rep *Tick
 			retries = append(retries, retry)
 			continue
 		}
+		if r.Status == Refused {
+			if next, ok := NextFallback(req, e.Providers, refusedBecause(r)); ok {
+				e.Store.Event("fallback", map[string]any{"id": req.ID, "from": req.Provider + ":" + req.Model,
+					"to": next.Provider + ":" + next.Model})
+				e.logf("%s refused by %s:%s; falling back to %s:%s", req.ID, req.Provider, req.Model, next.Provider, next.Model)
+				retries = append(retries, next)
+				fellBack++
+				continue
+			}
+		}
 		r.FinishedAt = now.UTC().Format(time.RFC3339)
 		done = append(done, r)
 	}
@@ -153,11 +165,12 @@ func (e *Engine) collect(ctx context.Context, prov Provider, f Flight, rep *Tick
 		return err
 	}
 	e.Store.Event("collected", map[string]any{"label": f.Label, "batch": f.BatchID, "provider": f.Provider,
-		"state": f.Status.State, "finished": len(done), "requeued": len(retries)})
+		"state": f.Status.State, "finished": len(done), "requeued": len(retries) - fellBack, "fell_back": fellBack})
 	e.logf("collected %s %s (%s): %d finished, %d requeued", f.Provider, f.BatchID, f.Status.State, len(done), len(retries))
 	rep.Collected++
 	rep.Finished += len(done)
-	rep.Requeued += len(retries)
+	rep.Requeued += len(retries) - fellBack
+	rep.FellBack += fellBack
 	for _, r := range done {
 		if e.OnResult != nil {
 			e.OnResult(r)
@@ -249,7 +262,7 @@ func (e *Engine) submit(ctx context.Context, prov Provider, reqs []Request, rep 
 			var done []Result
 			for _, r := range reqs {
 				done = append(done, Result{ID: r.ID, Provider: prov.Name(), Model: r.Model, Status: Errored, Attempt: r.Attempt + 1,
-					Meta: r.Meta, Hash: Hash(r), FinishedAt: now.UTC().Format(time.RFC3339),
+					Meta: r.Meta, Hash: OriginHash(r), FallbackFrom: r.FallbackFrom, FinishedAt: now.UTC().Format(time.RFC3339),
 					Error: &Error{Type: fmt.Sprintf("submit_http_%d", status), Message: err.Error()}})
 			}
 			e.logf("submit to %s rejected (HTTP %d): %v", prov.Name(), status, err)
@@ -275,6 +288,13 @@ func (e *Engine) submit(ctx context.Context, prov Provider, reqs []Request, rep 
 	e.logf("submitted %d request(s) to %s as %s", len(reqs), prov.Name(), id)
 	rep.Submitted += len(reqs)
 	return nil
+}
+
+func refusedBecause(r Result) string {
+	if r.Refusal != nil && r.Refusal.Category != "" {
+		return "refused (" + r.Refusal.Category + ")"
+	}
+	return "refused"
 }
 
 // Reconcile resolves a flight stuck in FlightSubmitting: adopt binds it to a
