@@ -1,5 +1,9 @@
 # Private AWS control plane
 
+For the separate EC2 demo launcher that builds from source and exposes a
+certificate on a selected CIDR, see [DEMO.md](DEMO.md). This runbook describes
+the CloudFormation stack used for the private SSM and Tailscale deployment.
+
 This directory deploys one Ubuntu 24.04 EC2 host for Conductor. PostgreSQL 18
 and `conductord` run on encrypted EBS. The API binds only to `127.0.0.1:8080`;
 Tailscale Serve provides private HTTPS. The EC2 security group has no inbound

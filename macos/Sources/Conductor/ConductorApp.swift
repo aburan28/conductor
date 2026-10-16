@@ -15,6 +15,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // About panel / Dock: prefer the bundled AppIcon.icns from Contents/Resources.
+        if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+           let icon = NSImage(contentsOf: url) {
+            NSApplication.shared.applicationIconImage = icon
+        }
         Notifier.shared.setUp()
         Task { await AppModel.shared.launch() }
     }
@@ -91,15 +96,16 @@ enum WindowID {
     static let checkpoints = "checkpoints"
 }
 
-/// The menu bar item: a coloured dot. It is also the one view that is always alive, so it
-/// opens windows the model asks for (from a notification, or a link) when no other view is
-/// on screen to do it.
+/// The menu bar item: the Conductor mark tinted by status. It is also the one view that is
+/// always alive, so it opens windows the model asks for (from a notification, or a link)
+/// when no other view is on screen to do it.
 struct MenuBarLabel: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Image(nsImage: StatusDotImage.make(model.dot))
+            .accessibilityLabel(model.dot.help)
             .help(model.dot.help)
             .onChange(of: model.windowRequest) { request in
                 guard let request else { return }
@@ -143,22 +149,47 @@ struct SettingsButton: View {
 }
 
 enum StatusDotImage {
-    /// A filled circle in the dot's colour, not a template image, so the menu bar keeps the
-    /// colour: green all clear, amber waiting on the person, grey down.
+    /// The web favicon mark (rounded square + three strokes) tinted by status, not a template
+    /// image, so the menu bar keeps the colour: brand green all clear, amber waiting on the
+    /// person, grey down. Colour alone is not the only signal — `StatusDot.help` and the
+    /// popover header state label carry the same meaning for VoiceOver and colour-blind use.
     static func make(_ dot: StatusDot) -> NSImage {
-        let color: NSColor
+        let fill: NSColor
         switch dot {
-        case .clear: color = .systemGreen
-        case .attention: color = .systemOrange
-        case .down: color = .systemGray
+        case .clear:
+            // Brand accent from internal/web (#2f6f4e), not systemGreen: matches Dock/Finder.
+            fill = NSColor(srgbRed: 0x2F / 255, green: 0x6F / 255, blue: 0x4E / 255, alpha: 1)
+        case .attention: fill = .systemOrange
+        case .down: fill = .systemGray
         }
-        let image = NSImage(size: NSSize(width: 16, height: 16), flipped: false) { rect in
-            let circle = NSBezierPath(ovalIn: rect.insetBy(dx: 3, dy: 3))
-            color.setFill()
-            circle.fill()
-            NSColor.black.withAlphaComponent(0.25).setStroke()
-            circle.lineWidth = 0.5
-            circle.stroke()
+        let size = NSSize(width: 18, height: 18)
+        // flipped: true so favicon SVG y-down coordinates place the strokes correctly.
+        let image = NSImage(size: size, flipped: true) { rect in
+            let body = NSBezierPath(roundedRect: rect.insetBy(dx: 1, dy: 1), xRadius: 4, yRadius: 4)
+            fill.setFill()
+            body.fill()
+            NSColor.black.withAlphaComponent(0.22).setStroke()
+            body.lineWidth = 0.5
+            body.stroke()
+
+            // Favicon strokes on a 32×32 grid, scaled into the body.
+            let inset = rect.insetBy(dx: 1, dy: 1)
+            let sx = inset.width / 32
+            let sy = inset.height / 32
+            let stroke = NSBezierPath()
+            stroke.lineWidth = max(1.5, 3 * min(sx, sy))
+            stroke.lineCapStyle = .round
+            let segments: [(CGFloat, CGFloat, CGFloat, CGFloat)] = [
+                (9, 10, 23, 10),
+                (9, 16, 19, 16),
+                (9, 22, 23, 22),
+            ]
+            for (x0, y0, x1, y1) in segments {
+                stroke.move(to: NSPoint(x: inset.minX + x0 * sx, y: inset.minY + y0 * sy))
+                stroke.line(to: NSPoint(x: inset.minX + x1 * sx, y: inset.minY + y1 * sy))
+            }
+            NSColor.white.setStroke()
+            stroke.stroke()
             return true
         }
         image.isTemplate = false
