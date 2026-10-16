@@ -33,12 +33,51 @@ func TestClaudeAccountKeyChangesWhenDefaultLoginChanges(t *testing.T) {
 	if first == second {
 		t.Fatal("switching credentials in default reused the old quota key")
 	}
+	host, _ := os.Hostname()
+	if email, ok := CurrentIdentity("claude", first, host, home, func(string) string { return "" }); ok || email != "" {
+		t.Fatal("previous account still matched after local credential switch")
+	}
 	write("one", "org-b")
 	if third := AccountKey("claude", dir, home); third == first || third == second {
 		t.Fatalf("organization change reused an old quota key: %s", third)
 	}
 	if got := AccountKey("claude", filepath.Join(home, ".claude-empty"), home); got != "empty" {
 		t.Fatalf("missing metadata should keep an unlabeled profile distinct: %s", got)
+	}
+}
+
+func TestIdentitySlotRequiresOpaqueKeySuffix(t *testing.T) {
+	for _, tc := range []struct {
+		account, want string
+	}{
+		{"default-id-012345abcdef", "default"},
+		{"work-id-profile-id-012345abcdef", "work-id-profile"},
+		{"default", ""},
+		{"default-id-012345abcde", ""},
+		{"default-id-012345ABCDEf", ""},
+		{"-id-012345abcdef", ""},
+	} {
+		got, ok := IdentitySlot(tc.account)
+		if got != tc.want || ok != (tc.want != "") {
+			t.Errorf("IdentitySlot(%q) = %q, %v", tc.account, got, ok)
+		}
+	}
+}
+
+func TestValidIdentityEmail(t *testing.T) {
+	for _, tc := range []struct {
+		email string
+		valid bool
+	}{
+		{"person+work@example.test", true},
+		{"", false},
+		{"Person <person@example.test>", false},
+		{"not-an-email", false},
+		{strings.Repeat("a", 255) + "@example.test", false},
+	} {
+		if got := ValidIdentityEmail(tc.email); got != tc.valid {
+			t.Errorf("ValidIdentityEmail(%q) = %v", tc.email, got)
+		}
 	}
 }
 
