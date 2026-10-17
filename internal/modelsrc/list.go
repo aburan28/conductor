@@ -125,8 +125,28 @@ func checkDestination(ctx context.Context, host string) error {
 }
 
 // blockedIP reports addresses discovery never connects to, whatever the operator configured.
+//
+// A NAT64 (64:ff9b::/96) or 6to4 (2002::/16) address delivers to the IPv4 address inside it,
+// so 64:ff9b::a9fe:a9fe is the metadata service and is judged as 169.254.169.254.
 func blockedIP(ip net.IP) bool {
+	if v6 := ip.To16(); v6 != nil && ip.To4() == nil {
+		switch {
+		case v6[0] == 0x00 && v6[1] == 0x64 && v6[2] == 0xff && v6[3] == 0x9b && isZero(v6[4:12]):
+			return blockedIP(net.IPv4(v6[12], v6[13], v6[14], v6[15]))
+		case v6[0] == 0x20 && v6[1] == 0x02:
+			return blockedIP(net.IPv4(v6[2], v6[3], v6[4], v6[5]))
+		}
+	}
 	return ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast()
+}
+
+func isZero(b []byte) bool {
+	for _, x := range b {
+		if x != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // privateOrLoopback reports addresses where cleartext http is acceptable: a model server on

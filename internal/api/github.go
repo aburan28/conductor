@@ -1325,6 +1325,30 @@ func (s *Server) githubLink(w http.ResponseWriter, r *http.Request, p domain.Pri
 		owner, repo = o, n
 		remote = "https://github.com/" + owner + "/" + repo
 	}
+	// A repository another project already governs is that project's: linking a second
+	// project to it would let this project's administrator import and write its issues and
+	// read its pull requests. It takes someone who administers every such project, or the
+	// organization.
+	linked, err := s.github.projectsFor(r.Context(), owner, repo)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	for _, other := range linked {
+		if other.ID == project.ID {
+			continue
+		}
+		if _, err := s.svc.Authorize(r.Context(), p, other.ID, domain.RoleProjectAdmin); err == nil {
+			continue
+		}
+		if err := s.requireOrgAdmin(r, p); err != nil {
+			s.fail(w, r, errors.Join(domain.ErrNotPermitted, fmt.Errorf(
+				"%s/%s is already linked to another project you do not administer; ask an administrator of that project or an org_admin",
+				owner, repo)))
+			return
+		}
+		break
+	}
 	if err := s.store.SetProjectRemote(r.Context(), project.ID, remote); err != nil {
 		s.fail(w, r, err)
 		return

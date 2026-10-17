@@ -280,6 +280,27 @@ func TestMalformedPackets(t *testing.T) {
 	}
 }
 
+// Only standard queries are answered. A packet with QR set is itself a response (answering
+// it lets a spoofed source loop two servers), and NOTIFY / UPDATE are not questions.
+func TestIgnoresResponsesAndOtherOpcodes(t *testing.T) {
+	s := testServer()
+	for name, flags := range map[string]byte{
+		"response": 0x81,            // QR + RD
+		"notify":   (4 << 3) | 0x01, // opcode 4
+		"update":   5 << 3,          // opcode 5
+		"iquery":   1 << 3,          // opcode 1
+	} {
+		q := buildQuery(1, s.hostname, 1)
+		q[2] = flags
+		if resp := s.answer(q); resp != nil {
+			t.Errorf("%s: answered with %v, want no reply", name, resp)
+		}
+	}
+	if s.answer(buildQuery(1, s.hostname, 1)) == nil {
+		t.Error("a standard query went unanswered")
+	}
+}
+
 func TestTruncatedQuestionStillNXDOMAINs(t *testing.T) {
 	s := testServer()
 	// Claim one question but cut the packet before the name ends.

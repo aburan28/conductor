@@ -446,6 +446,19 @@ func TestGitHubAppEndToEnd(t *testing.T) {
 	if code, body := h.doJSONOn(srv, h.aliceTok, http.MethodPost, h.projectPath("/github"), map[string]string{"repository": repoName}); code != http.StatusOK {
 		t.Fatalf("link = %d %v", code, body)
 	}
+	// The administrator of another project in the organization cannot link that project to
+	// a repository this one already governs; re-linking this one is still fine.
+	sideProj, err := h.store.CreateProject(ctx, db.CreateProjectParams{OrganizationID: h.org.ID, Slug: uniq("gh-side", time.Now().UnixNano()), Config: domain.DefaultProjectConfig()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = h.store.AddMember(ctx, sideProj.ID, h.outsider.ID, domain.RoleProjectAdmin)
+	if code, body := h.doJSONOn(srv, h.outTok, http.MethodPost, "/v1/projects/"+sideProj.ID+"/github", map[string]string{"repository": repoName}); code != http.StatusForbidden {
+		t.Errorf("linking a repository another project governs = %d %v, want 403", code, body)
+	}
+	if code, body := h.doJSONOn(srv, h.aliceTok, http.MethodPost, h.projectPath("/github"), map[string]string{"repository": repoName}); code != http.StatusOK {
+		t.Errorf("re-linking the same project = %d %v", code, body)
+	}
 
 	// --- bob holds the router directory for work whose title must never reach GitHub.
 	const secretTitle = "quietly rewrite the router for the acquisition"

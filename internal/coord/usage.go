@@ -191,6 +191,13 @@ func (s *Service) Usage(ctx context.Context, c Caller, projectID domain.ID, q db
 	if bySession && !c.Role.Can(domain.RoleMaintainer) {
 		q.PrincipalID = c.Principal.ID
 	}
+	// Filtering by model is grouping by model with the answer moved into the question: with
+	// by=principal, ?model=X names everyone who used X. Where model identity is not
+	// published, others' rows are redacted from by=model for every role (below), so the
+	// filter reaches only the caller's own rows, for every role too.
+	if q.Model != "" && !project.Config.PublishModelIdentity {
+		q.PrincipalID = c.Principal.ID
+	}
 	rows, err := s.Store.QueryUsage(ctx, q)
 	if err != nil {
 		return UsageReport{}, err

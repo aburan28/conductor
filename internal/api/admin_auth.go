@@ -140,11 +140,16 @@ func (s *Server) enforceOrgPolicy(w http.ResponseWriter, r *http.Request, p doma
 // (POST /v1/tokens, /v1/tokens/reset). A token minted with a single sign-on token belongs
 // to that sign-in: it is named sso:<provider>/<name>, so require-SSO accepts it and
 // unlinking the identity revokes it, and it expires no later than its parent, so it cannot
-// outlive the sign-in it came from. The name prefix sso: is reserved for that lineage. The
+// outlive the sign-in it came from. The name prefix sso: is reserved for that lineage, and
+// local: for local sign-in's (localLineage adds it when the parent is a local token): a
+// token named local: is exempt from require-SSO, so naming one so must not be a choice. The
 // organization's token lifetime cap applies to every token.
 func (s *Server) mintPolicy(r *http.Request, p domain.Principal, name string, ttl time.Duration) (string, time.Duration, error) {
 	if strings.HasPrefix(name, db.SSOTokenPrefix) {
 		return "", 0, fmt.Errorf("%w: token names starting with %q are reserved for single sign-on", domain.ErrInvalidArgument, db.SSOTokenPrefix)
+	}
+	if strings.HasPrefix(name, db.LocalTokenPrefix) && !strings.HasPrefix(tokenName(r), db.LocalTokenPrefix) {
+		return "", 0, fmt.Errorf("%w: token names starting with %q are reserved for local sign-in", domain.ErrInvalidArgument, db.LocalTokenPrefix)
 	}
 	if provider := ssoTokenProvider(tokenName(r)); provider != "" {
 		name = db.SSOTokenPrefix + provider + "/" + name

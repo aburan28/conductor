@@ -2,7 +2,6 @@ package integrations
 
 import (
 	"errors"
-	"fmt"
 	"path/filepath"
 	"strings"
 )
@@ -43,15 +42,19 @@ var claudeTool = Tool{
 		// MCP server. Project scope is a committed file, so it carries no token: the stdio
 		// gateway reads ~/.conductor/credentials, and the HTTP form references the token
 		// through Claude Code's own ${VAR} expansion.
+		//
+		// The command is an argument vector, run without a shell (Command): the header must
+		// reach ~/.claude.json as the literal `${CONDUCTOR_TOKEN}`, which `sh -c` would have
+		// expanded into the token itself.
 		if o.Global {
-			cmd := fmt.Sprintf("claude mcp add --scope user --transport stdio %s -- %s --project %s",
-				ServerName, MCPCommand, o.Project)
+			cmd := Command{"claude", "mcp", "add", "--scope", "user", "--transport", "stdio",
+				ServerName, "--", MCPCommand, "--project", o.Project}
 			if o.transport() == TransportHTTP {
-				cmd = fmt.Sprintf(`claude mcp add --scope user --transport http %s %s --header "Authorization: Bearer ${CONDUCTOR_TOKEN}"`,
-					ServerName, o.httpURL())
+				cmd = Command{"claude", "mcp", "add", "--scope", "user", "--transport", "http",
+					ServerName, o.httpURL(), "--header", "Authorization: Bearer ${CONDUCTOR_TOKEN}"}
 			}
 			if o.Remove {
-				cmd = "claude mcp remove --scope user " + ServerName
+				cmd = Command{"claude", "mcp", "remove", "--scope", "user", ServerName}
 			}
 			r.Commands = append(r.Commands, cmd)
 			if !o.lookPath("claude") {

@@ -192,3 +192,19 @@ func TestGuardDialRefusesMetadataAddresses(t *testing.T) {
 		t.Error("privateOrLoopback misclassified")
 	}
 }
+
+func TestBlockedIPJudgesTheIPv4InsideNAT64And6to4(t *testing.T) {
+	for addr, want := range map[string]bool{
+		"169.254.169.254":        true,
+		"64:ff9b::a9fe:a9fe":     true, // NAT64 of the metadata service
+		"2002:a9fe:a9fe::1":      true, // 6to4 of the metadata service
+		"64:ff9b::808:808":       false,
+		"2002:0808:0808::1":      false,
+		"2606:4700::1111":        false,
+		"64:ff9b:0:1::a9fe:a9fe": false, // not the /96: nothing embedded there
+	} {
+		if got := blockedIP(net.ParseIP(addr)); got != want {
+			t.Errorf("blockedIP(%s) = %v, want %v", addr, got, want)
+		}
+	}
+}

@@ -32,7 +32,9 @@ import (
 type Config struct {
 	S3     *backup.S3
 	Prefix string
-	// Seal encrypts objects before upload. Objects already in the bucket are read either way.
+	// Seal encrypts objects before upload, and then only sealed objects are read back: the
+	// bucket is writable by more principals than this machine, and sealing is what makes an
+	// object planted there fail to open. Unsealed objects are read only with Seal off.
 	Seal bool
 	// Passphrase reads the seal passphrase. An error (a Keychain that cannot be read, say) is
 	// returned as is; an empty passphrase with no error means none is configured.
@@ -110,10 +112,15 @@ func (a *Archiver) decode(ctx context.Context, stored []byte, sealed bool) ([]by
 	return io.ReadAll(r)
 }
 
-// variants lists the two key forms of an object name, the configured one first.
+// variants lists the key forms of an object name to look for, the configured one first.
+//
+// With sealing on, that is the sealed form only. Falling back to an unsealed object would
+// let anyone who can write the bucket — but has no data key — hand recovery a WAL segment of
+// their choosing: the seal's authentication is the whole defence, and an unsealed object has
+// none. An archive that was unsealed before sealing was turned on is read with Seal off.
 func (a *Archiver) variants() []bool {
 	if a.cfg.Seal {
-		return []bool{true, false}
+		return []bool{true}
 	}
 	return []bool{false, true}
 }

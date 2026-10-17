@@ -129,12 +129,45 @@ func TestClaudeGlobalUsesTheCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Commands) != 1 || !strings.Contains(res.Commands[0], "claude mcp add --scope user") {
+	if len(res.Commands) != 1 || !strings.Contains(res.Commands[0].String(), "claude mcp add --scope user") {
 		t.Fatalf("commands = %v", res.Commands)
 	}
 	// No token may appear anywhere in a plan's commands.
-	if strings.Contains(res.Commands[0], o.Token) {
+	if strings.Contains(res.Commands[0].String(), o.Token) {
 		t.Fatalf("token leaked into command: %s", res.Commands[0])
+	}
+}
+
+// The HTTP form is run as an argument vector, not through `sh -c`: the header must reach
+// ~/.claude.json as the literal ${CONDUCTOR_TOKEN} (a shell would expand it into the token),
+// and a project or URL with shell syntax in it stays one argument.
+func TestClaudeGlobalCommandIsAnArgv(t *testing.T) {
+	o := testOptions(t)
+	o.Global = true
+	o.Project = "p; touch /tmp/owned"
+	stdio, err := claudeTool.Plan(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	argv := stdio.Commands[0]
+	if argv[len(argv)-1] != o.Project || argv[0] != "claude" {
+		t.Errorf("stdio argv = %q, want the project as its own last argument", []string(argv))
+	}
+	if got := argv.String(); !strings.HasSuffix(got, `'p; touch /tmp/owned'`) {
+		t.Errorf("display form %s does not quote the project", got)
+	}
+
+	o.Transport = TransportHTTP
+	http, err := claudeTool.Plan(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	argv = http.Commands[0]
+	if argv[len(argv)-1] != "Authorization: Bearer ${CONDUCTOR_TOKEN}" || argv[len(argv)-2] != "--header" {
+		t.Errorf("http argv = %q, want the literal ${CONDUCTOR_TOKEN} header", []string(argv))
+	}
+	if got := argv.String(); !strings.Contains(got, `'Authorization: Bearer ${CONDUCTOR_TOKEN}'`) {
+		t.Errorf("display form %s would let a shell expand the token", got)
 	}
 }
 

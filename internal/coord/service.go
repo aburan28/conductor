@@ -897,6 +897,18 @@ func (s *Service) FinishWork(ctx context.Context, c Caller, req FinishRequest) (
 	}
 
 	if req.Evidence != nil {
+		// A runner id is what makes evidence count toward required checks, so it is the
+		// caller's own runner or none: anyone else naming one would be passing off their
+		// claims as a runner's results.
+		if req.RunnerID != "" && !c.System {
+			runner, err := s.Store.GetRunner(ctx, req.RunnerID)
+			if err != nil && !errors.Is(err, domain.ErrNotFound) {
+				return FinishResult{}, err
+			}
+			if err != nil || runner.PrincipalID != c.Principal.ID {
+				return FinishResult{}, fmt.Errorf("%w: runner %s is not the caller's", domain.ErrNotPermitted, req.RunnerID)
+			}
+		}
 		ev := *req.Evidence
 		ev.TaskID, ev.AttemptID = req.Fence.TaskID, req.Fence.AttemptID
 		ev.LeaseID, ev.FencingEpoch = req.Fence.LeaseID, req.Fence.FencingEpoch
