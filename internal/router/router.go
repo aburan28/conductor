@@ -33,6 +33,25 @@ type Catalog struct {
 	Version      string
 }
 
+// DefaultLadder is the escalation ladder, cheapest to most capable, used when a catalog is
+// derived from stored profiles rather than from models.yaml. It mirrors `models.ladder` in the
+// repository's own .conductor/models.yaml (a config test holds the two together): the T1 and
+// T2 workers, the T3 core planner, and the T4 frontier reasoner at the top, so a request whose
+// alias has no usable profile can fall back as far as the frontier tier. Aliases absent from a
+// catalog are skipped.
+var DefaultLadder = []string{"worker.fast", "worker.general", "planner.frontier", "reasoner.frontier"}
+
+// LadderFor returns the DefaultLadder entries the catalog actually declares, in order.
+func LadderFor(aliases map[string]AliasPolicy) []string {
+	var out []string
+	for _, name := range DefaultLadder {
+		if _, ok := aliases[name]; ok {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
 // BudgetState is what the router needs to know about spend (DESIGN.md §13.8).
 type BudgetState struct {
 	MonthlyUSD  float64
@@ -251,8 +270,10 @@ func Route(cat Catalog, req Request) (Decision, error) {
 	if policy, ok := cat.Aliases[profile.Alias]; ok && policy.DefaultEffort != "" {
 		effort = policy.DefaultEffort
 	}
-	if req.PriorFailures >= 1 {
-		effort = effort.Up()
+	// Effort.Up saturates at high, so on a profile that already runs at xhigh or max (the
+	// frontier tier) a retry must keep the effort it has rather than "escalate" down to high.
+	if up := effort.Up(); req.PriorFailures >= 1 && up.AtLeast(effort) {
+		effort = up
 		d.Rationale = append(d.Rationale, "raised reasoning effort after a prior failure")
 	}
 	if req.Mechanical && !floorApplies(req) {
