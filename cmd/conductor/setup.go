@@ -390,25 +390,25 @@ profiles:
   - alias: worker.fast
     harness: claude
     provider: anthropic
-    model: claude-haiku-4-5-20251001
+    model: claude-haiku-5-5
     capabilities: [code_edit, tests, read_diff]
     tier: T1
   - alias: worker.general
     harness: claude
     provider: anthropic
-    model: claude-sonnet-5
+    model: claude-sonnet-5-5
     capabilities: [code_edit, tests, multi_file, read_diff]
     tier: T2
   - alias: planner.frontier
     harness: claude
     provider: anthropic
-    model: claude-opus-5
+    model: claude-opus-5-5
     capabilities: [architecture, long_context, code_edit, strong_tool_use]
     tier: T4
   - alias: reviewer.strong
     harness: claude
     provider: anthropic
-    model: claude-opus-5
+    model: claude-opus-5-5
     capabilities: [code_review, architecture, long_context]
     tier: T4
 `

@@ -278,10 +278,10 @@ step "13. Work is offered to a session that meets a capability floor"
 # Two sessions, same person, different models: one cheap, one frontier. The catalog decides
 # what each is worth — the session's own claim about its tier is ignored.
 CHEAP_SESSION=$(curl -s -X POST -H "Authorization: Bearer $BOB_TOKEN" -H 'Content-Type: application/json' \
-  -d '{"harness":"claude","capabilities":{"model":"claude-haiku-4-5-20251001","reasoning_effort":"low","tier":"T4"}}' \
+  -d '{"harness":"claude","capabilities":{"model":"claude-haiku-5-5","reasoning_effort":"low","tier":"T4"}}' \
   "$ENDPOINT/v1/projects/$PROJECT/sessions")
 STRONG_SESSION=$(curl -s -X POST -H "Authorization: Bearer $ALICE_TOKEN" -H 'Content-Type: application/json' \
-  -d '{"harness":"claude","capabilities":{"model":"claude-opus-5","reasoning_effort":"high","max_reasoning_effort":"xhigh"}}' \
+  -d '{"harness":"claude","capabilities":{"model":"claude-opus-5-5","reasoning_effort":"high","max_reasoning_effort":"xhigh"}}' \
   "$ENDPOINT/v1/projects/$PROJECT/sessions")
 STRONG_ID=$(field id "$STRONG_SESSION")
 [[ -n "$STRONG_ID" ]] || fail "could not register the frontier session"

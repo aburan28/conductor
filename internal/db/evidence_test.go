@@ -67,3 +67,51 @@ func TestSubmitEvidenceNilChangedPathsStaleFence(t *testing.T) {
 		t.Errorf("SubmitEvidence with stale epoch = %v, want ErrStaleFencing", err)
 	}
 }
+
+// A required check passes only on a runner's observation, and only while the runner's latest
+// result for it is a pass (DESIGN.md §25.5).
+func TestRequiredChecksPassedNeedsRunnerEvidence(t *testing.T) {
+	f := newFixture(t)
+	task := f.newTask(t, "Self-reported checks")
+	claim, err := f.store.Claim(f.ctx, f.claimParams(task, f.alice))
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	runner, err := f.store.RegisterRunner(f.ctx, domain.Runner{OrganizationID: f.org.ID,
+		ProjectID: f.project.ID, PrincipalID: f.alice.ID, Name: "rc-" + string(claim.Fence.AttemptID)[:8]})
+	if err != nil {
+		t.Fatalf("RegisterRunner: %v", err)
+	}
+	required := []string{"go test ./..."}
+	submit := func(code int, runnerID domain.ID) {
+		t.Helper()
+		if err := f.store.SubmitEvidence(f.ctx, domain.EvidenceManifest{
+			TaskID: claim.Fence.TaskID, AttemptID: claim.Fence.AttemptID,
+			LeaseID: claim.Fence.LeaseID, FencingEpoch: claim.Fence.FencingEpoch,
+			Commands: []domain.ValidationResult{{CommandID: "c", Command: required[0], ExitCode: code}},
+		}, runnerID); err != nil {
+			t.Fatalf("SubmitEvidence: %v", err)
+		}
+	}
+	check := func(want bool, why string) {
+		t.Helper()
+		ok, missing, err := f.store.RequiredChecksPassed(f.ctx, claim.Fence.AttemptID, required)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok != want {
+			t.Errorf("%s: passed = %v (missing %v), want %v", why, ok, missing, want)
+		}
+	}
+
+	submit(0, "") // the agent's own "tests passed"
+	check(false, "agent-reported pass")
+	submit(0, runner.ID)
+	check(true, "runner-observed pass")
+	submit(1, runner.ID)
+	check(false, "runner pass then runner failure")
+	submit(0, "")
+	check(false, "agent pass after a runner failure")
+	submit(0, runner.ID)
+	check(true, "runner pass after fixing")
+}

@@ -216,6 +216,9 @@ func (m Manifest) Validate() error {
 		return fmt.Errorf("checkpoint %s names session %q, which is not a plain identifier", m.ID, m.SessionID)
 	case m.Transcript.NativeRelPath != "" && !SafeRelPath(m.Transcript.NativeRelPath):
 		return fmt.Errorf("checkpoint %s records a transcript path that leaves its directory", m.ID)
+	case m.Repo.Subdir != "" && (!SafeRelPath(m.Repo.Subdir) || hasGitDirComponent(m.Repo.Subdir)):
+		// Joined onto the restored checkout to pick the resumed harness's working directory.
+		return fmt.Errorf("checkpoint %s records a working directory that leaves its repository", m.ID)
 	}
 	return nil
 }

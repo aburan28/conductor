@@ -265,3 +265,30 @@ func TestFactsEnvCoversKnownFacts(t *testing.T) {
 		}
 	}
 }
+
+// A floor naming a tier the router does not know would rank below T0 and so constrain
+// nothing; lint refuses it, and accepts the frontier tier T4.
+func TestLintRejectsUnknownTierFloors(t *testing.T) {
+	p := samplePolicy()
+	p.Rules = append(p.Rules,
+		domain.DispatchRule{ID: "typo", When: "true", Require: &domain.CapabilityRequirement{Tier: "T5"}},
+		domain.DispatchRule{ID: "lower", When: "true", Require: &domain.CapabilityRequirement{Tier: "t4"}},
+		domain.DispatchRule{ID: "effort", When: "true", Effort: "extreme"},
+		domain.DispatchRule{ID: "frontier", When: `task.labels has "frontier"`, Require: &domain.CapabilityRequirement{Tier: domain.TierT4, Effort: domain.EffortMax}},
+	)
+	_, issues := CompileDispatch(p)
+	errs := map[string]bool{}
+	for _, i := range issues {
+		if i.Severity == "error" {
+			errs[i.Where] = true
+		}
+	}
+	for _, where := range []string{"rule typo", "rule lower", "rule effort"} {
+		if !errs[where] {
+			t.Errorf("expected an error on %s: %v", where, issues)
+		}
+	}
+	if errs["rule frontier"] {
+		t.Errorf("T4 at max effort is a valid floor: %v", issues)
+	}
+}

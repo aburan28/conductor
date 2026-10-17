@@ -9,6 +9,7 @@ import (
 
 	"github.com/aburan28/conductor/internal/domain"
 	"github.com/aburan28/conductor/internal/policy"
+	"github.com/aburan28/conductor/internal/router"
 )
 
 // The shipped .conductor files are documentation as much as configuration, and documentation
@@ -99,24 +100,34 @@ func TestOpenCodeLocalVLLMProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	want := map[string]string{
-		"vllm/qwen3.8-27b":           "worker.fast",
-		"vllm/zai-org/GLM-5.3-Flash": "worker.general",
-		"vllm/glm-5.3":               "planner.frontier",
+	// One local model may serve several aliases (Qwen 3.8 27B is both the fast worker and the
+	// mechanical executor), so each wanted alias must be among the model's enabled profiles.
+	want := map[string][]string{
+		"vllm/qwen3.8-27b":           {"worker.fast", "executor.mechanical"},
+		"vllm/zai-org/GLM-5.3-Flash": {"worker.general"},
+		"vllm/glm-5.3":               {"planner.frontier"},
 	}
-	got := map[string]string{}
+	got := map[string][]string{}
 	for _, p := range bundle.ModelProfiles("org-1") {
+		// Restrict to vLLM so OpenRouter (and other) OpenCode profiles do not
+		// enter this local-capacity assertion.
 		if p.Harness != "opencode" || p.Provider != "vllm" || !p.Enabled {
 			continue
 		}
-		got[p.Model] = p.Alias
+		got[p.Model] = append(got[p.Model], p.Alias)
 		if p.Billing != "capacity" {
 			t.Errorf("%s: billing = %q, want capacity (local GPU, not per-token)", p.Model, p.Billing)
 		}
 	}
-	for model, alias := range want {
-		if got[model] != alias {
-			t.Errorf("opencode profile %s: alias = %q, want %q (got %v)", model, got[model], alias, got)
+	for model, aliases := range want {
+		for _, alias := range aliases {
+			found := false
+			for _, a := range got[model] {
+				found = found || a == alias
+			}
+			if !found {
+				t.Errorf("opencode profile %s: aliases = %v, want %q among them", model, got[model], alias)
+			}
 		}
 	}
 }
@@ -316,3 +327,117 @@ func TestSelectOnlyProfileIsKeptAndWaitsForDiscovery(t *testing.T) {
 }
 
 func boolPtr(v bool) *bool { return &v }
+
+// The model-tier topology (README.md, "Model tiers"): four tiers, the frontier one at the top of the
+// ladder, and the ladder the runtime derives from stored profiles kept equal to the file's.
+func TestShippedModelTiers(t *testing.T) {
+	bundle, err := Load(repoRoot(t))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	aliases := bundle.Models.Models.Aliases
+	for name, tier := range map[string]domain.Tier{
+		"reasoner.frontier": domain.TierT4, "planner.frontier": domain.TierT3, "reviewer.strong": domain.TierT3,
+		"director": domain.TierT2, "worker.general": domain.TierT2,
+		"executor.mechanical": domain.TierT1, "worker.fast": domain.TierT1, "verifier.cheap": domain.TierT1,
+	} {
+		a, ok := aliases[name]
+		if !ok {
+			t.Errorf("alias %s is missing", name)
+			continue
+		}
+		if domain.Tier(a.Tier) != tier {
+			t.Errorf("alias %s: tier %s, want %s", name, a.Tier, tier)
+		}
+	}
+	if got := aliases["executor.mechanical"].DefaultEffort; got != string(domain.EffortLow) {
+		t.Errorf("executor.mechanical effort = %s, want low", got)
+	}
+	if got := aliases["reasoner.frontier"].DefaultEffort; got != string(domain.EffortMax) {
+		t.Errorf("reasoner.frontier effort = %s, want max", got)
+	}
+
+	ladder := bundle.Models.Models.Ladder
+	if strings.Join(ladder, ",") != strings.Join(router.DefaultLadder, ",") {
+		t.Errorf("models.yaml ladder %v differs from router.DefaultLadder %v", ladder, router.DefaultLadder)
+	}
+	for _, name := range ladder {
+		if _, ok := aliases[name]; !ok {
+			t.Errorf("ladder names undeclared alias %s", name)
+		}
+	}
+	if top := ladder[len(ladder)-1]; domain.Tier(aliases[top].Tier) != domain.TierT4 {
+		t.Errorf("top of the ladder %s is not the frontier tier", top)
+	}
+
+	// Every enabled profile meets its alias's capability floor, or Resolve would skip it.
+	enabledByAlias := map[string]int{}
+	for _, p := range bundle.ModelProfiles("org-1") {
+		if !p.Enabled {
+			continue
+		}
+		enabledByAlias[p.Alias]++
+		if floor := aliases[p.Alias].CapabilityFloor; !p.HasCapabilities(floor) {
+			t.Errorf("profile %s/%s (%s) misses its alias floor %v", p.Alias, p.Harness, p.Model, floor)
+		}
+	}
+	for name := range aliases {
+		if enabledByAlias[name] == 0 {
+			t.Errorf("alias %s has no enabled profile", name)
+		}
+	}
+}
+
+// The shipped dispatch.yaml sends breakthrough work to the frontier tier and fully specified
+// work to the mechanical tier, with the director as the one step above it.
+func TestShippedDispatchRoutesByTier(t *testing.T) {
+	bundle, err := Load(repoRoot(t))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	d, issues := policy.CompileDispatch(&bundle.Dispatch.DispatchPolicy)
+	if policy.HasErrors(issues) {
+		t.Fatalf("lint: %v", issues)
+	}
+	opts := policy.ResolveOptions{Catalog: policy.ProfileCatalog(bundle.ModelProfiles("org-1"))}
+	claude := []string{"claude"}
+	resolve := func(labels []string, f domain.TaskFeatures, failures int) domain.DispatchDecision {
+		t.Helper()
+		dec, err := d.Resolve(policy.Facts{
+			Task: domain.Task{Ref: "T-1", Labels: labels}, Features: f, Role: domain.RoleImplementer,
+			PriorFailures: failures, Harnesses: claude,
+		}, opts)
+		if err != nil {
+			t.Fatalf("resolve %v: %v", labels, err)
+		}
+		return dec
+	}
+
+	dec := resolve([]string{"breakthrough"}, domain.TaskFeatures{EstimatedFiles: 1}, 0)
+	if dec.Lane != "frontier" || dec.Model != "claude-fable-5-1" || dec.Tier != domain.TierT4 ||
+		dec.Effort != domain.EffortMax || dec.Review != "required" {
+		t.Errorf("breakthrough: %+v", dec)
+	}
+
+	dec = resolve([]string{"runbook"}, domain.TaskFeatures{EstimatedFiles: 1}, 0)
+	if dec.Lane != "mechanical" || dec.Model != "claude-haiku-5-5" || dec.Alias != "executor.mechanical" ||
+		dec.Tier != domain.TierT1 || dec.Effort != domain.EffortLow {
+		t.Errorf("mechanical: %+v", dec)
+	}
+	for _, failures := range []int{1, 5} {
+		dec = resolve([]string{"mechanical"}, domain.TaskFeatures{EstimatedFiles: 1}, failures)
+		if dec.Model != "claude-sonnet-5-5" || dec.Alias != "director" || dec.Effort != domain.EffortHigh {
+			t.Errorf("mechanical after %d failure(s): want the director at high, got %+v", failures, dec)
+		}
+	}
+
+	// Security work never takes the mechanical lane, and both labels mean frontier.
+	dec = resolve([]string{"mechanical"}, domain.TaskFeatures{EstimatedFiles: 1, SecuritySensitive: true}, 0)
+	if dec.Lane == "mechanical" {
+		t.Errorf("security-sensitive work routed mechanically: %+v", dec)
+	}
+	dec = resolve([]string{"mechanical", "frontier"}, domain.TaskFeatures{EstimatedFiles: 1}, 0)
+	if dec.Lane != "frontier" || dec.Tier != domain.TierT4 {
+		t.Errorf("mechanical+frontier: %+v", dec)
+	}
+}

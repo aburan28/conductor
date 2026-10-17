@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"net"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -12,6 +14,88 @@ import (
 // and the built-in services.
 func testServer() *dnsServer {
 	return newDNSServer("host-a.tail1234.ts.net.", net.ParseIP("100.64.0.1"), builtinServices)
+}
+
+func TestDNSQuestionTruncationAndCountBoundaries(t *testing.T) {
+	server := testServer()
+	query := buildQuery(0x1234, server.hostname, 1)
+	for size := 0; size < len(query); size++ {
+		response := server.answer(query[:size])
+		if size < 12 {
+			if response != nil {
+				t.Fatalf("%d-byte prefix answered: %x", size, response)
+			}
+			continue
+		}
+		if rcode, count := parseHeader(t, response); rcode != 3 || count != 0 {
+			t.Fatalf("%d-byte partial question = %d/%d; want no answer", size, rcode, count)
+		}
+		if !bytes.Equal(response[:2], query[:2]) {
+			t.Fatalf("%d-byte prefix lost transaction ID", size)
+		}
+	}
+	for _, count := range []uint16{0, 2, 65535} {
+		packet := append([]byte(nil), query...)
+		binary.BigEndian.PutUint16(packet[4:6], count)
+		if rcode, answers := parseHeader(t, server.answer(packet)); rcode != 3 || answers != 0 {
+			t.Fatalf("unsupported %d questions = %d/%d", count, rcode, answers)
+		}
+	}
+	for _, tail := range [][]byte{{0xc0}, {0xc0, 0x0c}, {3, 'x'}, {0x40, 0, 0, 1, 0, 1}} {
+		packet := append(append([]byte(nil), query[:12]...), tail...)
+		if _, count := parseHeader(t, server.answer(packet)); count != 0 {
+			t.Fatalf("malformed name %x answered", tail)
+		}
+	}
+}
+
+func TestDNSMappedIPv4AndUnknownAddressNames(t *testing.T) {
+	server := newDNSServer("leader.internal.", net.ParseIP("::ffff:10.88.0.1"), builtinServices)
+	for _, qtype := range []uint16{1, 28} {
+		response := server.answer(buildQuery(0x1234, "LEADER.INTERNAL.", qtype))
+		rcode, count := parseHeader(t, response)
+		wantCount := 0
+		if qtype == 1 {
+			wantCount = 1
+		}
+		if rcode != 0 || count != wantCount {
+			t.Fatalf("mapped IPv4 type %d = %d/%d", qtype, rcode, count)
+		}
+		if qtype == 1 && !net.IP(response[len(response)-4:]).Equal(net.ParseIP("10.88.0.1")) {
+			t.Fatalf("mapped A data = %x", response)
+		}
+		if rcode, count := parseHeader(t, server.answer(buildQuery(1, "unknown.internal.", qtype))); rcode != 3 || count != 0 {
+			t.Fatalf("unknown address name type %d = %d/%d", qtype, rcode, count)
+		}
+	}
+}
+
+func TestServiceConfigurationPortTypesAndStableListing(t *testing.T) {
+	for _, value := range []string{`{"_custom._tcp.mesh.internal.":[-1]}`, `{"_custom._tcp.mesh.internal.":[65536]}`, `{"_custom._tcp.mesh.internal.":[1.5]}`, `{"_custom._tcp.mesh.internal.":["443"]}`, `[]`, `{} {}`} {
+		if _, err := servicesFromEnv(value); err == nil {
+			t.Errorf("invalid port configuration accepted: %s", value)
+		}
+	}
+	services, err := servicesFromEnv(`{"_Z._tcp.mesh.internal.":[65535],"_a._tcp.mesh.internal.":[1]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := newDNSServer("leader.internal.", nil, services)
+	names := server.serviceNames()
+	for i := 1; i < len(names); i++ {
+		if names[i-1] >= names[i] {
+			t.Fatalf("unstable service order: %v", names)
+		}
+	}
+	if !reflect.DeepEqual(names, server.serviceNames()) {
+		t.Fatal("service listing changed between calls")
+	}
+	for name, port := range map[string]uint16{"_z._tcp.mesh.internal.": 65535, "_a._tcp.mesh.internal.": 1} {
+		records := parseSRVAnswers(t, server.answer(buildQuery(1, name, 33)))
+		if len(records) != 1 || records[0].port != port {
+			t.Fatalf("service %s boundary port = %+v", name, records)
+		}
+	}
 }
 
 // buildQuery encodes a one-question DNS query for name/qtype.
@@ -196,6 +280,27 @@ func TestMalformedPackets(t *testing.T) {
 	}
 }
 
+// Only standard queries are answered. A packet with QR set is itself a response (answering
+// it lets a spoofed source loop two servers), and NOTIFY / UPDATE are not questions.
+func TestIgnoresResponsesAndOtherOpcodes(t *testing.T) {
+	s := testServer()
+	for name, flags := range map[string]byte{
+		"response": 0x81,            // QR + RD
+		"notify":   (4 << 3) | 0x01, // opcode 4
+		"update":   5 << 3,          // opcode 5
+		"iquery":   1 << 3,          // opcode 1
+	} {
+		q := buildQuery(1, s.hostname, 1)
+		q[2] = flags
+		if resp := s.answer(q); resp != nil {
+			t.Errorf("%s: answered with %v, want no reply", name, resp)
+		}
+	}
+	if s.answer(buildQuery(1, s.hostname, 1)) == nil {
+		t.Error("a standard query went unanswered")
+	}
+}
+
 func TestTruncatedQuestionStillNXDOMAINs(t *testing.T) {
 	s := testServer()
 	// Claim one question but cut the packet before the name ends.
@@ -284,5 +389,83 @@ func TestOverTheWireWithNetResolver(t *testing.T) {
 	}
 	if records[0].Port != 8443 || records[1].Port != 8444 {
 		t.Fatalf("net.Resolver ports = %d/%d, want 8443/8444", records[0].Port, records[1].Port)
+	}
+}
+
+// Real resolver queries verify the complete SRV + address discovery chain on a
+// private network, with no Tailscale process or upstream DNS server.
+func TestExplicitPrivateNetworkDiscovery(t *testing.T) {
+	for _, address := range []string{"10.88.0.1", "fd88::1"} {
+		t.Run(address, func(t *testing.T) {
+			s := newDNSServer("leader.internal.", net.ParseIP(address), map[string][]uint16{
+				"_conductor-mesh._tcp.mesh.internal.": {8443},
+			})
+			s.meshTarget = s.hostname
+			conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			go func() {
+				buf := make([]byte, 512)
+				for {
+					n, remote, err := conn.ReadFrom(buf)
+					if err != nil {
+						return
+					}
+					if _, err := conn.WriteTo(s.answer(buf[:n]), remote); err != nil {
+						return
+					}
+				}
+			}()
+			resolver := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "udp", conn.LocalAddr().String())
+			}}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, records, err := resolver.LookupSRV(ctx, "", "", "_conductor-mesh._tcp.mesh.internal")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(records) != 1 || records[0].Target != s.hostname || records[0].Port != 8443 {
+				t.Fatalf("unexpected mesh SRV: %+v", records)
+			}
+			addresses, err := resolver.LookupIPAddr(ctx, records[0].Target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(addresses) != 1 || !addresses[0].IP.Equal(net.ParseIP(address)) {
+				t.Fatalf("addresses = %v, want %s", addresses, address)
+			}
+		})
+	}
+}
+
+func TestAddressFamilyAnswers(t *testing.T) {
+	for _, tc := range []struct {
+		address string
+		qtype   uint16
+		length  int
+	}{
+		{"10.88.0.1", 1, 4}, {"10.88.0.1", 28, 0},
+		{"fd88::1", 1, 0}, {"fd88::1", 28, 16},
+		{"", 1, 0}, {"", 28, 0},
+	} {
+		s := newDNSServer("leader.internal.", net.ParseIP(tc.address), builtinServices)
+		response := s.answer(buildQuery(1, s.hostname, tc.qtype))
+		rcode, count := parseHeader(t, response)
+		wantCount := 0
+		if tc.length > 0 {
+			wantCount = 1
+		}
+		if rcode != 0 || count != wantCount {
+			t.Fatalf("%s type %d: rcode/count = %d/%d", tc.address, tc.qtype, rcode, count)
+		}
+		if tc.length > 0 {
+			offset := len(response) - tc.length
+			if int(binary.BigEndian.Uint16(response[offset-2:offset])) != tc.length || !net.IP(response[offset:]).Equal(net.ParseIP(tc.address)) {
+				t.Fatalf("malformed address response: %v", response)
+			}
+		}
 	}
 }

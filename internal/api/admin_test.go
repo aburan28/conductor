@@ -322,6 +322,13 @@ func TestRequireSSO(t *testing.T) {
 	if code, out := sh.doJSONOn(sh.srv, sh.bobTok, http.MethodPost, "/v1/tokens", map[string]any{"name": "sso:test"}); code != http.StatusBadRequest {
 		t.Errorf("a self-named sso: token = %d %v", code, out)
 	}
+	// So is local:, which require-SSO exempts: a token that is not from local sign-in cannot
+	// mint one either (POST /v1/tokens or /v1/tokens/reset).
+	for _, path := range []string{"/v1/tokens", "/v1/tokens/reset"} {
+		if code, out := sh.doJSONOn(sh.srv, sh.bobTok, http.MethodPost, path, map[string]any{"name": "local:cli"}); code != http.StatusBadRequest {
+			t.Errorf("a self-named local: token via %s = %d %v", path, code, out)
+		}
+	}
 	// Turning the policy off restores the tokens it refused (they were never revoked).
 	if code, _ := sh.whoami(sh.bobTok); code != http.StatusOK {
 		t.Errorf("bob's token after require_sso is off = %d", code)

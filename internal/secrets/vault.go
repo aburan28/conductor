@@ -41,6 +41,67 @@ func sealPurpose(projectID domain.ID) string {
 // so a name that passed a looser check would abort `eval "$(conductor secrets env)"`.
 var nameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+// reservedNames and reservedPrefixes are environment variables a project secret may never
+// be named. Every secret is exported into contributors' shells (`secrets inject`), the child
+// environment of `conductor wrap`, and ~/.claude/settings.json, so a maintainer — or anyone
+// holding a maintainer's token — who could name one PATH, BASH_ENV, LD_PRELOAD,
+// GIT_CONFIG_COUNT or NODE_OPTIONS would be running code on every contributor's machine
+// rather than handing them a credential. The list covers what a loader, a shell, git, a
+// language runtime, or Conductor itself reads to decide what to execute, where to find
+// configuration, or whom to trust. Matching ignores case: Windows environments do.
+var reservedNames = map[string]bool{
+	// Shells and the process environment.
+	"PATH": true, "HOME": true, "SHELL": true, "USER": true, "LOGNAME": true, "ENV": true,
+	"BASH_ENV": true, "SHELLOPTS": true, "BASHOPTS": true, "IFS": true, "CDPATH": true,
+	"PROMPT_COMMAND": true, "PS0": true, "PS1": true, "PS2": true, "PS3": true, "PS4": true,
+	"PROMPT": true, "RPROMPT": true, "ZDOTDIR": true, "GLOBIGNORE": true, "TMPDIR": true,
+	"GLIBC_TUNABLES": true,
+	// Programs other tools launch on the user's behalf.
+	"EDITOR": true, "VISUAL": true, "PAGER": true, "MANPAGER": true, "BROWSER": true,
+	"LESSOPEN": true, "LESSCLOSE": true, "SSH_ASKPASS": true, "SUDO_ASKPASS": true,
+	"XDG_CONFIG_HOME": true, "XDG_DATA_HOME": true, "XDG_CONFIG_DIRS": true,
+	// git: anything that names a program, a repository, or configuration.
+	"GIT_DIR": true, "GIT_WORK_TREE": true, "GIT_EXEC_PATH": true, "GIT_TEMPLATE_DIR": true,
+	"GIT_SSH": true, "GIT_SSH_COMMAND": true, "GIT_ASKPASS": true, "GIT_EDITOR": true,
+	"GIT_SEQUENCE_EDITOR": true, "GIT_PAGER": true, "GIT_EXTERNAL_DIFF": true,
+	"GIT_PROXY_COMMAND": true,
+	// Language runtimes that load code or options from the environment.
+	"NODE_OPTIONS": true, "NODE_PATH": true, "PYTHONPATH": true, "PYTHONSTARTUP": true,
+	"PYTHONHOME": true, "PERL5OPT": true, "PERL5LIB": true, "PERLLIB": true, "RUBYOPT": true,
+	"RUBYLIB": true, "JAVA_TOOL_OPTIONS": true, "_JAVA_OPTIONS": true, "JDK_JAVA_OPTIONS": true,
+	"CLASSPATH": true, "GOFLAGS": true,
+	// Trust anchors and proxies: a substituted CA or proxy sees every credential in transit.
+	"SSL_CERT_FILE": true, "SSL_CERT_DIR": true, "CURL_CA_BUNDLE": true,
+	"REQUESTS_CA_BUNDLE": true, "NODE_EXTRA_CA_CERTS": true, "GIT_SSL_CAINFO": true,
+	"HTTP_PROXY": true, "HTTPS_PROXY": true, "ALL_PROXY": true, "NO_PROXY": true,
+	// Harness configuration roots.
+	"CLAUDE_CONFIG_DIR": true, "CODEX_HOME": true,
+}
+
+var reservedPrefixes = []string{
+	"LD_", "DYLD_", // dynamic loader: LD_PRELOAD, LD_LIBRARY_PATH, DYLD_INSERT_LIBRARIES
+	"BASH_FUNC_",  // exported shell functions
+	"GIT_CONFIG",  // GIT_CONFIG, _COUNT, _KEY_n, _VALUE_n, _GLOBAL, _SYSTEM, _PARAMETERS
+	"NPM_CONFIG_", // npm reads every option (script-shell, …) from these
+	"CONDUCTOR_",  // the CLI's own endpoint, token, and session identity
+}
+
+// ReservedName reports whether name is an environment variable no project secret may use
+// (see reservedNames). The vault refuses to create one, and every client path that exports
+// secrets into an environment drops one, so a row stored before the rule cannot bite.
+func ReservedName(name string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(name))
+	if reservedNames[upper] {
+		return true
+	}
+	for _, p := range reservedPrefixes {
+		if strings.HasPrefix(upper, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // Vault seals and opens project secrets.
 type Vault struct {
 	store *db.Store
@@ -137,6 +198,11 @@ func (v *Vault) Set(ctx context.Context, project domain.Project, by domain.ID, r
 	name := strings.TrimSpace(req.Name)
 	if err := ValidateName(name); err != nil {
 		return View{}, err
+	}
+	// Only creation is refused: an existing row with a reserved name can still be opened by
+	// name and deleted, and Export leaves it out.
+	if ReservedName(name) {
+		return View{}, fmt.Errorf("%w: %q is an environment variable that controls how programs run; a secret exported under it would be code execution on every contributor's machine", domain.ErrInvalidArgument, name)
 	}
 	desc := strings.TrimSpace(req.Description)
 	if utf8.RuneCountInString(desc) > MaxDescriptionLen {
@@ -244,6 +310,9 @@ func (v *Vault) Export(ctx context.Context, project domain.Project) (map[string]
 	out := make(map[string]string, len(rows))
 	purpose := sealPurpose(project.ID)
 	for _, sec := range rows {
+		if ReservedName(sec.Name) {
+			continue // stored before the rule; never handed to an environment (ReservedName)
+		}
 		plain, err := key.Open(sec.ValueSealed, purpose)
 		if err != nil {
 			return nil, fmt.Errorf("unseal %s: %w", sec.Name, err)

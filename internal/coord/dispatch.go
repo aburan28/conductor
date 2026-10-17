@@ -163,10 +163,6 @@ func buildRouterCatalog(profiles []domain.ModelProfile) router.Catalog {
 		cat.Aliases[p.Alias] = router.AliasPolicy{DefaultEffort: p.ReasoningEffort, Tier: p.Tier}
 		cat.Version = p.CatalogVersion
 	}
-	for _, name := range []string{"worker.fast", "worker.general", "planner.frontier"} {
-		if _, ok := cat.Aliases[name]; ok {
-			cat.Ladder = append(cat.Ladder, name)
-		}
-	}
+	cat.Ladder = router.LadderFor(cat.Aliases)
 	return cat
 }

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aburan28/conductor/internal/accounts"
 	"github.com/aburan28/conductor/internal/awscreds"
 	"github.com/aburan28/conductor/internal/backup"
 	"github.com/aburan28/conductor/internal/checkpoint"
@@ -459,7 +460,9 @@ Flags:
 	}
 	state := *stateDir
 	if *account != "" {
-		state = accountStateDir(target, *account)
+		if state, err = accounts.StateDir(target, *account); err != nil {
+			return err
+		}
 	}
 
 	// 1. The working tree.
@@ -479,6 +482,18 @@ Flags:
 		}
 	} else if _, err := os.Stat(cwd); err != nil {
 		return fmt.Errorf("%s does not exist", cwd)
+	}
+
+	// A project bound to an isolated account resumes under it, so the conversation is
+	// installed where the wrapped harness will look for it.
+	if state == "" {
+		project := restoredRoot(cwd)
+		if project == "" {
+			project = cwd
+		}
+		if iso, ok, err := accounts.Resolve(target, project, os.Getenv); err == nil && ok && iso.Env != "" {
+			state = iso.Dir
+		}
 	}
 
 	// 2. The conversation and the launch.
@@ -517,17 +532,6 @@ func restoredRoot(dir string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
-}
-
-// accountStateDir maps a login name to a harness state directory. The community convention
-// for Claude Code is ~/.claude-<name> (each with its own credentials), so that is honoured
-// when it exists; otherwise every harness gets a directory under ~/.conductor/accounts.
-func accountStateDir(harness, name string) string {
-	home, _ := os.UserHomeDir()
-	if p := filepath.Join(home, "."+harness+"-"+name); dirExists(p) {
-		return p
-	}
-	return filepath.Join(home, ".conductor", "accounts", harness, name)
 }
 
 func dirExists(p string) bool {

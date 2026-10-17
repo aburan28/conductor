@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -121,6 +122,50 @@ func newMeshServer(t *testing.T, ca meshCA, name string) string {
 	mux.HandleFunc("GET /v1/peer/info", func(w http.ResponseWriter, r *http.Request) {
 		if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 {
 			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(peer.Info{Name: name, Time: time.Now()})
+	})
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{
+		Handler: mux,
+		TLSConfig: &tls.Config{
+			MinVersion:   tls.VersionTLS12,
+			Certificates: []tls.Certificate{cert},
+			ClientCAs:    pool,
+			ClientAuth:   tls.VerifyClientCertIfGiven,
+		},
+	}
+	go srv.ServeTLS(ln, "", "")
+	t.Cleanup(func() { srv.Close() })
+	return "https://" + ln.Addr().String()
+}
+
+// newToggleMeshServer is like newMeshServer, but returns 503 while allow is false so a
+// Probe→fail→Probe→success cycle can assert LastError is cleared on the way back up.
+func newToggleMeshServer(t *testing.T, ca meshCA, name string, allow *atomic.Bool) string {
+	t.Helper()
+	certPEM, keyPEM := genCert(t, ca, name)
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(ca.cert)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/peer/info", func(w http.ResponseWriter, r *http.Request) {
+		if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if !allow.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -259,6 +304,65 @@ func TestProbeSelf(t *testing.T) {
 	}
 	if l.LastError != "" {
 		t.Fatalf("self should not produce an error, got %q", l.LastError)
+	}
+}
+
+func TestProbeSelfLoopbackAlias(t *testing.T) {
+	// SelfURL is 127.0.0.1 but the peer is listed as localhost: same listener, must not dial.
+	ca := genCA(t)
+	caPath, certPath, keyPath := writeMeshFiles(t, ca, "desktop")
+	m, err := peer.New(peer.Options{
+		Peers:   []peer.Peer{{Name: "desktop", URL: "https://localhost:8443"}},
+		SelfURL: "https://127.0.0.1:8443",
+		CAPath:  caPath, CertPath: certPath, KeyPath: keyPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Probe(context.Background())
+
+	l := m.Snapshot()[0]
+	if l.State != peer.StateSelf {
+		t.Fatalf("expected self via loopback alias, got %q (%s)", l.State, l.LastError)
+	}
+	if l.LastError != "" {
+		t.Fatalf("self should not produce an error, got %q", l.LastError)
+	}
+}
+
+func TestProbeClearsStaleLastError(t *testing.T) {
+	// A failed probe that later succeeds must not leave the failure text on an UP row
+	// (Fleet showed Link UP / 2 ms RTT next to a stale context-deadline Problem).
+	ca := genCA(t)
+	caPath, certPath, keyPath := writeMeshFiles(t, ca, "alpha")
+	var allow atomic.Bool
+	liveURL := newToggleMeshServer(t, ca, "beta", &allow)
+
+	m, err := peer.New(peer.Options{
+		Peers:    []peer.Peer{{Name: "beta", URL: liveURL}},
+		CAPath:   caPath,
+		CertPath: certPath,
+		KeyPath:  keyPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	allow.Store(false)
+	m.Probe(context.Background())
+	if l := m.Snapshot()[0]; l.State != peer.StateDown || l.LastError == "" {
+		t.Fatalf("expected down with error while handler closed, got state=%q err=%q", l.State, l.LastError)
+	}
+	stale := m.Snapshot()[0].LastError
+
+	allow.Store(true)
+	m.Probe(context.Background())
+	l := m.Snapshot()[0]
+	if l.State != peer.StateUp {
+		t.Fatalf("expected up after reopen, got %q (%s)", l.State, l.LastError)
+	}
+	if l.LastError != "" {
+		t.Fatalf("successful probe left stale LastError %q (was %q)", l.LastError, stale)
 	}
 }
 

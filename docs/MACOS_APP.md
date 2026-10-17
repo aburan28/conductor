@@ -267,7 +267,8 @@ What a later Mac session with Accessibility access (or the CI job) still needs t
 
 What needs a Developer ID and an App Store Connect key, and has never run: Developer ID
 signing, notarization and stapling, a signed `.pkg`, and Sparkle updates (which also need
-`SPARKLE_PUBLIC_ED_KEY` and a published `appcast.xml`).
+`SPARKLE_PUBLIC_ED_KEY` and a published `appcast.xml`). Unsigned or keyless builds leave
+Check for Updates disabled instead of showing a blocking alert.
 
 ## Risks and open questions
 

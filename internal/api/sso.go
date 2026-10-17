@@ -387,8 +387,19 @@ func (s *Server) ssoCallback(w http.ResponseWriter, r *http.Request) {
 		s.ssoServerError(w, r, login, err)
 		return
 	}
+	// A link is not made here. This callback runs in whichever browser followed the
+	// authorization URL, and a link sign-in has no browser binding: anyone could send their
+	// own link URL to a victim, whose account would then be linked to theirs. The verified
+	// account is staged on the sign-in instead and linked by ssoRedeem, which needs the
+	// PKCE verifier that only the principal who started the link holds.
+	var link db.ExternalAccount
+	var linkOrgs []string
+	if login.LinkPrincipal != "" {
+		link = db.ExternalAccount{Provider: login.Provider, Issuer: ident.Issuer, Subject: ident.Subject, Email: ident.Email}
+		linkOrgs = ident.Orgs
+	}
 	ticket := sso.Random(32)
-	if err := s.store.IssueSSOTicket(r.Context(), login.StateHash, ssoHash(ticket), principal.ID, ssoTicketTTL); err != nil {
+	if err := s.store.IssueSSOTicket(r.Context(), login.StateHash, ssoHash(ticket), principal.ID, link, linkOrgs, ssoTicketTTL); err != nil {
 		s.ssoServerError(w, r, login, err)
 		return
 	}
@@ -492,6 +503,15 @@ func (s *Server) ssoRedeem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if login.LinkPrincipal != "" {
+		if err := s.ssoCompleteLink(r, login, principal); err != nil {
+			var refusal *ssoRefusal
+			if errors.As(err, &refusal) {
+				s.ok(w, r, http.StatusForbidden, ErrorBody{Error: refusal.msg, Code: refusal.code})
+				return
+			}
+			s.fail(w, r, err)
+			return
+		}
 		s.ok(w, r, http.StatusOK, map[string]any{"linked": true, "provider": login.Provider, "handle": principal.Handle,
 			"principal_id": principal.ID})
 		return
@@ -551,18 +571,8 @@ func (s *Server) ssoResolve(r *http.Request, p sso.Provider, ident sso.Identity,
 			return domain.Principal{}, err
 		}
 	case linkPrincipal != "":
-		err := s.store.LinkIdentity(ctx, linkPrincipal, acct, false)
-		switch {
-		case errors.Is(err, db.ErrIssuerTaken):
-			return domain.Principal{}, refusal("already_linked",
-				"Your Conductor account already has a different %s account linked. Ask an administrator to unlink it first.", cfg.Label)
-		case errors.Is(err, db.ErrIdentityTaken):
-			return domain.Principal{}, refusal("identity_taken",
-				"This %s account is already linked to a different Conductor account.", cfg.Label)
-		case err != nil:
-			return domain.Principal{}, err
-		}
-		principalID, mode = linkPrincipal, "link"
+		// Linked when the ticket is redeemed (ssoCompleteLink), not here.
+		principalID = linkPrincipal
 	default:
 		principal, err := s.ssoFirstSignIn(r, cfg, ident, acct)
 		if err != nil {
@@ -613,13 +623,84 @@ func (s *Server) ssoResolve(r *http.Request, p sso.Provider, ident sso.Identity,
 	return principal, nil
 }
 
+// ssoCompleteLink links the account a link sign-in's callback verified, now that the ticket
+// was redeemed with the verifier of the principal who started it. The checks the callback
+// made are made again: time has passed, and the policy or the account may have changed.
+func (s *Server) ssoCompleteLink(r *http.Request, login db.SSOLogin, principal domain.Principal) error {
+	ctx := r.Context()
+	p, ok := s.sso.providers[login.Provider]
+	if !ok {
+		return errNoSuchProvider
+	}
+	cfg := p.Config()
+	acct := login.LinkAccount
+	if acct.Issuer == "" || acct.Subject == "" || principal.ID != login.LinkPrincipal {
+		return fmt.Errorf("%w: this sign-in carries no account to link; start the link again", domain.ErrInvalidArgument)
+	}
+	if deactivated, err := s.store.PrincipalDeactivated(ctx, principal.ID); err != nil {
+		return err
+	} else if deactivated {
+		return refusal("deactivated",
+			"Your Conductor account (%s) is deactivated. Ask an administrator of your organization.", principal.Handle)
+	}
+	pol, err := s.policyFor(ctx, principal.OrganizationID)
+	if err != nil {
+		return err
+	}
+	if err := ssoAdmits(pol, cfg, sso.Identity{Provider: cfg.Name, Issuer: acct.Issuer, Subject: acct.Subject,
+		Email: acct.Email, Orgs: login.LinkOrgs}); err != nil {
+		return err
+	}
+	existing, found, err := s.store.IdentityByAccount(ctx, acct.Issuer, acct.Subject)
+	switch {
+	case err != nil:
+		return err
+	case found && existing.PrincipalID != principal.ID:
+		return refusal("identity_taken", "This %s account is already linked to a different Conductor account.", cfg.Label)
+	case found:
+		// Already linked to this principal: nothing to do.
+		return nil
+	}
+	err = s.store.LinkIdentity(ctx, principal.ID, acct, false)
+	switch {
+	case errors.Is(err, db.ErrIssuerTaken):
+		return refusal("already_linked",
+			"Your Conductor account already has a different %s account linked. Ask an administrator to unlink it first.", cfg.Label)
+	case errors.Is(err, db.ErrIdentityTaken):
+		return refusal("identity_taken", "This %s account is already linked to a different Conductor account.", cfg.Label)
+	case err != nil:
+		return err
+	}
+	s.store.Audit(ctx, principal.OrganizationID, "", principal.ID, "sso.linked", "principal", principal.ID,
+		map[string]any{"provider": cfg.Name, "mode": "link", "principal": principal.Handle})
+	return nil
+}
+
 // ssoFirstSignIn handles an external account linked to no one: link it to the principal an
 // administrator registered its address on, or provision one, or refuse.
 func (s *Server) ssoFirstSignIn(r *http.Request, cfg sso.Config, ident sso.Identity, acct db.ExternalAccount) (domain.Principal, error) {
 	ctx := r.Context()
-	candidates, err := s.store.HumansByEmail(ctx, ident.Email)
+	registered, err := s.store.HumansByEmail(ctx, ident.Email)
 	if err != nil {
 		return domain.Principal{}, err
+	}
+	// Only organizations whose policy admits this identity are candidates: an address
+	// registered in some other tenant neither takes the sign-in nor makes it ambiguous.
+	var candidates []domain.Principal
+	var notAdmitted error
+	for _, c := range registered {
+		pol, err := s.policyFor(ctx, c.OrganizationID)
+		if err != nil {
+			return domain.Principal{}, err
+		}
+		if err := ssoAdmits(pol, cfg, ident); err != nil {
+			notAdmitted = err
+			continue
+		}
+		candidates = append(candidates, c)
+	}
+	if len(candidates) == 0 && notAdmitted != nil {
+		return domain.Principal{}, notAdmitted
 	}
 	switch len(candidates) {
 	case 0:
@@ -636,15 +717,7 @@ func (s *Server) ssoFirstSignIn(r *http.Request, cfg sso.Config, ident sso.Ident
 		return s.ssoProvision(r, cfg, ident, acct)
 	case 1:
 		c := candidates[0]
-		// An organization that does not admit this identity does not get it linked either.
-		pol, err := s.policyFor(ctx, c.OrganizationID)
-		if err != nil {
-			return domain.Principal{}, err
-		}
-		if err := ssoAdmits(pol, cfg, ident); err != nil {
-			return domain.Principal{}, err
-		}
-		err = s.store.LinkIdentity(ctx, c.ID, acct, true)
+		err := s.store.LinkIdentity(ctx, c.ID, acct, true)
 		switch {
 		case errors.Is(err, db.ErrAlreadyLinked), errors.Is(err, db.ErrIssuerTaken):
 			// The address matches, but the account already signs in some other way. Attaching
@@ -784,6 +857,10 @@ func (s *Server) setMemberEmail(w http.ResponseWriter, r *http.Request, p domain
 	}
 	if target.Kind != domain.PrincipalHuman {
 		s.fail(w, r, fmt.Errorf("%w: single sign-on is for people; %s is a %s", domain.ErrInvalidArgument, target.Handle, target.Kind))
+		return
+	}
+	if err := s.emailUnclaimed(r, email, target.ID); err != nil {
+		s.fail(w, r, err)
 		return
 	}
 	if err := s.store.SetPrincipalEmail(r.Context(), target.ID, email); err != nil {

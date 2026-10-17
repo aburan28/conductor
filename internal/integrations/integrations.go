@@ -115,16 +115,39 @@ type Op struct {
 
 // Result is a tool's plan plus what a person needs to know about it.
 type Result struct {
-	Tool     string   `json:"tool"`
-	Ops      []Op     `json:"ops"`
-	Commands []string `json:"commands,omitempty"` // shell commands to run instead of, or as well as, ops
-	Warnings []string `json:"warnings,omitempty"`
-	Next     string   `json:"next,omitempty"`
+	Tool     string    `json:"tool"`
+	Ops      []Op      `json:"ops"`
+	Commands []Command `json:"commands,omitempty"` // commands to run instead of, or as well as, ops
+	Warnings []string  `json:"warnings,omitempty"`
+	Next     string    `json:"next,omitempty"`
 	// Snippet is what the user should paste by hand when a file could not be edited safely
 	// (for example, a settings file with comments the parser cannot round-trip).
 	Snippet string `json:"snippet,omitempty"`
 	// Unparseable names the file that Snippet is for.
 	Unparseable string `json:"unparseable,omitempty"`
+}
+
+// Command is one program to run, as an argument vector. It is executed directly, never
+// through a shell: an argument such as `Authorization: Bearer ${CONDUCTOR_TOKEN}` must reach
+// the tool literally (the tool expands it when it loads its config, so the token is never
+// written there), and a project or URL is an argument, not shell syntax.
+type Command []string
+
+// String renders the command for a person to read or paste into a POSIX shell: every
+// argument that is not plainly safe is single-quoted, so pasting it runs what Apply runs.
+func (c Command) String() string {
+	parts := make([]string, len(c))
+	for i, arg := range c {
+		parts[i] = shellQuote(arg)
+	}
+	return strings.Join(parts, " ")
+}
+
+func shellQuote(s string) string {
+	if s != "" && strings.Trim(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_@%+=:,./-") == "" {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
 // Changed reports whether applying the plan would touch anything.
@@ -208,8 +231,8 @@ func Statuses(o Options) []Status {
 // asking the user to paste a snippet.
 var ErrUnparseable = errors.New("configuration file could not be parsed")
 
-// Apply performs a plan's operations. run executes the plan's shell commands; nil skips them.
-func Apply(r Result, run func(cmd string) error) error {
+// Apply performs a plan's operations. run executes the plan's commands; nil skips them.
+func Apply(r Result, run func(cmd Command) error) error {
 	for _, op := range r.Ops {
 		switch op.Action {
 		case "create", "update":

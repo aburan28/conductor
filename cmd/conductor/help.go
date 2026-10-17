@@ -419,6 +419,21 @@ Usage:
 Example:
   conductor peers
 `},
+	{name: "wireguard", group: "Dispatch", subs: []string{"render"},
+		summary: "render private WireGuard gateway and worker configuration templates",
+		topic: `conductor wireguard — prepare an operator-managed private network
+
+Usage:
+  conductor wireguard render --manifest mesh.yaml --out ./wireguard-plan
+
+Writes owner-only configuration templates and deployment instructions to a new directory.
+Private keys stay on their owning nodes: replace each template's local placeholder there.
+No tunnels, routes, firewall rules, or host settings are changed. See docs/WIREGUARD.md.
+
+Example:
+  conductor wireguard render --manifest mesh.yaml --out ./wireguard-plan
+`},
+
 	{name: "worker", group: "Dispatch",
 		summary: "run a runner: claim, execute, verify, report"},
 
@@ -456,8 +471,8 @@ Example:
 
 Run ` + "`conductor systemd <subcommand> -h`" + ` for its flags.
 `},
-	{name: "accounts", group: "Sessions and machines", subs: []string{"add", "list", "switch", "exhaust", "ok"},
-		summary: "harness login profiles: switch accounts when usage runs out",
+	{name: "accounts", group: "Sessions and machines", subs: []string{"add", "list", "switch", "exhaust", "ok", "login", "use", "unbind", "alias", "unalias"},
+		summary: "harness login profiles: switch accounts, or give a project its own",
 		topic: `conductor accounts — harness login profiles resume-all can switch between
 
 Usage:
@@ -466,13 +481,25 @@ Usage:
   conductor accounts switch <harness> <name>       make <name> the harness's live account
   conductor accounts exhaust <harness> <name>      mark an account out of usage
   conductor accounts ok <harness> <name>           mark an account usable again
+  conductor accounts login <harness> <name>        an isolated account: its own state directory
+  conductor accounts use <harness> <name>          wrap this project's <harness> under that account
+  conductor accounts unbind <harness>              back to the default login in this project
+  conductor accounts alias <harness> <alias> <account|dir>   another name for an account
+  conductor accounts unalias <harness> <alias>     forget an alias
 
 Harnesses: claude, codex, opencode. An account is added by logging in with the harness
 itself, then snapshotting; a quota marker makes resume-all prefer another account when
 waking sessions after a restart.
 
+Isolated accounts (claude, codex, cursor, opencode) never touch the live login: wrap points
+the harness at the account's directory (CLAUDE_CONFIG_DIR, CODEX_HOME, XDG_DATA_HOME, or
+Cursor's --user-data-dir), so two projects can run under two accounts at once. An alias
+works wherever a name does, and a project bound to an alias follows it when it is re-pointed.
+
 Example:
   conductor accounts add claude main
+  conductor accounts login claude work --use
+  conductor accounts alias claude acme work
 
 Run ` + "`conductor accounts <subcommand> -h`" + ` for its flags.`},
 	{name: "sessions", group: "Sessions and machines", subs: []string{"save", "list", "export", "install-hook"},

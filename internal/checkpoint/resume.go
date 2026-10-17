@@ -152,24 +152,29 @@ func WriteContinuation(b *Bundle, cwd string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("checkpoint %s carries no continuation", b.Manifest.ID)
 	}
-	var dir string
+	// The id names the file; the checkout it lands in was just restored from the same bundle,
+	// whose patch may have planted `.conductor -> ~/.ssh`. So the id is held to the identifier
+	// alphabet, and the write refuses every symbolic link on the way (writeInside).
+	if !SafeIdentifier(b.Manifest.ID) {
+		return "", fmt.Errorf("checkpoint id %q is not a plain identifier", b.Manifest.ID)
+	}
+	var base, rel string
 	if root := gitLine(context.Background(), cwd, "rev-parse", "--show-toplevel"); root != "" {
-		dir = filepath.Join(root, ".conductor", "generated", "continuations")
+		base, rel = root, ".conductor/generated/continuations/"+b.Manifest.ID+".md"
 	} else {
-		base, err := Dir()
+		dir, err := Dir()
 		if err != nil {
 			return "", err
 		}
-		dir = filepath.Join(base, "continuations")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return "", err
+		}
+		base, rel = dir, "continuations/"+b.Manifest.ID+".md"
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := writeInside(base, rel, data, 0o600, 0o700); err != nil {
 		return "", err
 	}
-	p := filepath.Join(dir, b.Manifest.ID+".md")
-	if err := os.WriteFile(p, data, 0o600); err != nil {
-		return "", err
-	}
-	return p, nil
+	return filepath.Join(base, filepath.FromSlash(rel)), nil
 }
 
 // ContinuationPrompt is the first message a cross-harness resume sends. It points at the

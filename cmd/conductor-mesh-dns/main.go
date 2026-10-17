@@ -8,10 +8,9 @@
 // server is still static, hand-rolled, and tiny on purpose: every name in the
 // registry resolves, everything else gets NXDOMAIN.
 //
-// The SRV target is the machine itself: --hostname (the MagicDNS FQDN) or
-// auto-detection from `tailscale status --json`, falling back to "localhost.".
-// A queries for that name are answered with the node's tailscale IP, so SRV
-// target resolution completes in one server.
+// The SRV target is explicit (--hostname and --address for private networks),
+// or auto-detected from `tailscale status --json`, falling back to localhost.
+// A/AAAA records can resolve the target without an external DNS dependency.
 //
 //	Listen on loopback only:      conductor-mesh-dns            (default)
 //	Expose to the whole tailnet:  conductor-mesh-dns --listen 0.0.0.0:15353
@@ -65,10 +64,12 @@ func servicesFromEnv(value string) (map[string][]uint16, error) {
 
 func main() {
 	fs := flag.NewFlagSet("conductor-mesh-dns", flag.ExitOnError)
-	listen := fs.String("listen", "127.0.0.1:15353", "UDP listen address; 0.0.0.0:15353 exposes the directory tailnet-wide")
-	hostname := fs.String("hostname", "", "SRV target (the machine's MagicDNS FQDN); default: auto-detect from the Tailscale CLI, then localhost.")
+	listen := fs.String("listen", "127.0.0.1:15353", "UDP listen address; bind a private interface to expose the directory to your network")
+	hostname := fs.String("hostname", "", "SRV target DNS name; bypasses Tailscale detection when set")
+	address := fs.String("address", "", "literal IPv4 or IPv6 address for the SRV target (requires --hostname)")
+	meshTarget := fs.String("mesh-target", "localhost", "DNS target for _conductor-mesh; set to --hostname for remote private-network peers")
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, `conductor-mesh-dns — service discovery over DNS for the conductor tailnet
+		fmt.Fprintf(os.Stderr, `conductor-mesh-dns — service discovery over DNS for a private Conductor network
 
 Flags:
 `)
@@ -83,27 +84,15 @@ Flags:
 		log.Fatal(err)
 	}
 
-	// Resolve the SRV target: explicit flag, then tailscale auto-detection
-	// (cached: one CLI call per process), then the original localhost target.
-	var target string
-	var ip net.IP
-	if *hostname != "" {
-		target = *hostname
-		if target[len(target)-1] != '.' {
-			target += "."
-		}
-	} else {
-		var err error
-		target, ip, err = detectSelf()
-		if err != nil {
-			log.Printf("tailscale auto-detect failed (%v); falling back to localhost", err)
-			target = "localhost."
-		} else {
-			log.Printf("detected MagicDNS host %s (%s)", target, ip)
-		}
+	identity, err := resolveDirectoryIdentity(*hostname, *address, *meshTarget, detectSelf)
+	if err != nil {
+		log.Fatal(err)
 	}
-
-	server := newDNSServer(target, ip, services)
+	if identity.detectionError != nil {
+		log.Printf("tailscale auto-detect failed (%v); falling back to localhost", identity.detectionError)
+	}
+	server := newDNSServer(identity.hostname, identity.ip, services)
+	server.meshTarget = identity.meshTarget
 	addr, err := net.ResolveUDPAddr("udp", *listen)
 	if err != nil {
 		log.Fatal(err)
@@ -114,6 +103,10 @@ Flags:
 	}
 	defer conn.Close()
 	for _, name := range server.serviceNames() {
+		target := server.hostname
+		if name == "_conductor-mesh._tcp.mesh.internal." {
+			target = server.meshTarget
+		}
 		log.Printf("serving %s -> %s:%v", name, target, server.services[name])
 	}
 	if os.Getenv("MESH_DNS_ONESHOT") != "" {

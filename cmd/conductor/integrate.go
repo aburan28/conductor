@@ -108,7 +108,7 @@ Flags:
 			failed++
 			continue
 		}
-		if err := integrations.Apply(res, func(cmd string) error { return runIntegrationCommand(ctx, cmd) }); err != nil {
+		if err := integrations.Apply(res, func(cmd integrations.Command) error { return runIntegrationCommand(ctx, cmd) }); err != nil {
 			return fmt.Errorf("%s: %w", res.Tool, err)
 		}
 	}
@@ -185,21 +185,22 @@ func managedBlockBody() string {
 	return strings.TrimSpace(body)
 }
 
-// runIntegrationCommand executes one of a plan's shell commands (only `claude mcp add`
-// today), or tells the user to when the binary is not here.
-func runIntegrationCommand(ctx context.Context, cmd string) error {
-	fields := strings.Fields(cmd)
-	if len(fields) == 0 {
+// runIntegrationCommand executes one of a plan's commands (only `claude mcp add` today), or
+// tells the user to when the binary is not here. It runs the argument vector directly, never
+// through a shell: `${CONDUCTOR_TOKEN}` must reach the tool's config unexpanded, and the
+// project and URL are arguments, not shell syntax.
+func runIntegrationCommand(ctx context.Context, cmd integrations.Command) error {
+	if len(cmd) == 0 {
 		return nil
 	}
-	if _, err := exec.LookPath(fields[0]); err != nil {
-		fmt.Printf("  run this yourself once %s is installed:\n    %s\n", fields[0], cmd)
+	if _, err := exec.LookPath(cmd[0]); err != nil {
+		fmt.Printf("  run this yourself once %s is installed:\n    %s\n", cmd[0], cmd)
 		return nil
 	}
-	c := exec.CommandContext(ctx, "sh", "-c", cmd)
+	c := exec.CommandContext(ctx, cmd[0], cmd[1:]...)
 	c.Stdout, c.Stderr = os.Stdout, os.Stderr
 	if err := c.Run(); err != nil {
-		return fmt.Errorf("%s: %w", fields[0], err)
+		return fmt.Errorf("%s: %w", cmd[0], err)
 	}
 	return nil
 }

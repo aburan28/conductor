@@ -30,10 +30,10 @@ lanes:
       #   tags: [local, cheap]
       #   when: task.estimated_files <= 3 && !task.security_sensitive
       #   max_concurrent: 1
-      - model: claude-sonnet-5
+      - model: claude-sonnet-5-5
         harness: claude
         effort: medium
-      - model: claude-opus-5
+      - model: claude-opus-5-5
         harness: claude
         effort: high
 

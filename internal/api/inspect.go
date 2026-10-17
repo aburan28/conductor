@@ -24,7 +24,7 @@ func (s *Server) inspectRoutes(m *http.ServeMux) {
 // without dispatching anything. It is the API behind `conductor route <ref>` and the task
 // detail page's "route preview".
 func (s *Server) routeExplain(w http.ResponseWriter, r *http.Request, p domain.Principal) {
-	task, _, err := s.taskFor(r, p, domain.RoleObserver)
+	task, caller, err := s.taskFor(r, p, domain.RoleObserver)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -41,6 +41,23 @@ func (s *Server) routeExplain(w http.ResponseWriter, r *http.Request, p domain.P
 	result, err := s.svc.ResolveRoute(r.Context(), task.ProjectID, full, role, nil)
 	if err != nil {
 		s.fail(w, r, err)
+		return
+	}
+	// As with a task's recorded decisions (coord.DecisionsView): where it routes is
+	// coordination state, but the rationale, the rules it matched and the features they
+	// matched on are facts about the task, so a private task keeps them from everyone but
+	// its owner.
+	if caller.Principal.ID != full.CreatedBy && !full.Visibility.AtLeast(domain.VisibilityTeamSummary) {
+		result.Decision.Rationale, result.Decision.MatchedRules = []string{}, nil
+		if d := result.Dispatch; d != nil {
+			d.Rules, d.Rationale, d.Escalations = nil, []string{}, 0
+			for i := range d.Candidates {
+				d.Candidates[i].Reason = ""
+			}
+		}
+		s.ok(w, r, http.StatusOK, map[string]any{
+			"task_ref": task.Ref, "decision": result.Decision, "dispatch": result.Dispatch, "redacted": true,
+		})
 		return
 	}
 	s.ok(w, r, http.StatusOK, map[string]any{

@@ -108,8 +108,16 @@ Linux this builds and tests ConductorKit alone. Two kinds of test are off by def
 
 CI: `.github/workflows/macos-app.yml` runs the Linux job (`swift test` in the `swift:6.1`
 container, and the packaging tests) and the macOS job (`swift build`, `swift test`,
-`build.sh`, checks of the bundle, the integration test, and `Conductor.app.zip` as an
-artifact).
+`build.sh`, checks of the bundle, DMG creation and verification, and the integration test).
+Download `Conductor.app` for `Conductor.app.zip`, or `Conductor.dmg` for the universal
+installer image, from the workflow run's artifacts. Ordinary CI builds use app version
+`0.0.0`; the bundled commands retain their Git version.
+
+The release workflow calls the same Mac build with the release tag, then waits for both
+Mac jobs and all four CLI archives before publishing assets. A release such as `v1.2.3`
+includes `Conductor-1.2.3-macos-universal.dmg` in its downloads, `SHA256SUMS`, and build
+provenance. CI and release images currently have an ad hoc signed app and an unsigned
+installer and image; the README inside the image includes Gatekeeper instructions.
 
 ## Package
 
@@ -153,11 +161,13 @@ to continue a checkpoint. Postgres runs with `jit = off`, which the hardened run
 
 Sparkle 2.10.0, pinned exactly in `Package.swift`. The app starts it only when its
 Info.plist carries `SUPublicEDKey`, which `build-dmg.sh` writes from
-`SPARKLE_PUBLIC_ED_KEY`; a build without it never checks and says why. To publish an
-update, sign the image with Sparkle's `sign_update` (in
-`.build/artifacts/sparkle/Sparkle/bin` after a build) using the private half of that key,
-and publish `appcast.xml` at the `SUFeedURL` in Info.plist. Losing the private key strands
-every installed copy: keep it somewhere that outlives any one machine.
+`SPARKLE_PUBLIC_ED_KEY`. A build without that key (checkout builds, or a DMG built without
+the secret) never starts Sparkle: Check for Updates stays disabled and Settings explains
+that updates need a signed disk image — there is no blocking alert. To publish an update,
+set `SPARKLE_PUBLIC_ED_KEY` in the release environment, sign the image with Sparkle's
+`sign_update` (in `.build/artifacts/sparkle/Sparkle/bin` after a build) using the private
+half of that key, and publish `appcast.xml` at the `SUFeedURL` in Info.plist. Losing the
+private key strands every installed copy: keep it somewhere that outlives any one machine.
 
 ## Settings → Storage
 
