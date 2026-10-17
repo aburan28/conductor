@@ -173,8 +173,6 @@ func runCommand(ctx context.Context, name string, args []string) error {
 		return cmdSecrets(ctx, args)
 	case "delphi":
 		return cmdDelphi(ctx, args)
-	case "quality":
-		return cmdQuality(ctx, args)
 	case "usage":
 		return cmdUsage(ctx, args)
 	case "task":
