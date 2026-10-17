@@ -86,15 +86,18 @@ as_pg() {
 }
 
 start_local_postgres() {
-  local bin port dir
+  local bin port dir locale=""
   bin=$(find_pg_bin) || return 1
+  # PostgreSQL 18 refuses to start without a valid locale ("postmaster became multithreaded
+  # during startup" on macOS); supply one only when the caller's environment has none.
+  [ -n "${LC_ALL:-}${LANG:-}" ] || locale="LC_ALL=C "
   port=$(free_port)
   dir=$(mktemp -d "${TMPDIR:-/tmp}/conductor-ci-pg.XXXXXX")
   [ "$(id -u)" -eq 0 ] && chown postgres "$dir"
   echo "${dim}throwaway Postgres from $bin on 127.0.0.1:$port${reset}"
-  as_pg "'$bin/initdb' -D '$dir/data' -U conductor --auth=trust -E UTF8 >'$dir/initdb.log' 2>&1" ||
+  as_pg "$locale'$bin/initdb' -D '$dir/data' -U conductor --auth=trust -E UTF8 >'$dir/initdb.log' 2>&1" ||
     { cat "$dir/initdb.log" >&2; return 1; }
-  as_pg "'$bin/pg_ctl' -D '$dir/data' -l '$dir/server.log' -o \"-p $port -k '$dir' -c listen_addresses=127.0.0.1 -c fsync=off\" -w start >/dev/null" ||
+  as_pg "$locale'$bin/pg_ctl' -D '$dir/data' -l '$dir/server.log' -o \"-p $port -k '$dir' -c listen_addresses=127.0.0.1 -c fsync=off\" -w start >/dev/null" ||
     { cat "$dir/server.log" >&2; return 1; }
   DB_CLEANUP+=("as_pg \"'$bin/pg_ctl' -D '$dir/data' -m immediate stop\"; rm -rf '$dir'")
   as_pg "'$bin/createdb' -h 127.0.0.1 -p $port -U conductor conductor" ||
