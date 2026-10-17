@@ -39,8 +39,10 @@ on:
 permissions:
   contents: read
 
+# A release build is grouped by its version, not the caller's ref: a backfill dispatched from
+# main must not share a group with (and be cancelled by) the CI run of the next push to main.
 concurrency:
-  group: macos-app-${{ github.ref }}
+  group: macos-app-${{ inputs.version || github.ref }}
   cancel-in-progress: true
 
 # Actions are pinned to full commit SHAs, as in ci.yml, with the version in a comment.
