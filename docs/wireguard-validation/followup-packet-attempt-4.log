@@ -1,0 +1,163 @@
+Evidence: /workspace/conductor-coverage-followup/packet-attempt-4
+┌──────────────────────────────────────────────────────┐
+│                                                      │
+│   Running wireguard-go is not required because this  │
+│   kernel has first class support for WireGuard. For  │
+│   information on installing the kernel module,       │
+│   please visit:                                      │
+│         https://www.wireguard.com/install/           │
+│                                                      │
+└──────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│                                                      │
+│   Running wireguard-go is not required because this  │
+│   kernel has first class support for WireGuard. For  │
+│   information on installing the kernel module,       │
+│   please visit:                                      │
+│         https://www.wireguard.com/install/           │
+│                                                      │
+└──────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│                                                      │
+│   Running wireguard-go is not required because this  │
+│   kernel has first class support for WireGuard. For  │
+│   information on installing the kernel module,       │
+│   please visit:                                      │
+│         https://www.wireguard.com/install/           │
+│                                                      │
+└──────────────────────────────────────────────────────┘
+WireGuard templates written to /tmp/conductor-wg-fixture.1fdmKS/plan; add each private key on its owning node before activation.
+PING 10.88.0.1 (10.88.0.1) 56(84) bytes of data.
+64 bytes from 10.88.0.1: icmp_seq=1 ttl=64 time=0.517 ms
+64 bytes from 10.88.0.1: icmp_seq=2 ttl=64 time=0.491 ms
+64 bytes from 10.88.0.1: icmp_seq=3 ttl=64 time=0.444 ms
+64 bytes from 10.88.0.1: icmp_seq=4 ttl=64 time=0.447 ms
+
+--- 10.88.0.1 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3080ms
+rtt min/avg/max/mdev = 0.444/0.474/0.517/0.030 ms
+PING 10.88.0.3 (10.88.0.3) 56(84) bytes of data.
+64 bytes from 10.88.0.3: icmp_seq=1 ttl=63 time=1.72 ms
+64 bytes from 10.88.0.3: icmp_seq=2 ttl=63 time=1.15 ms
+64 bytes from 10.88.0.3: icmp_seq=3 ttl=63 time=0.802 ms
+64 bytes from 10.88.0.3: icmp_seq=4 ttl=63 time=0.790 ms
+
+--- 10.88.0.3 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3031ms
+rtt min/avg/max/mdev = 0.790/1.114/1.716/0.376 ms
+PING 10.88.0.2 (10.88.0.2) 56(84) bytes of data.
+64 bytes from 10.88.0.2: icmp_seq=1 ttl=63 time=0.890 ms
+64 bytes from 10.88.0.2: icmp_seq=2 ttl=63 time=0.848 ms
+64 bytes from 10.88.0.2: icmp_seq=3 ttl=63 time=0.670 ms
+64 bytes from 10.88.0.2: icmp_seq=4 ttl=63 time=0.691 ms
+
+--- 10.88.0.2 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3071ms
+rtt min/avg/max/mdev = 0.670/0.774/0.890/0.095 ms
+PASS: 2 authenticated gateway handshakes and 12/12 initial packets
+┌──────────────────────────────────────────────────────┐
+│                                                      │
+│   Running wireguard-go is not required because this  │
+│   kernel has first class support for WireGuard. For  │
+│   information on installing the kernel module,       │
+│   please visit:                                      │
+│         https://www.wireguard.com/install/           │
+│                                                      │
+└──────────────────────────────────────────────────────┘
+PING 10.88.0.1 (10.88.0.1) 56(84) bytes of data.
+64 bytes from 10.88.0.1: icmp_seq=1 ttl=64 time=0.647 ms
+64 bytes from 10.88.0.1: icmp_seq=2 ttl=64 time=0.427 ms
+64 bytes from 10.88.0.1: icmp_seq=3 ttl=64 time=0.478 ms
+64 bytes from 10.88.0.1: icmp_seq=4 ttl=64 time=0.462 ms
+
+--- 10.88.0.1 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3051ms
+rtt min/avg/max/mdev = 0.427/0.503/0.647/0.084 ms
+PASS: unapproved private key cannot handshake or send overlay traffic; approved worker remains connected
+PING 10.88.0.1 (10.88.0.1) 56(84) bytes of data.
+64 bytes from 10.88.0.1: icmp_seq=1 ttl=64 time=0.752 ms
+64 bytes from 10.88.0.1: icmp_seq=2 ttl=64 time=0.508 ms
+64 bytes from 10.88.0.1: icmp_seq=3 ttl=64 time=0.409 ms
+64 bytes from 10.88.0.1: icmp_seq=4 ttl=64 time=0.472 ms
+
+--- 10.88.0.1 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3055ms
+rtt min/avg/max/mdev = 0.409/0.535/0.752/0.130 ms
+PASS: removed peer is isolated while another approved peer still reaches the gateway
+PING 10.88.0.1 (10.88.0.1) 56(84) bytes of data.
+64 bytes from 10.88.0.1: icmp_seq=1 ttl=64 time=0.396 ms
+64 bytes from 10.88.0.1: icmp_seq=2 ttl=64 time=0.443 ms
+64 bytes from 10.88.0.1: icmp_seq=3 ttl=64 time=0.400 ms
+64 bytes from 10.88.0.1: icmp_seq=4 ttl=64 time=0.463 ms
+
+--- 10.88.0.1 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3078ms
+rtt min/avg/max/mdev = 0.396/0.425/0.463/0.028 ms
+PING 10.88.0.3 (10.88.0.3) 56(84) bytes of data.
+64 bytes from 10.88.0.3: icmp_seq=1 ttl=63 time=0.853 ms
+64 bytes from 10.88.0.3: icmp_seq=2 ttl=63 time=0.795 ms
+64 bytes from 10.88.0.3: icmp_seq=3 ttl=63 time=0.658 ms
+64 bytes from 10.88.0.3: icmp_seq=4 ttl=63 time=4.68 ms
+
+--- 10.88.0.3 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3078ms
+rtt min/avg/max/mdev = 0.658/1.746/4.679/1.694 ms
+PING 10.88.0.2 (10.88.0.2) 56(84) bytes of data.
+64 bytes from 10.88.0.2: icmp_seq=1 ttl=63 time=2.81 ms
+64 bytes from 10.88.0.2: icmp_seq=2 ttl=63 time=0.663 ms
+64 bytes from 10.88.0.2: icmp_seq=3 ttl=63 time=0.741 ms
+64 bytes from 10.88.0.2: icmp_seq=4 ttl=63 time=0.892 ms
+
+--- 10.88.0.2 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3044ms
+rtt min/avg/max/mdev = 0.663/1.276/2.810/0.889 ms
+PASS: explicit gateway reapply plus affected worker peer reset/reapply restores the withdrawn peer
+PASS: gateway outage removes gateway and routed worker reachability
+┌──────────────────────────────────────────────────────┐
+│                                                      │
+│   Running wireguard-go is not required because this  │
+│   kernel has first class support for WireGuard. For  │
+│   information on installing the kernel module,       │
+│   please visit:                                      │
+│         https://www.wireguard.com/install/           │
+│                                                      │
+└──────────────────────────────────────────────────────┘
+PING 10.88.0.1 (10.88.0.1) 56(84) bytes of data.
+64 bytes from 10.88.0.1: icmp_seq=1 ttl=64 time=0.426 ms
+64 bytes from 10.88.0.1: icmp_seq=2 ttl=64 time=0.588 ms
+64 bytes from 10.88.0.1: icmp_seq=3 ttl=64 time=0.420 ms
+64 bytes from 10.88.0.1: icmp_seq=4 ttl=64 time=0.481 ms
+
+--- 10.88.0.1 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3070ms
+rtt min/avg/max/mdev = 0.420/0.478/0.588/0.067 ms
+PING 10.88.0.1 (10.88.0.1) 56(84) bytes of data.
+64 bytes from 10.88.0.1: icmp_seq=1 ttl=64 time=0.734 ms
+64 bytes from 10.88.0.1: icmp_seq=2 ttl=64 time=0.419 ms
+64 bytes from 10.88.0.1: icmp_seq=3 ttl=64 time=0.423 ms
+64 bytes from 10.88.0.1: icmp_seq=4 ttl=64 time=0.517 ms
+
+--- 10.88.0.1 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3073ms
+rtt min/avg/max/mdev = 0.419/0.523/0.734/0.127 ms
+PING 10.88.0.3 (10.88.0.3) 56(84) bytes of data.
+64 bytes from 10.88.0.3: icmp_seq=1 ttl=63 time=0.732 ms
+64 bytes from 10.88.0.3: icmp_seq=2 ttl=63 time=4.48 ms
+64 bytes from 10.88.0.3: icmp_seq=3 ttl=63 time=0.790 ms
+64 bytes from 10.88.0.3: icmp_seq=4 ttl=63 time=4.41 ms
+
+--- 10.88.0.3 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3042ms
+rtt min/avg/max/mdev = 0.732/2.602/4.481/1.841 ms
+PING 10.88.0.2 (10.88.0.2) 56(84) bytes of data.
+64 bytes from 10.88.0.2: icmp_seq=1 ttl=63 time=0.825 ms
+64 bytes from 10.88.0.2: icmp_seq=2 ttl=63 time=0.787 ms
+64 bytes from 10.88.0.2: icmp_seq=3 ttl=63 time=0.833 ms
+64 bytes from 10.88.0.2: icmp_seq=4 ttl=63 time=0.842 ms
+
+--- 10.88.0.2 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3071ms
+rtt min/avg/max/mdev = 0.787/0.821/0.842/0.020 ms
+PASS: gateway restart and explicit gateway/worker peer reset/reapply restore bidirectional routing
+WIREGUARD_LIFECYCLE_PASS: authorized traffic, unapproved-key denial, selective withdrawal, configuration reapply, gateway outage and recovery
+PASS: all owned containers, network and private fixture files removed

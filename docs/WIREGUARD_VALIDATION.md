@@ -1,5 +1,10 @@
 # WireGuard routing validation
 
+The [follow-up coverage and acceptance matrix](WIREGUARD_TEST_COVERAGE.md)
+adds adversarial unit tests, real daemon DNS startup, gateway lifecycle checks,
+and actual native Conductor team authorization over the generated overlay.
+Its failed recovery attempts and successful manual procedure are preserved.
+
 On 2026-10-17, the native `conductor wireguard render` output was exercised on
 three Linux containers: one hub and two workers, each with its own locally
 generated key. Their underlay was a Docker `--internal` network. No internet
@@ -47,11 +52,13 @@ test image and `WG_TEST_CONDUCTOR` an explicitly chosen executable.
 The image must already exist: the harness inspects it locally and uses
 `--pull=never`, so a missing image fails without a registry fallback.
 
-This establishes the generated hub/spoke configuration's userspace packet path
+This initial routing-only check establishes the generated hub/spoke configuration's userspace packet path
 on this Linux test setup. It does not establish kernel-module compatibility,
 customer firewall isolation, a production deployment, HA/failover, safe internet
 exit routing, service authorization, automatic control-plane revocation propagation,
-or key rotation. The manual peer-removal check covers only the explicitly updated
+or key rotation. The follow-up separately tests bounded native application
+authorization and token/member revocation; it does not generalize those results
+to customer identity/network policies. The manual peer-removal check covers only the explicitly updated
 gateway. Test the remaining lifecycle behavior
 separately against the intended installation. ICMP timings in raw tool output
 are not used to make any performance claim.

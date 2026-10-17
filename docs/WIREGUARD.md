@@ -112,6 +112,8 @@ service discovery, and [isolated deployments](AIR_GAPPED.md) for offline operati
 ## Validation and limits
 
 See [packet validation evidence](WIREGUARD_VALIDATION.md) for the preserved failed, partial, and successful userspace routing checks.
+The [follow-up coverage matrix](WIREGUARD_TEST_COVERAGE.md) distinguishes normal
+Go CI coverage from opt-in gateway lifecycle and native-team-over-overlay tests.
 
 Unit and CLI tests cover strict inventory validation, route generation, local
 private-key placeholders, file permissions, and refusal to overwrite existing

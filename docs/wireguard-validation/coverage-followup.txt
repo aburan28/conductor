@@ -1,0 +1,93 @@
+Private-network coverage follow-up
+Product source: 8b9e99a68229aa4d5b3d42b45237dcfed72869de; this change adds tests/harness/docs only.
+Go toolchain: go1.26.9 linux/amd64
+Environment: umask0022; writable GOPATH/GOCACHE/XDG_CACHE_HOME/DELPHI_HOME under /workspace/toolchains.
+Coordination: required conductor check attempted before edits and scope expansions; localhost:8080 connection refused. Isolated test branch fallback applied.
+
+Baseline command (exit 0):
+go test -count=1 -coverprofile=unit-baseline.cover ./internal/wireguard ./cmd/conductor-mesh-dns ./cmd/conductor
+Final command (exit 0):
+go test -count=1 -coverprofile=final.cover ./internal/wireguard ./cmd/conductor-mesh-dns ./cmd/conductor
+Function commands (both exit 0):
+go tool cover -func=unit-baseline.cover
+go tool cover -func=final.cover
+
+Selected package/file statement counts:
+internal/wireguard
+  baseline: 84/91 statements = 92.3%
+  final: 90/91 statements = 98.9%
+cmd/conductor-mesh-dns
+  baseline: 127/212 statements = 59.9%
+  final: 137/212 statements = 64.6%
+cmd/conductor (entire package)
+  baseline: 1721/9213 statements = 18.7%
+  final: 1726/9213 statements = 18.7%
+cmd/conductor/wireguard.go
+  baseline: 34/43 statements = 79.1%
+  final: 39/43 statements = 90.7%
+
+baseline function output for the selected product files:
+github.com/aburan28/conductor/cmd/conductor-mesh-dns/config.go:18:	resolveDirectoryIdentity	100.0%
+github.com/aburan28/conductor/cmd/conductor-mesh-dns/config.go:45:	directoryHostname		100.0%
+github.com/aburan28/conductor/cmd/conductor-mesh-dns/dns.go:32:		newDNSServer			100.0%
+github.com/aburan28/conductor/cmd/conductor-mesh-dns/dns.go:46:		qnameString			87.5%
+github.com/aburan28/conductor/cmd/conductor-mesh-dns/dns.go:71:		encodeName			100.0%
+github.com/aburan28/conductor/cmd/conductor-mesh-dns/dns.go:81:		serviceNames			0.0%
+github.com/aburan28/conductor/cmd/conductor-mesh-dns/dns.go:91:		answer				95.6%
+github.com/aburan28/conductor/cmd/conductor-mesh-dns/main.go:46:	servicesFromEnv			100.0%
+github.com/aburan28/conductor/cmd/conductor-mesh-dns/main.go:65:	main				0.0%
+github.com/aburan28/conductor/cmd/conductor-mesh-dns/tailscale.go:15:	tailscaleCLI			0.0%
+github.com/aburan28/conductor/cmd/conductor-mesh-dns/tailscale.go:28:	detectSelf			0.0%
+github.com/aburan28/conductor/cmd/conductor/wireguard.go:14:		cmdWireGuard			69.2%
+github.com/aburan28/conductor/cmd/conductor/wireguard.go:34:		renderWireGuardFiles		83.3%
+github.com/aburan28/conductor/internal/wireguard/manifest.go:44:	Load				93.8%
+github.com/aburan28/conductor/internal/wireguard/manifest.go:70:	Validate			92.9%
+github.com/aburan28/conductor/internal/wireguard/manifest.go:112:	privateOverlay			100.0%
+github.com/aburan28/conductor/internal/wireguard/manifest.go:122:	broadcast			100.0%
+github.com/aburan28/conductor/internal/wireguard/manifest.go:129:	allZero				100.0%
+github.com/aburan28/conductor/internal/wireguard/manifest.go:138:	gatewayEndpoint			84.2%
+github.com/aburan28/conductor/internal/wireguard/render.go:13:		Render				93.3%
+
+final function output for the selected product files:
+github.com/aburan28/conductor/cmd/conductor-mesh-dns/config.go:18:	resolveDirectoryIdentity	100.0%
+github.com/aburan28/conductor/cmd/conductor-mesh-dns/config.go:45:	directoryHostname		100.0%
+github.com/aburan28/conductor/cmd/conductor-mesh-dns/dns.go:32:		newDNSServer			100.0%
+github.com/aburan28/conductor/cmd/conductor-mesh-dns/dns.go:46:		qnameString			100.0%
+github.com/aburan28/conductor/cmd/conductor-mesh-dns/dns.go:71:		encodeName			100.0%
+github.com/aburan28/conductor/cmd/conductor-mesh-dns/dns.go:81:		serviceNames			100.0%
+github.com/aburan28/conductor/cmd/conductor-mesh-dns/dns.go:91:		answer				100.0%
+github.com/aburan28/conductor/cmd/conductor-mesh-dns/main.go:46:	servicesFromEnv			100.0%
+github.com/aburan28/conductor/cmd/conductor-mesh-dns/main.go:65:	main				0.0%
+github.com/aburan28/conductor/cmd/conductor-mesh-dns/tailscale.go:15:	tailscaleCLI			0.0%
+github.com/aburan28/conductor/cmd/conductor-mesh-dns/tailscale.go:28:	detectSelf			0.0%
+github.com/aburan28/conductor/cmd/conductor/wireguard.go:14:		cmdWireGuard			100.0%
+github.com/aburan28/conductor/cmd/conductor/wireguard.go:34:		renderWireGuardFiles		86.7%
+github.com/aburan28/conductor/internal/wireguard/manifest.go:44:	Load				100.0%
+github.com/aburan28/conductor/internal/wireguard/manifest.go:70:	Validate			100.0%
+github.com/aburan28/conductor/internal/wireguard/manifest.go:112:	privateOverlay			100.0%
+github.com/aburan28/conductor/internal/wireguard/manifest.go:122:	broadcast			100.0%
+github.com/aburan28/conductor/internal/wireguard/manifest.go:129:	allZero				100.0%
+github.com/aburan28/conductor/internal/wireguard/manifest.go:138:	gatewayEndpoint			94.7%
+github.com/aburan28/conductor/internal/wireguard/render.go:13:		Render				100.0%
+
+Coverage scope: statement coverage of the three selected Go packages.
+Native CLI/DNS subprocess execution is uninstrumented and does not inflate the percentages.
+The opt-in scripts/wireguard-e2e API driver and Docker acceptance executions are not merged into these profiles.
+Linux rollback fault injection is in wireguard_linux_test.go, selected by filename; no new runtime skip.
+Native DNS supports UDP only; TCP acceptance is not claimed.
+
+Required repository gates (exit 0):
+make check — 34s; formatting, vet, staticcheck, build, all-package no-DB tests.
+make ci — 133s; formatting, vet, staticcheck, govulncheck, build, all-package race tests and existing native collaboration/mTLS E2E with fresh Postgres.
+No vulnerabilities found by govulncheck.
+
+Opt-in acceptance gates (exit 0; run separately from normal Go CI):
+bash scripts/test-wireguard-packets.sh — final attempt 5, approved handshakes/packets, rogue underlay positive control with overlay denial/no handshake, selective withdrawal, explicit manual recovery, real gateway outage/restart and cleanup.
+bash scripts/test-wireguard-conductor.sh — final attempt 3, actual TLS service + Postgres, two native CLI identities, real task/auth API statuses, token/member revocation, separate peer withdrawal, process/listener shutdown and cleanup.
+Runtime: Linux userspace wireguard-go, local Docker internal bridge, NET_ADMIN and TUN device class, preloaded images, no host networking or published ports.
+Fixture image: conductor-wireguard-test:local sha256:51de166d2cd0fa9b6b09cb0b1bb1c5fdd67bf12fc303ffb6dbee73d657be595e
+Native binaries built with CGO_ENABLED=0 from the same product source; driver from this follow-up.
+Manual recovery uses wg syncconf plus affected-worker peer reset/reapply and outbound initiation; earlier failed attempts are retained, no automatic convergence claim.
+
+Read-only peer review: no critical runtime assertion/key logging issue found. Lease wording qualified to saved expiry plus fresh task/reservation authority bindings. Cleanup trap moved before evidence setup; injected invalid evidence directory exited nonzero and left no temporary fixture before any Docker resource or secret creation.
+Public evidence scanned for bearer-token prefixes, private-key PEM and base64 key-like material: none found.
