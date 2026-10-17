@@ -2,7 +2,7 @@
 // APIs (Anthropic, OpenAI) and runs the loop around them: queue, flush as
 // batches, poll, collect, retry, hand results on.
 //
-//	export ANTHROPIC_API_KEY=...   # and/or OPENAI_API_KEY
+//	export ANTHROPIC_API_KEY=...   # or use conductor wif exec for Anthropic
 //	delphi ask -prompt "..."       # queue one request, prints its id
 //	delphi serve                   # the loop: flush, poll, collect, forever
 //	delphi get -wait ID            # the answer, once it is in
@@ -69,7 +69,7 @@ operations:
 every command takes -home DIR (default $DELPHI_HOME or ~/.delphi).
 run "delphi <command> -h" for its flags; README.md has the input format.
 
-environment: ANTHROPIC_API_KEY, OPENAI_API_KEY (one or both); DELPHI_PROVIDER
+environment: ANTHROPIC_API_KEY or Anthropic WIF, OPENAI_API_KEY; DELPHI_PROVIDER
 (default anthropic); DELPHI_ANTHROPIC_MODEL (default claude-mythos-5-1);
 DELPHI_OPENAI_MODEL (no default); DELPHI_MAX_TOKENS (default 32000);
 DELPHI_OPENAI_PRICES (JSON {"model":[in,out]} batch $/MTok for cost estimates).
@@ -544,7 +544,7 @@ func cmdServe(ctx context.Context, args []string, a *app) int {
 	defer unlock()
 	reg, missing := live()
 	if len(reg) == 0 {
-		fmt.Fprintln(a.stderr, "no provider credentials: export ANTHROPIC_API_KEY and/or OPENAI_API_KEY")
+		fmt.Fprintln(a.stderr, "no provider credentials: export ANTHROPIC_API_KEY, configure Anthropic WIF, and/or export OPENAI_API_KEY")
 		return exitUsage
 	}
 	for name, err := range missing {

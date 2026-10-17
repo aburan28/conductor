@@ -13,14 +13,50 @@ It runs in two forms:
   `conductor delphi`. Keys come from the project vault, and a background loop polls the
   providers. Spend lands in the usage ledger, and a linked task's timeline is told when
   the answer is in.
-- **Standalone**: `cmd/delphi`, one binary with a local file-backed queue and keys from
-  the environment, for use without a control plane. Run `delphi` with no arguments for
-  its usage.
+- **Standalone**: `cmd/delphi`, one binary with a local file-backed queue and
+  credentials from the environment (API key or Anthropic workload identity
+  federation), for use without a control plane. Run `delphi` with no arguments
+  for its usage.
 
 Both are built on `internal/delphi`: one provider-neutral engine, with providers in
 `internal/delphi/anthropic` and `internal/delphi/openai` on the official SDKs.
 
 ## Connect
+
+### Standalone Delphi with Anthropic workload identity
+
+Build or install both `conductor` and the standalone `delphi` binary on the
+laptop. After registering the local issuer and federation rule as described in
+[ANTHROPIC_WIF.md](ANTHROPIC_WIF.md), launch the entire Delphi process through
+the WIF wrapper:
+
+```sh
+conductor wif exec \
+  --provider local \
+  --issuer https://oidc.YOUR-DOMAIN.example/conductor \
+  --subject conductor:laptop:YOUR-LAPTOP \
+  --rule-id fdrl_YOUR_RULE \
+  --organization-id YOUR_ORGANIZATION_UUID \
+  --service-account-id svac_YOUR_SERVICE_ACCOUNT \
+  --workspace-id wrkspc_YOUR_WORKSPACE \
+  -- delphi run -prompt "Give a concise answer." -out ./delphi-run
+```
+
+`delphi run` uses `claude-mythos-5-1` by default; `-model` overrides it.
+The wrapper creates a short-lived signed assertion in a private temporary file
+and refreshes it while Delphi runs. The Anthropic Go SDK exchanges that
+assertion for an access token and authenticates Message Batches with a bearer
+token. No API key is needed. The federation rule needs the
+`workspace:developer` OAuth scope and access to the selected workspace;
+Mythos availability is a separate model entitlement.
+
+For a persistent local queue, wrap `delphi serve` the same way. Queue work with
+`delphi ask -prompt "..."` and read a finished response with `delphi get -wait
+ID`. The `conductor delphi ask` command below uses the hosted `conductord`
+service and its project vault credential; a WIF wrapper on the laptop does
+not change that server-side authentication.
+
+### Hosted Delphi
 
 ```sh
 conductor secrets set ANTHROPIC_API_KEY      # and/or OPENAI_API_KEY (maintainers)
