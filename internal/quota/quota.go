@@ -10,7 +10,8 @@
 //
 // A snapshot carries numbers and labels. Locally observed login identifiers distinguish
 // credentials that occupy the same state directory at different times. An email hint is
-// attached only to the requesting owner's view and is not persisted with the reading.
+// attached only to the requesting owner's view; a separate owner-scoped hint survives a
+// remote server move without adding email to the reading or team aggregates.
 package quota
 
 import (
@@ -75,9 +76,9 @@ type Snapshot struct {
 	Source        string     `json:"source"`
 	SourceKind    SourceKind `json:"source_kind"`
 	ObservedAt    time.Time  `json:"observed_at"`
-	// IdentityEmail is filled only while serving the requesting owner's view, when the
-	// server is on the same machine as the current profile. It is never stored in quota
-	// tables or included in project-wide counts and events.
+	// IdentityEmail is a locally observed, unverified hint. The reporting client sends it
+	// only for the matching current account key. The server validates it and stores it in
+	// a separate owner-scoped table; it never joins team counts or events.
 	IdentityEmail  string `json:"identity_email,omitempty"`
 	IdentitySource string `json:"identity_source,omitempty"`
 

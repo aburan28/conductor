@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"net/mail"
 	"os"
 	"path/filepath"
 	"strings"
@@ -109,6 +110,29 @@ func AccountKey(harness, stateDir, home string) string {
 		return label + suffix + id
 	}
 	return label
+}
+
+// IdentitySlot is the state-directory label in an identity-bound quota key.
+// A hint for one login is never attached to the old key after that slot switches accounts.
+func IdentitySlot(account string) (string, bool) {
+	i := strings.LastIndex(account, "-id-")
+	if i < 1 || len(account)-i != len("-id-")+12 {
+		return "", false
+	}
+	suffix := account[i+len("-id-"):]
+	if _, err := hex.DecodeString(suffix); err != nil || strings.ToLower(suffix) != suffix {
+		return "", false
+	}
+	return account[:i], true
+}
+
+// ValidIdentityEmail accepts a bare mailbox address for display, with a bounded payload.
+func ValidIdentityEmail(email string) bool {
+	if email == "" || len(email) > 254 {
+		return false
+	}
+	addr, err := mail.ParseAddress(email)
+	return err == nil && addr.Address == email
 }
 
 // CurrentIdentity returns the email for a key only if the requesting server is reading the

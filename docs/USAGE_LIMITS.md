@@ -203,14 +203,17 @@ Claude transcript fallback readings likewise require a matching `bridge-session`
 account and organization when cached profile IDs are available. The status line still
 depends on the cached profile identity; it does not itself authenticate an account ID.
 
-The Usage card shows an email under the label only for the requesting owner's rows when
-the server can read matching local profile metadata on the reporting machine. Claude's
-`~/.claude.json.oauthAccount` and Codex's local `auth.json` ID-token claims are observed
-file formats, not authenticated identity APIs. The email is therefore marked as an
-unverified local hint; a missing or stale hint does not prove readiness. The collector
-does not retain tokens or add email to stored quota readings, team counts, or project
-events. A server on another machine may show only the opaque account key. The Conductor
-user's sign-in email is unrelated to the Claude or Codex login.
+The Usage card and `conductor quota` show an email under the label only for the
+requesting owner's currently matched account key. The local reporter re-reads the current
+Claude or Codex profile before sending a hint to the control plane, including when it runs
+on another machine. Claude's `~/.claude.json.oauthAccount` and Codex's local `auth.json`
+ID-token claims are observed file formats, not authenticated identity APIs. The email is
+therefore marked as an unverified local hint; a missing or stale hint does not prove
+readiness. The server validates the hint's shape and account binding, stores only the email
+in an owner-scoped hint table, and replaces it when that profile slot reports a different
+account. Historical snapshots for the previous account lose their email. Tokens are never
+sent or retained. The hint is absent from stored quota readings, team counts, and project
+events. The Conductor user's sign-in email is unrelated to the Claude or Codex login.
 
 ### Levels and thresholds
 

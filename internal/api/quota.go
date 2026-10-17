@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math"
 	"net/http"
-	"os"
 	"regexp"
 	"time"
 
@@ -64,6 +63,24 @@ func validQuotaSnapshot(q *quota.Snapshot, now time.Time) error {
 	if q.WindowMinutes < 0 || q.WindowMinutes > 366*24*60 {
 		return fmt.Errorf("%w: quota snapshot window_minutes out of range", domain.ErrInvalidArgument)
 	}
+	// This is a hint from a caller's local metadata, not a verified provider identity.
+	// Never accept a caller's assurance about its trust level or echo a submitted email
+	// in errors, logs, project events, or team responses.
+	if q.IdentitySource != "" && q.IdentitySource != "unverified_local_metadata" {
+		return fmt.Errorf("%w: quota identity source", domain.ErrInvalidArgument)
+	}
+	if q.IdentityEmail != "" || q.IdentitySource != "" {
+		_, bound := quota.IdentitySlot(q.Account)
+		if !bound || q.Machine == "" || (q.Harness != "claude" && q.Harness != "codex") ||
+			q.IdentitySource != "unverified_local_metadata" {
+			return fmt.Errorf("%w: quota identity binding", domain.ErrInvalidArgument)
+		}
+		if q.IdentityEmail != "" {
+			if !quota.ValidIdentityEmail(q.IdentityEmail) {
+				return fmt.Errorf("%w: quota identity email", domain.ErrInvalidArgument)
+			}
+		}
+	}
 	// A reading from the future is a skewed clock; it would pin the window until the clock
 	// caught up, so it is recorded as now.
 	if q.ObservedAt.IsZero() || q.ObservedAt.After(now) {
@@ -116,14 +133,6 @@ func (s *Server) quotaView(r *http.Request, p domain.Principal) (quota.View, err
 	snaps, err := s.store.ListQuota(r.Context(), p.ID)
 	if err != nil {
 		return quota.View{}, err
-	}
-	home, _ := os.UserHomeDir()
-	for i := range snaps {
-		if email, matched := quota.CurrentIdentity(snaps[i].Harness, snaps[i].Account,
-			snaps[i].Machine, home, os.Getenv); matched {
-			snaps[i].IdentityEmail = email
-			snaps[i].IdentitySource = "unverified_local_metadata"
-		}
 	}
 	// The server does not know each person's thresholds; the defaults classify here, and
 	// the CLI reclassifies with the owner's own.

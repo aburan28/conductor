@@ -72,6 +72,27 @@ func (s *Store) RecordQuota(ctx context.Context, principalID domain.ID, snaps []
 				continue // an older reading than the one already stored
 			}
 			report.Recorded++
+			if slot, bound := quota.IdentitySlot(snap.Account); bound &&
+				snap.IdentitySource == "unverified_local_metadata" &&
+				(snap.Harness == "claude" || snap.Harness == "codex") {
+				_, err := tx.Exec(ctx, `
+					INSERT INTO quota_identity_hints
+					    (principal_id, machine, harness, slot, account, email, observed_at)
+					VALUES ($1::uuid, $2, $3, $4, $5, $6, $7)
+					ON CONFLICT (principal_id, machine, harness, slot) DO UPDATE SET
+					    account = EXCLUDED.account, email = EXCLUDED.email,
+					    observed_at = EXCLUDED.observed_at, updated_at = now()
+					WHERE quota_identity_hints.observed_at < EXCLUDED.observed_at
+					   OR (quota_identity_hints.account = EXCLUDED.account
+					       AND quota_identity_hints.observed_at = EXCLUDED.observed_at)`,
+					principalID, snap.Machine, snap.Harness, slot, snap.Account,
+					snap.IdentityEmail, snap.ObservedAt.UTC())
+				if err != nil {
+					return err
+				}
+			}
+			// Hints must never enter alert responses or project event construction.
+			snap.IdentityEmail, snap.IdentitySource = "", ""
 
 			alert, err := raiseQuotaAlert(ctx, tx, principalID, snap, t, now)
 			if err != nil {
@@ -193,11 +214,17 @@ func quotaEvent(alertID domain.ID, a quota.Alert, now time.Time) eventSpec {
 // ListQuota returns every reading a principal reported, newest window state per row.
 func (s *Store) ListQuota(ctx context.Context, principalID domain.ID) ([]quota.Snapshot, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT machine, harness, account, window_name, window_minutes, used_percent, used_value,
-		       limit_value, unit, resets_at, limit_reached, plan, source, source_kind, observed_at
-		  FROM quota_snapshots
-		 WHERE principal_id = $1::uuid
-		 ORDER BY harness, account, machine, window_name`, principalID)
+		SELECT q.machine, q.harness, q.account, q.window_name, q.window_minutes,
+		       q.used_percent, q.used_value, q.limit_value, q.unit, q.resets_at,
+		       q.limit_reached, q.plan, q.source, q.source_kind, q.observed_at,
+		       COALESCE(h.email, '')
+		  FROM quota_snapshots q
+		  LEFT JOIN quota_identity_hints h
+		    ON h.principal_id = q.principal_id AND h.machine = q.machine
+		   AND h.harness = q.harness AND h.account = q.account
+		   AND h.slot = left(q.account, length(q.account) - 16)
+		 WHERE q.principal_id = $1::uuid
+		 ORDER BY q.harness, q.account, q.machine, q.window_name`, principalID)
 	if err != nil {
 		return nil, err
 	}
@@ -208,10 +235,13 @@ func (s *Store) ListQuota(ctx context.Context, principalID domain.ID) ([]quota.S
 		var kind string
 		if err := rows.Scan(&q.Machine, &q.Harness, &q.Account, &q.Window, &q.WindowMinutes,
 			&q.UsedPercent, &q.Used, &q.Limit, &q.Unit, &q.ResetsAt, &q.LimitReached, &q.Plan,
-			&q.Source, &kind, &q.ObservedAt); err != nil {
+			&q.Source, &kind, &q.ObservedAt, &q.IdentityEmail); err != nil {
 			return nil, err
 		}
 		q.SourceKind = quota.SourceKind(kind)
+		if q.IdentityEmail != "" {
+			q.IdentitySource = "unverified_local_metadata"
+		}
 		out = append(out, q)
 	}
 	return out, rows.Err()

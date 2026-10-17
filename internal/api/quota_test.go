@@ -229,3 +229,114 @@ func TestQuotaRejectsWhatIsNotALabel(t *testing.T) {
 		t.Errorf("projectless report emitted %+v", ev)
 	}
 }
+
+func TestQuotaRemoteIdentityHintIsOwnerOnlyAndSwitchesAccounts(t *testing.T) {
+	h := newHarness(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	oldKey, newKey := "default-id-111111111111", "default-id-222222222222"
+	post := func(account, email, source string, observed time.Time) (int, []byte) {
+		t.Helper()
+		snap := quotaSnap(account, "alice-laptop", "weekly", 81, now.Add(7*24*time.Hour), observed)
+		snap.IdentityEmail, snap.IdentitySource = email, source
+		return h.do(h.aliceTok, http.MethodPost, "/v1/quota", map[string]any{
+			"project": h.project.Slug, "snapshots": []quota.Snapshot{snap},
+		})
+	}
+	oldEmail, newEmail := "old@example.test", "new@example.test"
+	if code, body := post(oldKey, oldEmail, "unverified_local_metadata", now.Add(-3*time.Minute)); code != http.StatusOK {
+		t.Fatalf("remote report = %d %s", code, body)
+	}
+	readMine := func() quota.View {
+		t.Helper()
+		code, body := h.do(h.aliceTok, http.MethodGet, "/v1/quota", nil)
+		if code != http.StatusOK {
+			t.Fatalf("owner view = %d %s", code, body)
+		}
+		var view quota.View
+		if err := json.Unmarshal(body, &view); err != nil {
+			t.Fatal(err)
+		}
+		return view
+	}
+	if view := readMine(); len(view.Snapshots) != 1 || view.Snapshots[0].IdentityEmail != oldEmail ||
+		view.Snapshots[0].IdentitySource != "unverified_local_metadata" {
+		t.Fatalf("owner hint after remote report = %+v", view.Snapshots)
+	}
+	if code, body := h.do(h.aliceTok, http.MethodGet, h.projectPath("/quota"), nil); code != http.StatusOK {
+		t.Fatalf("owner project quota = %d %s", code, body)
+	} else {
+		var team quota.TeamView
+		if err := json.Unmarshal(body, &team); err != nil || len(team.Mine.Snapshots) != 1 ||
+			team.Mine.Snapshots[0].IdentityEmail != oldEmail {
+			t.Fatalf("dashboard owner hint = %+v, %v", team.Mine.Snapshots, err)
+		}
+	}
+	var storedEmail, rawSnapshot string
+	if err := h.store.Pool().QueryRow(t.Context(), `SELECT email FROM quota_identity_hints
+		WHERE principal_id = $1::uuid AND machine = 'alice-laptop' AND account = $2`,
+		h.alice.ID, oldKey).Scan(&storedEmail); err != nil || storedEmail != oldEmail {
+		t.Fatalf("owner-scoped persisted hint = %q, %v", storedEmail, err)
+	}
+	if err := h.store.Pool().QueryRow(t.Context(), `SELECT row_to_json(q)::text FROM quota_snapshots q
+		WHERE principal_id = $1::uuid AND account = $2`, h.alice.ID, oldKey).Scan(&rawSnapshot); err != nil ||
+		strings.Contains(rawSnapshot, oldEmail) {
+		t.Fatalf("email reached stored snapshot: %v", err)
+	}
+	var otherHints int
+	if err := h.store.Pool().QueryRow(t.Context(), `SELECT count(*) FROM quota_identity_hints
+		WHERE principal_id = $1::uuid`, h.bob.ID).Scan(&otherHints); err != nil || otherHints != 0 {
+		t.Fatalf("hint crossed principal boundary: %d, %v", otherHints, err)
+	}
+	for _, path := range []string{"/v1/quota", h.projectPath("/quota")} {
+		code, body := h.do(h.bobTok, http.MethodGet, path, nil)
+		if code != http.StatusOK || strings.Contains(string(body), oldEmail) || strings.Contains(string(body), oldKey) {
+			t.Fatalf("other principal view leaked identity on %s: %d %s", path, code, body)
+		}
+	}
+	for _, e := range quotaEvents(t, h) {
+		raw, _ := json.Marshal(e)
+		if strings.Contains(string(raw), oldEmail) {
+			t.Fatalf("project event leaked identity: %s", raw)
+		}
+	}
+	if code, body := post(newKey, newEmail, "unverified_local_metadata", now.Add(-time.Minute)); code != http.StatusOK {
+		t.Fatalf("switched account report = %d %s", code, body)
+	}
+	// A delayed report from the previous account cannot reactivate its hint.
+	if code, body := post(oldKey, oldEmail, "unverified_local_metadata", now.Add(-3*time.Minute)); code != http.StatusOK {
+		t.Fatalf("late account report = %d %s", code, body)
+	}
+	view := readMine()
+	if len(view.Snapshots) != 2 {
+		t.Fatalf("account switch rows = %+v", view.Snapshots)
+	}
+	for _, row := range view.Snapshots {
+		switch row.Account {
+		case oldKey:
+			if row.IdentityEmail != "" || row.IdentitySource != "" {
+				t.Errorf("old account kept stale hint: %+v", row)
+			}
+		case newKey:
+			if row.IdentityEmail != newEmail || row.IdentitySource != "unverified_local_metadata" {
+				t.Errorf("new account hint = %+v", row)
+			}
+		default:
+			t.Errorf("unexpected account: %+v", row)
+		}
+	}
+	for _, e := range quotaEvents(t, h) {
+		raw, _ := json.Marshal(e)
+		if strings.Contains(string(raw), oldEmail) || strings.Contains(string(raw), newEmail) {
+			t.Fatalf("switched identity reached project event: %s", raw)
+		}
+	}
+	for _, bad := range []struct{ email, source string }{
+		{"bad-email", "unverified_local_metadata"},
+		{"owner@example.test", "verified_provider"},
+	} {
+		code, body := post(newKey, bad.email, bad.source, now)
+		if code != http.StatusBadRequest || strings.Contains(string(body), bad.email) {
+			t.Errorf("invalid hint accepted or echoed: %d %s", code, body)
+		}
+	}
+}

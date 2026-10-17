@@ -119,6 +119,9 @@ func collectQuotaView(ctx context.Context, projectFlag string, local bool) quota
 	host := quotaMachine()
 	view := quotaCLIView{Thresholds: th, Machine: host, Collectors: res.Collectors}
 	snaps := res.Snapshots
+	for i := range snaps {
+		attachLocalQuotaIdentity(&snaps[i], host)
+	}
 
 	creds := client.LoadCredentials()
 	if !local && creds.Token != "" {
@@ -181,11 +184,32 @@ func postQuota(ctx context.Context, apiClient *client.Client, ref string, snaps 
 		if s.Machine == "" || len(s.Machine) > 64 {
 			s.Machine = host
 		}
+		attachLocalQuotaIdentity(&s, host)
 		out[i] = s
 	}
 	return apiClient.Post(ctx, "/v1/quota", map[string]any{
 		"snapshots": out, "thresholds": th, "project": ref,
 	}, nil)
+}
+
+func attachLocalQuotaIdentity(s *quota.Snapshot, host string) {
+	// A cached hint, including one from another machine, is never forwarded. The current
+	// profile and its identity-bound account key must still match on this machine.
+	s.IdentityEmail, s.IdentitySource = "", ""
+	localHost, _ := os.Hostname()
+	if s.Machine != host && s.Machine != localHost {
+		return
+	}
+	if s.Harness != "claude" && s.Harness != "codex" {
+		return
+	}
+	home, _ := os.UserHomeDir()
+	if email, ok := quota.CurrentIdentity(s.Harness, s.Account, localHost, home, os.Getenv); ok {
+		if quota.ValidIdentityEmail(email) {
+			s.IdentityEmail = email
+		}
+		s.IdentitySource = "unverified_local_metadata"
+	}
 }
 
 func printQuotaView(v quotaCLIView) {
@@ -208,7 +232,11 @@ func printQuotaView(v quotaCLIView) {
 		header = append(header, "WINDOW", "USED", "RESETS IN", "SOURCE", "AGE", "")
 		rows := [][]string{header}
 		for _, r := range v.Snapshots {
-			row := []string{r.Harness, r.Account}
+			account := r.Account
+			if r.IdentityEmail != "" {
+				account += " (" + r.IdentityEmail + ", unverified)"
+			}
+			row := []string{r.Harness, account}
 			if multi {
 				row = append(row, r.Machine)
 			}
