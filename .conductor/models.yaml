@@ -8,6 +8,10 @@ models:
   defaultAlias: worker.general
 
   aliases:
+    worker.public-free:
+      capability_floor: [code_edit, tests]
+      default_effort: low
+      tier: T1
     planner.frontier:
       capability_floor: [architecture, long_context, strong_tool_use]
       default_effort: high
@@ -48,6 +52,21 @@ models:
 #     exclude: ["*-preview"]       # optional
 #     prefix: "vllm/"              # optional: prepended, for harnesses that namespace models
 profiles:
+  # Isolated OpenCode probe on 2026-10-17 returned text and wrote a file through
+  # a tool call. This alias is outside the default ladder: only the dispatch
+  # rule with public-free-ok selects it automatically. Free-tier availability
+  # and rate limits can change; re-probe before relying on it.
+  - alias: worker.public-free
+    harness: opencode
+    provider: openrouter
+    model: openrouter/poolside/laguna-xs-2.1:free
+    reasoning_effort: low
+    capabilities: [code_edit, tests, read_diff]
+    tier: T1
+    billing: tokens
+    input_cost_per_mtok: 0
+    output_cost_per_mtok: 0
+
   - alias: planner.frontier
     harness: claude
     provider: anthropic

@@ -16,19 +16,20 @@ lanes:
   implement:
     role: implementer
     candidates:
-      # A local model for small, low-risk work — cheap and private. Declare it in models.yaml
-      # with a tier so tier floors can still be met. Requires OpenCode + Ollama installed.
-      # - model: ollama/qwen3:27b
-      #   harness: opencode
-      #   tags: [local, cheap]
-      #   when: task.estimated_files <= 3 && !task.security_sensitive
-      #   max_concurrent: 1
-      - model: claude-sonnet-5
-        harness: claude
-        effort: medium
-      - model: claude-opus-5
-        harness: claude
-        effort: high
+      # Verified with an isolated OpenCode file-tool probe on 2026-10-17.
+      # The label confirms this task contains only material approved for a
+      # third-party free tier. Tier and capability floors still apply.
+      - model: openrouter/poolside/laguna-xs-2.1:free
+        harness: opencode
+        tags: [free, public]
+        when: task.labels has "public-free-ok" && task.estimated_files <= 3 && !task.security_sensitive && !task.cryptography_sensitive
+        max_concurrent: 1
+      - alias: worker.fast
+        when: task.estimated_files <= 2 && task.acceptance_ambiguity < 0.2 && task.cross_module_edges == 0 && !task.security_sensitive && !task.cryptography_sensitive
+      # Resolve through the catalog so endpoint discovery can advance these
+      # aliases without leaving this ladder pinned to a retired model ID.
+      - alias: worker.general
+      - alias: planner.frontier
 
   review:
     role: reviewer
