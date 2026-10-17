@@ -4,8 +4,7 @@
 // qnameString/question/answers as plain byte slices, NXDOMAIN for anything
 // the table does not know. The only generalization over the original is that
 // the table (service name -> SRV ports) and the SRV target are data, not
-// constants, and A queries for the target itself are answered with the node's
-// tailscale IP so SRV target resolution completes in one server.
+// constants. A/AAAA queries for the target itself resolve its configured address.
 package main
 
 import (
@@ -17,25 +16,29 @@ import (
 
 // dnsServer answers queries from one immutable directory.
 type dnsServer struct {
-	// hostname is the SRV target and the only name with an A record,
+	// hostname is the SRV target and the only name with address records,
 	// wire-encodable FQDN form, lowercased, trailing dot ("host.tail.ts.net.").
 	hostname string
-	// ip is the node's tailscale IP; nil disables A answers.
+	// ip is the advertised address; nil disables address answers.
 	ip net.IP
+	// meshTarget preserves local peering by default; explicit deployments can
+	// instead advertise a daemon reachable over their private network.
+	meshTarget string
 	// services maps SRV name -> ports, one SRV record per port.
 	services map[string][]uint16
 }
 
-// newDNSServer validates and lowercases its inputs.
+// newDNSServer lowercases names; command-line validation happens before construction.
 func newDNSServer(hostname string, ip net.IP, services map[string][]uint16) *dnsServer {
 	norm := make(map[string][]uint16, len(services))
 	for name, ports := range services {
 		norm[strings.ToLower(name)] = ports
 	}
 	return &dnsServer{
-		hostname: strings.ToLower(hostname),
-		ip:       ip,
-		services: norm,
+		hostname:   strings.ToLower(hostname),
+		meshTarget: "localhost.",
+		ip:         ip,
+		services:   norm,
 	}
 }
 
@@ -104,10 +107,6 @@ func (s *dnsServer) answer(query []byte) []byte {
 	}
 	question := query[12:off]
 
-	// meshTarget keeps the loopback-peering record on localhost even when the
-	// tailnet target is a MagicDNS name: a remote peer dialing the mesh ports
-	// through serve would hit whatever serve publishes there (8443 is cairn's
-	// tailnet HTTPS in the standard layout), not the loopback daemon.
 	meshName := "_conductor-mesh._tcp.mesh.internal."
 	resp := make([]byte, 0, 512)
 	resp = append(resp, id[0], id[1])
@@ -120,7 +119,7 @@ func (s *dnsServer) answer(query []byte) []byte {
 			if ports, ok := s.services[name]; ok {
 				target := encodeName(s.hostname)
 				if name == meshName {
-					target = encodeName("localhost.")
+					target = encodeName(s.meshTarget)
 				}
 				for _, port := range ports {
 					rdata := make([]byte, 0, 6+len(target))
@@ -143,17 +142,25 @@ func (s *dnsServer) answer(query []byte) []byte {
 			} else {
 				rcode = 3 // NXDOMAIN
 			}
-		case qtype == 1: // A
-			if name == s.hostname && s.ip != nil {
-				answers = append(answers, 0xC0, 0x0C) // name pointer -> question
-				answers = append(answers, 0, 1)       // A
-				answers = append(answers, 0, 1)       // IN
-				answers = append(answers, 0, 0, 0, 60)
-				answers = append(answers, 0, 4)
-				answers = append(answers, s.ip.To4()...)
-				ancount++
-			} else {
+		case qtype == 1 || qtype == 28: // A or AAAA
+			if name != s.hostname {
 				rcode = 3 // NXDOMAIN
+				break
+			}
+			var address net.IP
+			if qtype == 1 {
+				address = s.ip.To4()
+			} else if s.ip.To4() == nil {
+				address = s.ip.To16()
+			}
+			// A known target without this family returns NOERROR with no data.
+			if address != nil {
+				answers = append(answers, 0xC0, 0x0C)
+				answers = append(answers, 0, byte(qtype), 0, 1)
+				answers = append(answers, 0, 0, 0, 60)
+				answers = append(answers, 0, byte(len(address)))
+				answers = append(answers, address...)
+				ancount++
 			}
 		default:
 			rcode = 3 // NXDOMAIN

@@ -207,6 +207,8 @@ func runCommand(ctx context.Context, name string, args []string) error {
 		return cmdQueue(ctx, args)
 	case "peers":
 		return cmdPeers(ctx, args)
+	case "wireguard":
+		return cmdWireGuard(args)
 	}
 	return errUnknownCommand
 }
