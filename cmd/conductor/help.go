@@ -471,8 +471,8 @@ Example:
 
 Run ` + "`conductor systemd <subcommand> -h`" + ` for its flags.
 `},
-	{name: "accounts", group: "Sessions and machines", subs: []string{"add", "list", "switch", "exhaust", "ok"},
-		summary: "harness login profiles: switch accounts when usage runs out",
+	{name: "accounts", group: "Sessions and machines", subs: []string{"add", "list", "switch", "exhaust", "ok", "login", "use", "unbind"},
+		summary: "harness login profiles: switch accounts, or give a project its own",
 		topic: `conductor accounts — harness login profiles resume-all can switch between
 
 Usage:
@@ -481,13 +481,21 @@ Usage:
   conductor accounts switch <harness> <name>       make <name> the harness's live account
   conductor accounts exhaust <harness> <name>      mark an account out of usage
   conductor accounts ok <harness> <name>           mark an account usable again
+  conductor accounts login <harness> <name>        an isolated account: its own state directory
+  conductor accounts use <harness> <name>          wrap this project's <harness> under that account
+  conductor accounts unbind <harness>              back to the default login in this project
 
 Harnesses: claude, codex, opencode. An account is added by logging in with the harness
 itself, then snapshotting; a quota marker makes resume-all prefer another account when
 waking sessions after a restart.
 
+Isolated accounts (claude, codex, cursor, opencode) never touch the live login: wrap points
+the harness at the account's directory (CLAUDE_CONFIG_DIR, CODEX_HOME, XDG_DATA_HOME, or
+Cursor's --user-data-dir), so two projects can run under two accounts at once.
+
 Example:
   conductor accounts add claude main
+  conductor accounts login claude work --use
 
 Run ` + "`conductor accounts <subcommand> -h`" + ` for its flags.`},
 	{name: "sessions", group: "Sessions and machines", subs: []string{"save", "list", "export", "install-hook"},
