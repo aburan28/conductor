@@ -963,6 +963,11 @@ func cmdWrap(ctx context.Context, args []string) error {
 			"conductor wrap accepts --model, --effort, --max-effort, --alias, and --role", args[0])
 	}
 	tool, toolArgs := args[0], args[1:]
+	// A project bound to an isolated account runs the harness from that account's state
+	// directory; applied before anything reads the harness's environment.
+	if extra := applyAccount(tool, worktreeRoot(ctx), toolArgs); len(extra) > 0 {
+		toolArgs = append(extra, toolArgs...)
+	}
 
 	api, creds, err := mustClient()
 	if err != nil {

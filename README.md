@@ -1061,6 +1061,46 @@ before resuming, because a harness reads its credentials at startup. Clear the m
 `ok` when the quota window rolls over. Nothing is sent anywhere: profiles live beside the
 machine's other local state, `0600`, like the credentials themselves.
 
+### A login per project
+
+Snapshots swap one live login for the whole machine. When projects belong to different
+accounts (a work repository, a client repository, a personal one), give each its own
+*isolated* account instead: a state directory the harness is pointed at, so nothing is
+swapped and two projects can run under two logins at the same time.
+
+```bash
+conductor accounts login claude work --use   # sign in inside a fresh directory; bind this project
+conductor accounts use codex client          # bind this project's Codex to another account
+conductor accounts unbind codex              # back to the default login here
+CONDUCTOR_ACCOUNT=personal conductor wrap claude   # one launch under another account
+```
+
+`conductor wrap` applies the binding: Claude Code gets `CLAUDE_CONFIG_DIR`, Codex
+`CODEX_HOME`, OpenCode `XDG_DATA_HOME`, and Cursor `--user-data-dir`, all pointing at
+`~/.conductor/accounts/<harness>/<name>` (or an existing `~/.<harness>-<name>`, the
+community convention). `accounts login` runs the harness's own sign-in with that directory in
+place, so the credentials land there and nowhere else. `checkpoint resume` installs the
+conversation under the bound account too. Bindings are machine-local, in
+`~/.conductor/accounts/bindings.json` keyed by checkout root; which login you use for a
+repository is yours, not repository policy. A `CLAUDE_CONFIG_DIR` or `CODEX_HOME` you export
+yourself always wins over the binding.
+
+Accounts can have aliases, per harness: another name for an account, or a name for a state
+directory you already have.
+
+```bash
+conductor accounts alias claude acme work              # acme means work
+conductor accounts alias codex legacy ~/codex-old      # adopt an existing CODEX_HOME
+conductor accounts use claude acme                     # bind the alias, not the account
+conductor accounts alias claude acme client            # every project bound to acme moves
+conductor accounts unalias claude acme
+```
+
+An alias works anywhere a name does (`use`, `login`, `switch`, `exhaust`, `ok`,
+`CONDUCTOR_ACCOUNT`, `checkpoint resume --account`). Aliases live in
+`~/.conductor/accounts/aliases.json`; they cannot shadow a real account or point at another
+alias, so a lookup is always one step.
+
 ### Surviving a shutdown, and the machine itself
 
 You should not have to remember to run `save` before a reboot. Three layers make a shutdown
