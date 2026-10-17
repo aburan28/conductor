@@ -15,8 +15,9 @@ import (
 	"github.com/aburan28/conductor/internal/domain"
 )
 
-// The tool set is intentionally short (DESIGN.md §18). Fifteen tools, each mapping to one API
-// call — except coord_checkpoint, which is local to the machine the agent runs on. `conductor_check_conflicts` is separated out from `coord_start_work` because it is
+// The tool set is intentionally short (DESIGN.md §18). Each tool maps to one API call —
+// except coord_checkpoint, which is local to the machine the agent runs on.
+// `conductor_check_conflicts` is separated out from `coord_start_work` because it is
 // the one an agent should reach for reflexively before editing — the cheapest possible call
 // that prevents the most expensive possible mistake.
 func toolDefinitions() []map[string]any {
@@ -233,6 +234,35 @@ func toolDefinitions() []map[string]any {
 			},
 		},
 		{
+			"name": "coord_quality_lint",
+			"description": "Advisory quality.lint on a public task envelope (summary, objective, acceptance criteria, " +
+				"scopes, labels). Returns findings with advisory:true — never a merge gate. Heuristics always run; " +
+				"an optional local/OpenAI-compatible endpoint may add more. Does not read chats or secrets; " +
+				"private tasks are redacted for non-owners.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"summary": map[string]any{"type": "string",
+						"description": "One-sentence intent (public coordination text only)."},
+					"objective": map[string]any{"type": "string"},
+					"acceptance_criteria": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"text": map[string]any{"type": "string"},
+							},
+							"required": []string{"text"},
+						},
+					},
+					"scopes": scopeSchema,
+					"labels": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"task": map[string]any{"type": "string",
+						"description": "Optional task ref (e.g. T-42) to load; private tasks are redacted for non-owners."},
+				},
+			},
+		},
+		{
 			"name": "coord_list_secrets",
 			"description": "List the names of project secrets stored in Conductor's encrypted vault (hints only — never values). " +
 				"Use coord_get_secret to retrieve one value for this session. Do not put secret values into progress, " +
@@ -296,6 +326,8 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		return s.quotaTool(ctx, raw)
 	case "coord_project_status":
 		return s.projectStatus(ctx)
+	case "coord_quality_lint":
+		return s.qualityLint(ctx, raw)
 	case "coord_list_secrets":
 		return s.listSecrets(ctx, raw)
 	case "coord_get_secret":
@@ -721,6 +753,35 @@ func (s *Server) projectStatus(ctx context.Context) (any, error) {
 		return nil, err
 	}
 	return jsonResult(summary), nil
+}
+
+func (s *Server) qualityLint(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args struct {
+		Summary            string                       `json:"summary"`
+		Objective          string                       `json:"objective"`
+		AcceptanceCriteria []domain.AcceptanceCriterion `json:"acceptance_criteria"`
+		Scopes             []scopeArg                   `json:"scopes"`
+		Labels             []string                     `json:"labels"`
+		Task               string                       `json:"task"`
+	}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &args); err != nil {
+			return nil, err
+		}
+	}
+	body := map[string]any{
+		"summary":             args.Summary,
+		"objective":           args.Objective,
+		"acceptance_criteria": args.AcceptanceCriteria,
+		"scopes":              toScopes(args.Scopes),
+		"labels":              args.Labels,
+		"task":                args.Task,
+	}
+	var out map[string]any
+	if err := s.api.Post(ctx, "/v1/projects/"+s.project+"/quality/lint", body, &out); err != nil {
+		return nil, err
+	}
+	return jsonResult(out), nil
 }
 
 func (s *Server) requireFence() error {

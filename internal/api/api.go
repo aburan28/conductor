@@ -27,6 +27,7 @@ import (
 	"github.com/aburan28/conductor/internal/modelsrc"
 	"github.com/aburan28/conductor/internal/notify"
 	"github.com/aburan28/conductor/internal/peer"
+	"github.com/aburan28/conductor/internal/quality"
 	"github.com/aburan28/conductor/internal/secrets"
 )
 
@@ -65,6 +66,9 @@ type Server struct {
 	// delphi delegates prompts to frontier models through batch APIs; nil serves its routes
 	// as not configured (delphi.go).
 	delphi *hosted.Service
+	// qualityEnhance optionally adds LLM findings to quality.lint; nil means heuristic only
+	// (also overridable via CONDUCTOR_QUALITY_LINT_URL).
+	qualityEnhance quality.Enhancer
 	// ops is the operational surface: lifetime context, background work, streams (observe.go).
 	ops *opsState
 	// sso is single sign-on; it has no providers when none are configured (sso.go).
@@ -103,6 +107,9 @@ type Options struct {
 	Models *modelsrc.Service
 	// Delphi is batch delegation to frontier models (delphi.go). Nil disables it.
 	Delphi *hosted.Service
+	// QualityEnhance optionally adds LLM findings to quality.lint (quality.go). Nil keeps
+	// the heuristic baseline; CONDUCTOR_QUALITY_LINT_URL also enables enhancement.
+	QualityEnhance quality.Enhancer
 	// Ops configures metrics, request deadlines, stream caps and the server lifetime
 	// (observe.go).
 	Ops OpsOptions
@@ -122,26 +129,27 @@ func New(store *db.Store, svc *coord.Service, opts Options) *Server {
 		opts.Logger = slog.Default()
 	}
 	s := &Server{
-		store:       store,
-		svc:         svc,
-		logger:      opts.Logger,
-		mux:         http.NewServeMux(),
-		web:         opts.Web,
-		limiter:     newAuthLimiter(),
-		behindProxy: opts.BehindProxy,
-		tlsEnabled:  opts.TLSEnabled,
-		self:        opts.SelfEndpoint,
-		peerName:    opts.PeerName,
-		peerStatus:  opts.PeerStatus,
-		local:       opts.LocalLogin,
-		github:      opts.GitHub,
-		sso:         newSSOState(opts.SSO, opts.SelfEndpoint),
-		notify:      opts.Notify,
-		secrets:     opts.Secrets,
-		models:      opts.Models,
-		delphi:      opts.Delphi,
-		admin:       newAdminState(opts.Admin),
-		localResume: opts.LocalResume,
+		store:          store,
+		svc:            svc,
+		logger:         opts.Logger,
+		mux:            http.NewServeMux(),
+		web:            opts.Web,
+		limiter:        newAuthLimiter(),
+		behindProxy:    opts.BehindProxy,
+		tlsEnabled:     opts.TLSEnabled,
+		self:           opts.SelfEndpoint,
+		peerName:       opts.PeerName,
+		peerStatus:     opts.PeerStatus,
+		local:          opts.LocalLogin,
+		github:         opts.GitHub,
+		sso:            newSSOState(opts.SSO, opts.SelfEndpoint),
+		notify:         opts.Notify,
+		secrets:        opts.Secrets,
+		models:         opts.Models,
+		delphi:         opts.Delphi,
+		qualityEnhance: opts.QualityEnhance,
+		admin:          newAdminState(opts.Admin),
+		localResume:    opts.LocalResume,
 	}
 	s.ops = newOpsState(store, s, opts.Ops)
 	s.routes()
