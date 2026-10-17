@@ -386,6 +386,22 @@ func TestShippedModelTiers(t *testing.T) {
 			t.Errorf("alias %s has no enabled profile", name)
 		}
 	}
+
+	// Delegated director work (delphi --profile director: task-card compile and assess) runs
+	// at the high effort the director contract asks for; routed sessions keep medium.
+	var delphiDirector *domain.ModelProfile
+	for _, p := range bundle.ModelProfiles("org-1") {
+		if p.Alias == "director" && p.Harness == domain.DelphiHarness && p.Enabled {
+			delphiDirector = &p
+		}
+	}
+	if delphiDirector == nil {
+		t.Fatal("no enabled delphi profile for the director alias")
+	}
+	if delphiDirector.Model != "claude-sonnet-5-5" || delphiDirector.ReasoningEffort != domain.EffortHigh {
+		t.Errorf("delphi director = %s at %s, want claude-sonnet-5-5 at high",
+			delphiDirector.Model, delphiDirector.ReasoningEffort)
+	}
 }
 
 // The shipped dispatch.yaml sends breakthrough work to the frontier tier and fully specified
