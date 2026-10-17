@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Launch Conductor on one EC2 instance, check on it, and tear it down.
 
-  launch.py launch [--allow-cidr 203.0.113.9/32] [--region us-east-1] [--instance-type t3.small]
-  launch.py allow --allow-cidr 203.0.113.9/32      (open the port later)
+  launch.py plan   [same options as launch]   (show what launch would create; creates nothing)
+  launch.py launch [--allow-cidr 203.0.113.9/32 | --allow-my-ip] [--region us-east-1] [--instance-type t3.small]
+  launch.py allow (--allow-cidr 203.0.113.9/32 | --allow-my-ip)      (open the port later)
   launch.py status
   launch.py teardown
 
@@ -17,7 +18,7 @@ STATUS: written while the only AWS credentials available were rejected by AWS (I
 so this has been syntax-checked and its instance-side commands exercised on Linux, but never run
 against AWS.
 """
-import argparse, os, re, ssl, sys, time, urllib.request
+import argparse, hashlib, ipaddress, os, re, ssl, sys, time, urllib.request
 import boto3
 from botocore.exceptions import ClientError
 
@@ -56,6 +57,24 @@ def find_instances(ec2, name):
     return [i for res in r["Reservations"] for i in res["Instances"]]
 
 
+def my_public_ip() -> str:
+    """The IPv4 address the internet sees for the machine running this script.
+
+    The security group is IPv4, so an IPv6-only answer is not usable and is skipped. The AWS
+    service is last: it works from a laptop, but an egress proxy that signs *.amazonaws.com
+    requests (some sandboxes) cannot answer it.
+    """
+    for url in ("https://api.ipify.org", "https://ipv4.icanhazip.com", "https://checkip.amazonaws.com"):
+        try:
+            with urllib.request.urlopen(url, timeout=8) as r:
+                ip = ipaddress.ip_address(r.read().decode().strip())
+        except Exception:
+            continue
+        if ip.version == 4:
+            return str(ip)
+    sys.exit("could not find this machine's public IPv4 address; pass --allow-cidr instead")
+
+
 def open_port(ec2, sg, cidr):
     ec2.authorize_security_group_ingress(GroupId=sg, IpPermissions=[{
         "IpProtocol": "tcp", "FromPort": PORT, "ToPort": PORT,
@@ -65,7 +84,7 @@ def open_port(ec2, sg, cidr):
 
 def allow(a):
     if not a.allow_cidr:
-        sys.exit("allow needs --allow-cidr")
+        sys.exit("allow needs --allow-cidr or --allow-my-ip")
     ec2, _ = clients(a.region)
     groups = ec2.describe_security_groups(Filters=[{"Name": f"tag:{TAG}", "Values": [a.name]}])["SecurityGroups"]
     if not groups:
@@ -73,18 +92,73 @@ def allow(a):
     open_port(ec2, groups[0]["GroupId"], a.allow_cidr)
 
 
-def launch(a):
+def resolve(a, ec2, ssm):
+    """What both `plan` and `launch` need: the architecture, the user-data, the AMI and the VPC."""
     arch = "arm64" if a.instance_type.split(".")[0].endswith("g") else "amd64"
-    ec2, ssm = clients(a.region)
-    if find_instances(ec2, a.name):
-        sys.exit(f"an instance tagged {TAG}={a.name} already exists; run `status` or `teardown`")
     userdata = render_userdata(arch, a.commit)
-
     ami = ssm.get_parameter(Name=f"/aws/service/canonical/ubuntu/server/24.04/stable/current/{arch}/hvm/ebs-gp3/ami-id")["Parameter"]["Value"]
     vpcs = ec2.describe_vpcs(Filters=[{"Name": "isDefault", "Values": ["true"]}])["Vpcs"]
     if not vpcs and not a.subnet_id:
         sys.exit("no default VPC in this region; pass --subnet-id (a public subnet) and --vpc-id")
-    vpc_id = a.vpc_id or vpcs[0]["VpcId"]
+    return arch, userdata, ami, a.vpc_id or vpcs[0]["VpcId"]
+
+
+def run_params(a, ami, userdata, groups):
+    """The run_instances request. `plan` validates exactly what `launch` sends."""
+    nic = {"DeviceIndex": 0, "AssociatePublicIpAddress": True}
+    if groups:
+        nic["Groups"] = groups
+    if a.subnet_id:
+        nic["SubnetId"] = a.subnet_id
+    return dict(
+        ImageId=ami, InstanceType=a.instance_type, MinCount=1, MaxCount=1, UserData=userdata,
+        NetworkInterfaces=[nic],
+        BlockDeviceMappings=[{"DeviceName": "/dev/sda1", "Ebs": {"VolumeSize": 20, "VolumeType": "gp3", "Encrypted": True, "DeleteOnTermination": True}}],
+        MetadataOptions={"HttpTokens": "required", "HttpEndpoint": "enabled"},
+        TagSpecifications=[{"ResourceType": r, "Tags": [{"Key": TAG, "Value": a.name}, {"Key": "Name", "Value": f"conductor-{a.name}"}]}
+                           for r in ("instance", "volume")])
+
+
+def plan(a):
+    """Say what `launch` would create, and have EC2 validate the request. Creates nothing."""
+    ec2, ssm = clients(a.region)
+    existing = find_instances(ec2, a.name)
+    arch, userdata, ami, vpc_id = resolve(a, ec2, ssm)
+    try:  # a dry run always raises: DryRunOperation means "you could do this"
+        ec2.run_instances(DryRun=True, **run_params(a, ami, userdata, None))
+        verdict, ok = "EC2 dry run: accepted", True
+    except ClientError as e:
+        code, msg = e.response["Error"]["Code"], e.response["Error"].get("Message", "")
+        ok = code == "DryRunOperation"
+        verdict = "EC2 dry run: this account may launch it" if ok else f"EC2 dry run REFUSED: {code}: {msg}"
+    inbound = f"tcp/{PORT} from {a.allow_cidr} only" if a.allow_cidr else "none (the port stays closed until `allow`)"
+    print("Plan. NOTHING HAS BEEN CREATED.")
+    for k, v in [
+        ("region", a.region),
+        ("instance", f"{a.instance_type} ({arch}), Ubuntu 24.04, {ami}"),
+        ("disk", "20 GB gp3, encrypted"),
+        ("network", f"{vpc_id}, public IPv4, IMDSv2 required"),
+        ("inbound", inbound),
+        ("builds", f"github.com/aburan28/conductor at {a.commit}"),
+        ("user-data", f"{len(userdata.encode())} bytes, sha256 {hashlib.sha256(userdata.encode()).hexdigest()[:16]} (deploy/aws/userdata.sh)"),
+        ("tags", f"{TAG}={a.name} on the instance, its volume and the security group"),
+        ("cost", "about $0.02 an hour for the instance plus storage and the public IPv4 (roughly $20 a month) until `teardown`"),
+        ("existing", ", ".join(i["InstanceId"] for i in existing) or "none"),
+        ("check", verdict)]:
+        print(f"  {k:<10} {v}")
+    if existing:
+        sys.exit(f"an instance tagged {TAG}={a.name} already exists; `launch` would refuse. Run `status` or `teardown`")
+    if not ok:
+        sys.exit(1)
+    flags = "".join(f" {f} {v}" for f, v in [("--allow-cidr", a.allow_cidr), ("--vpc-id", a.vpc_id), ("--subnet-id", a.subnet_id)] if v)
+    print(f"Apply with: launch.py launch --region {a.region} --instance-type {a.instance_type} --name {a.name} --commit {a.commit}{flags}")
+
+
+def launch(a):
+    ec2, ssm = clients(a.region)
+    if find_instances(ec2, a.name):
+        sys.exit(f"an instance tagged {TAG}={a.name} already exists; run `status` or `teardown`")
+    arch, userdata, ami, vpc_id = resolve(a, ec2, ssm)
 
     sg = ec2.create_security_group(GroupName=f"{TAG}-{a.name}-{int(time.time())}", VpcId=vpc_id,
                                    Description="Conductor: TLS port from one CIDR",
@@ -92,18 +166,9 @@ def launch(a):
     if a.allow_cidr:
         open_port(ec2, sg, a.allow_cidr)
     else:
-        print("no --allow-cidr given: the port stays closed; open it later with `allow --allow-cidr X`")
-    nic = {"DeviceIndex": 0, "AssociatePublicIpAddress": True, "Groups": [sg]}
-    if a.subnet_id:
-        nic["SubnetId"] = a.subnet_id
+        print("no --allow-cidr / --allow-my-ip given: the port stays closed; open it later with `allow`")
     try:
-        inst = ec2.run_instances(
-            ImageId=ami, InstanceType=a.instance_type, MinCount=1, MaxCount=1, UserData=userdata,
-            NetworkInterfaces=[nic],
-            BlockDeviceMappings=[{"DeviceName": "/dev/sda1", "Ebs": {"VolumeSize": 20, "VolumeType": "gp3", "Encrypted": True, "DeleteOnTermination": True}}],
-            MetadataOptions={"HttpTokens": "required", "HttpEndpoint": "enabled"},
-            TagSpecifications=[{"ResourceType": r, "Tags": [{"Key": TAG, "Value": a.name}, {"Key": "Name", "Value": f"conductor-{a.name}"}]}
-                               for r in ("instance", "volume")])["Instances"][0]
+        inst = ec2.run_instances(**run_params(a, ami, userdata, [sg]))["Instances"][0]
     except ClientError:
         ec2.delete_security_group(GroupId=sg)  # do not leave a group behind
         raise
@@ -170,10 +235,14 @@ def teardown(a):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("command", choices=["launch", "allow", "status", "teardown"])
+    p.add_argument("command", choices=["plan", "launch", "allow", "status", "teardown"])
     p.add_argument("--region", default=os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1")
     p.add_argument("--name", default="conductor")
     p.add_argument("--allow-cidr", help="who may reach the HTTPS port, e.g. 203.0.113.9/32 (without it the port stays closed)")
+    p.add_argument("--allow-my-ip", action="store_true",
+                   help="open the port to this machine's public IPv4 address (a /32). That is the IP of the machine "
+                        "RUNNING THIS SCRIPT: run it from the machine you will browse from. Behind a shared NAT or "
+                        "VPN it is the shared address.")
     p.add_argument("--allow-world", action="store_true", help="allow 0.0.0.0/0")
     p.add_argument("--instance-type", default="t3.small")
     p.add_argument("--commit", default=COMMIT, help="full git commit of github.com/aburan28/conductor to build on the instance")
@@ -181,9 +250,26 @@ def main():
     p.add_argument("--timeout", type=int, default=1200, help="seconds to wait for the bootstrap")
     p.add_argument("--token-file", default="conductor-admin-token.txt")
     a = p.parse_args()
+    if a.allow_my_ip:
+        if a.command not in ("plan", "launch", "allow"):
+            p.error("--allow-my-ip only applies to plan, launch and allow")
+        if a.allow_cidr:
+            p.error("use either --allow-cidr or --allow-my-ip, not both")
+    if a.allow_cidr:
+        try:
+            net = ipaddress.ip_network(a.allow_cidr, strict=True)
+        except ValueError as e:
+            p.error(f"--allow-cidr: {e}")
+        if net.version != 4:
+            p.error("--allow-cidr must be an IPv4 network")
+        a.allow_cidr = str(net)
     if a.allow_cidr == "0.0.0.0/0" and not a.allow_world:
         p.error("refusing to open the port to the whole internet; pass --allow-world to do that on purpose")
-    {"launch": launch, "allow": allow, "status": status, "teardown": teardown}[a.command](a)
+    if a.allow_my_ip:
+        ip = my_public_ip()
+        a.allow_cidr = f"{ip}/32"
+        print(f"found public IP {ip} (the machine running this script); opening tcp/{PORT} to {a.allow_cidr} only")
+    {"plan": plan, "launch": launch, "allow": allow, "status": status, "teardown": teardown}[a.command](a)
 
 
 if __name__ == "__main__":
