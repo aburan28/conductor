@@ -544,6 +544,8 @@ func TestWebhooksRefreshPullRequests(t *testing.T) {
 		func(r db.PullRequest) bool {
 			return r.ReviewDecision == "changes_requested" && r.UnresolvedThreads == 1
 		})
+	// The row is stored before its events are appended, so wait for the event too.
+	waitFor(t, "pr_review", func() bool { return len(pullEventsOf(t, h, "github.pr_review", 1)) > 0 })
 	if review := pullEventsOf(t, h, "github.pr_review", 1); len(review) != 1 || review[0].Payload["decision"] != "changes_requested" {
 		t.Errorf("pr_review = %+v", review)
 	}
@@ -556,6 +558,7 @@ func TestWebhooksRefreshPullRequests(t *testing.T) {
 	reread("a check suite", "check_suite", map[string]any{"action": "completed",
 		"check_suite": map[string]any{"head_sha": "sha-feature/a", "pull_requests": []map[string]any{{"number": 1}}}},
 		func(r db.PullRequest) bool { return r.ChecksPassed == 1 && r.ReviewDecision == "approved" })
+	waitFor(t, "pr_checks", func() bool { return len(pullEventsOf(t, h, "github.pr_checks", 1)) > 0 })
 	if checks := pullEventsOf(t, h, "github.pr_checks", 1); len(checks) != 1 || checks[0].Payload["outcome"] != "passed" {
 		t.Errorf("pr_checks = %+v", checks)
 	}
