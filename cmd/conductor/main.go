@@ -254,7 +254,98 @@ func mustClient() (*client.Client, client.Credentials, error) {
 		}
 		return nil, creds, fmt.Errorf("not logged in: %s", notLoggedInHint(creds.Endpoint))
 	}
+	// A saved token that cannot see the saved project yields an opaque 404 on every
+	// command (non-members look like missing projects). Heal that before the caller
+	// spends a round trip discovering it.
+	api, creds, err := ensureProjectAccess(api, creds)
+	if err != nil {
+		return nil, creds, err
+	}
 	return api, creds, nil
+}
+
+// ensureProjectAccess checks that the saved project is among the token's memberships.
+// On a loopback control plane a stale token (for example from a test principal that
+// shares nothing with this checkout) is replaced by a fresh local owner session; that
+// is the usual recovery when credentials.project still says "conductor" but whoami
+// only lists throwaway API-test projects.
+func ensureProjectAccess(api *client.Client, creds client.Credentials) (*client.Client, client.Credentials, error) {
+	want := creds.Project
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	projects, handle, err := whoamiProjects(ctx, api)
+	if err != nil {
+		// A revoked or foreign token on this machine is the usual source of a wall of
+		// 401/404s; replace it with a fresh owner session when local sign-in is allowed.
+		var apiErr *client.APIError
+		if errors.As(err, &apiErr) && (apiErr.Status == 401 || apiErr.Status == 403) {
+			if signed, signErr := localSignInAndSave(creds); signErr == nil {
+				return client.New(signed.Endpoint, signed.Token), signed, nil
+			}
+		}
+		return api, creds, nil
+	}
+	if want == "" || hasProject(projects, want) {
+		return api, creds, nil
+	}
+	if signed, err := localSignInAndSave(creds); err == nil {
+		api = client.New(signed.Endpoint, signed.Token)
+		projects, handle, err = whoamiProjects(ctx, api)
+		if err == nil && (want == "" || hasProject(projects, want)) {
+			// localSignInAndSave already announced the new handle; keep Project as asked.
+			if want != "" {
+				signed.Project = want
+				_ = client.SaveCredentials(signed)
+			}
+			return api, signed, nil
+		}
+		creds = signed
+	}
+	return api, creds, fmt.Errorf("%s", projectAccessHint(want, handle, projects))
+}
+
+func whoamiProjects(ctx context.Context, api *client.Client) ([]JoinedProject, string, error) {
+	var who struct {
+		Principal struct {
+			Handle string `json:"handle"`
+		} `json:"principal"`
+		Projects []JoinedProject `json:"projects"`
+	}
+	if err := api.Get(ctx, "/v1/whoami", &who); err != nil {
+		return nil, "", err
+	}
+	return who.Projects, who.Principal.Handle, nil
+}
+
+func hasProject(projects []JoinedProject, slug string) bool {
+	for _, p := range projects {
+		if p.Slug == slug {
+			return true
+		}
+	}
+	return false
+}
+
+func projectAccessHint(want, handle string, projects []JoinedProject) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "project %q is not reachable with the current login", want)
+	if handle != "" {
+		fmt.Fprintf(&b, " (%s)", handle)
+	}
+	b.WriteString(" — the control plane answers 404 for projects you are not a member of")
+	if len(projects) == 0 {
+		b.WriteString(". You are in no projects; run `conductor up` in this repository, or `conductor join <link>`")
+		return b.String()
+	}
+	b.WriteString(". You can reach: ")
+	for i, p := range projects {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(p.Slug)
+	}
+	b.WriteString(". Pass --project, or run `conductor login --project <slug>` (on this machine, `conductor up` re-attaches the owner)")
+	return b.String()
 }
 
 // notLoggedInHint says what to do without a login. On a loopback endpoint the usual cause is
