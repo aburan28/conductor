@@ -532,10 +532,14 @@ func fetchWALOnce(ctx context.Context, name, dest, dataDir, systemID string) err
 func failFetchWAL(err error) error {
 	fmt.Fprintf(os.Stderr, "conductor: fetch-wal failed; recovery must stop: %v\n", err)
 	if p, perr := os.FindProcess(os.Getpid()); perr == nil {
-		_ = p.Signal(syscall.SIGKILL)
+		if signalErr := p.Signal(syscall.SIGKILL); signalErr == nil {
+			// Signal may return before the kernel has terminated this process. Yield to
+			// delivery so it does not race the exit-2 fallback.
+			time.Sleep(time.Second)
+		}
 	}
-	// Only reached when the signal could not be delivered. Any status other than 0 or 1 still
-	// stops recovery rather than reading as the end of the archive.
+	// Only reached if the signal failed or was not delivered within the grace interval.
+	// Any status other than 0 or 1 still stops recovery rather than ending the archive.
 	os.Exit(2)
 	return err
 }
