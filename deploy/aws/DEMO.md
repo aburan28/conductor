@@ -9,24 +9,19 @@ port 8443 with a self-signed certificate, in `enhanced` security mode (tokens on
 sign-in). There is no SSH key and no SSM role: progress and the first admin token come back
 through the instance's serial console.
 
-## Status: not yet run against AWS
+## Status
 
-This was written while the only AWS credentials available were rejected by AWS
-(`InvalidClientTokenId`), so no instance has been launched with it.
+Run against AWS once (us-east-1, `t3.small`, Ubuntu 24.04, amd64): the instance built Conductor
+from source, `conductord` came up under systemd, and the serial console reported
+`CONDUCTOR_READY health=200` about 12 minutes after launch. That run found two bugs, both
+fixed here: `go build` needs `HOME`/`GOPATH`/`GOCACHE` under cloud-init, and Go's download
+output filled the console's 64 KB buffer and hid the progress markers.
 
-Checked:
-- the Conductor-specific steps ran locally against Postgres 16: a self-signed certificate,
-  `conductord` over HTTPS in `enhanced` mode, `conductord bootstrap --no-login
-  --token-ttl 24h`, a request with the token (200, `admin`), and without it (401), and no
-  login file written;
-- `userdata.sh` passes `bash -n`, `launch.py` compiles, and the user-data renders for both
-  `amd64` and `arm64` within EC2's 16 KB limit;
-- offline, against a fake EC2/SSM: `plan` creates nothing, shows a closed port by default and
-  the open CIDR when given one, stops on a DryRun refusal and on an existing instance;
-  `plan` and `launch` build the same request.
+Verified from the console only: with the port closed, the health check from outside was not
+possible. Not exercised: `arm64`, `allow`, and a sign-in with the minted token from a client.
 
-Not checked: cloud-init, the systemd unit, the Go build on a `t3.small`, and every EC2 and SSM
-call. Expect the first real launch to need a fix or two.
+Also checked offline: Conductor steps against Postgres 16; `userdata.sh` / `launch.py` compile
+and render within the 16 KB user-data limit; fake EC2/SSM control-flow for `plan` / `launch`.
 
 ## Use
 

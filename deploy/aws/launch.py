@@ -14,9 +14,7 @@ no SSM role: progress and the first admin token come back through the serial con
 
 Everything it creates is tagged conductor-aws-demo=<name>. `teardown` removes it.
 
-STATUS: written while the only AWS credentials available were rejected by AWS (InvalidClientTokenId),
-so this has been syntax-checked and its instance-side commands exercised on Linux, but never run
-against AWS.
+STATUS: run once against AWS (see DEMO.md); the first run found and fixed two bootstrap bugs.
 """
 import argparse, hashlib, ipaddress, os, re, ssl, sys, time, urllib.request
 import boto3
