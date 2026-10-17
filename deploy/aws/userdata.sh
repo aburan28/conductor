@@ -31,9 +31,15 @@ tar -C /usr/local -xzf go.tgz && rm go.tgz
 git clone -q https://github.com/aburan28/conductor /opt/conductor-src
 git -C /opt/conductor-src checkout -q "$COMMIT"
 cd /opt/conductor-src
+# cloud-init runs with no HOME, and go needs a module and build cache location.
+export HOME=/root GOPATH=/root/go GOCACHE=/root/.cache/go-build
+# Go's download and compile chatter would fill the console's 64 KB buffer, so it goes to the log
+# file only; -p 1 keeps peak memory low enough for a 2 GB instance.
 for bin in conductor conductord; do
-  CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS=-trimpath /usr/local/go/bin/go build \
-    -ldflags "-s -w" -o "/usr/local/bin/$bin" "./cmd/$bin"
+  echo "conductor-bootstrap: building $bin"
+  CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS=-trimpath /usr/local/go/bin/go build -p 1 \
+    -ldflags "-s -w" -o "/usr/local/bin/$bin" "./cmd/$bin" >>/var/log/conductor-build.log 2>&1 \
+    || { echo "conductor-bootstrap: FAILED building $bin"; tail -20 /var/log/conductor-build.log; exit 1; }
 done
 echo "conductor-bootstrap: built $(/usr/local/bin/conductor version | head -1)"
 
