@@ -244,7 +244,7 @@ func (m *Manager) Discover(ctx context.Context) {
 	}
 	for _, p := range found {
 		url := strings.TrimRight(p.URL, "/")
-		if known[url] || url == m.selfURL {
+		if known[url] || sameEndpoint(url, m.selfURL) {
 			continue
 		}
 		known[url] = true
@@ -259,7 +259,7 @@ func (m *Manager) Probe(ctx context.Context) {
 	results := make([]LinkStatus, len(m.links))
 	for i, l := range m.snapshotLocked() {
 		results[i] = l
-		if m.selfURL != "" && strings.TrimRight(l.URL, "/") == m.selfURL {
+		if sameEndpoint(l.URL, m.selfURL) {
 			results[i].State = StateSelf
 			results[i].LastCheck = time.Now()
 			results[i].RTTMillis = 0
@@ -277,6 +277,68 @@ func (m *Manager) Probe(ctx context.Context) {
 	m.mu.Lock()
 	m.links = results
 	m.mu.Unlock()
+}
+
+// sameEndpoint reports whether a and b name the same control-plane URL for self-detection.
+// Host comparison treats loopback names as equivalent (localhost / 127.0.0.1 / ::1), so a
+// peer listed as https://localhost:8443 is not dialed when SelfURL is https://127.0.0.1:8443
+// — dialing yourself over mTLS is a common source of probe timeouts that then linger in
+// LastError if a later probe somehow succeeds.
+func sameEndpoint(a, b string) bool {
+	a = strings.TrimRight(a, "/")
+	b = strings.TrimRight(b, "/")
+	if a == "" || b == "" {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	ua, errA := url.Parse(a)
+	ub, errB := url.Parse(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	if !strings.EqualFold(ua.Scheme, ub.Scheme) {
+		return false
+	}
+	portA, portB := ua.Port(), ub.Port()
+	if portA == "" {
+		portA = defaultPort(ua.Scheme)
+	}
+	if portB == "" {
+		portB = defaultPort(ub.Scheme)
+	}
+	if portA != portB {
+		return false
+	}
+	return sameHost(ua.Hostname(), ub.Hostname())
+}
+
+func defaultPort(scheme string) string {
+	switch strings.ToLower(scheme) {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
+	}
+}
+
+func sameHost(a, b string) bool {
+	if strings.EqualFold(a, b) {
+		return true
+	}
+	return loopbackHost(a) && loopbackHost(b)
+}
+
+func loopbackHost(h string) bool {
+	switch strings.ToLower(h) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
 }
 
 // Snapshot returns a copy of the current link states, in configured order.
@@ -306,8 +368,16 @@ func (m *Manager) probeOne(ctx context.Context, l LinkStatus) LinkStatus {
 	l.State = StateDown
 	l.Remote = nil
 	l.RTTMillis = 0
+	// Clear any prior failure: a successful probe must not leave Fleet showing a stale
+	// "context deadline exceeded" (or similar) next to Link UP / a fresh RTT.
+	l.LastError = ""
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, l.URL+"/v1/peer/info", nil)
+	// Bound this probe even when the parent ctx has no deadline. The client's Timeout
+	// also applies; this context cancels the request body/headers wait explicitly.
+	probeCtx, cancel := context.WithTimeout(ctx, m.opts.Timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, l.URL+"/v1/peer/info", nil)
 	if err != nil {
 		l.LastError = err.Error()
 		return l
