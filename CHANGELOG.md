@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.5](https://github.com/aburan28/conductor/compare/v0.1.4...v0.1.5) (2026-10-17)
+
+
+### Features
+
+* add advisory quality.lint for public task envelopes ([#87](https://github.com/aburan28/conductor/issues/87)) ([0d829c8](https://github.com/aburan28/conductor/commit/0d829c82b89b45a46534e567bf9017f9b837a7f8))
+
+
+### Bug Fixes
+
+* **setup:** scaffold the four-tier topology; Opus is core, Fable is frontier ([d4a71dd](https://github.com/aburan28/conductor/commit/d4a71dd71d966f562a5687c0f0422c290be9c045))
+* **setup:** scaffold the four-tier topology; Opus is core, Fable is frontier ([b04cb86](https://github.com/aburan28/conductor/commit/b04cb86bad3f09ac253b42f8d0f279ef6af4613a))
+
 ## [0.1.4](https://github.com/aburan28/conductor/compare/v0.1.3...v0.1.4) (2026-10-17)
 
 
