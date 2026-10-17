@@ -108,8 +108,16 @@ Linux this builds and tests ConductorKit alone. Two kinds of test are off by def
 
 CI: `.github/workflows/macos-app.yml` runs the Linux job (`swift test` in the `swift:6.1`
 container, and the packaging tests) and the macOS job (`swift build`, `swift test`,
-`build.sh`, checks of the bundle, the integration test, and `Conductor.app.zip` as an
-artifact).
+`build.sh`, checks of the bundle, DMG creation and verification, and the integration test).
+Download `Conductor.app` for `Conductor.app.zip`, or `Conductor.dmg` for the universal
+installer image, from the workflow run's artifacts. Ordinary CI builds use app version
+`0.0.0`; the bundled commands retain their Git version.
+
+The release workflow calls the same Mac build with the release tag, then waits for both
+Mac jobs and all four CLI archives before publishing assets. A release such as `v1.2.3`
+includes `Conductor-1.2.3-macos-universal.dmg` in its downloads, `SHA256SUMS`, and build
+provenance. CI and release images currently have an ad hoc signed app and an unsigned
+installer and image; the README inside the image includes Gatekeeper instructions.
 
 ## Package
 

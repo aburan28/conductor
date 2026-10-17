@@ -1,7 +1,7 @@
 name: release
 
-# A tagged release builds the binaries for every supported platform and publishes them, with
-# a SHA256SUMS file and signed build-provenance attestations, as release assets.
+# A tagged release builds the binaries for every supported platform and the universal Mac
+# DMG, and publishes them with SHA256SUMS and signed build-provenance attestations.
 #
 # Triggers:
 # - tag push `v*` (manual cut, or a PAT/App that can retrigger workflows)
@@ -78,10 +78,17 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
+  macos:
+    name: macOS release
+    permissions:
+      contents: read
+    uses: ./.github/workflows/macos-app.yml
+    with:
+      version: ${{ github.event.release.tag_name || github.ref_name }}
+
   publish:
-    needs: build
-    # needs: build waits for every matrix leg, so all archives are present by the time the
-    # release is created.
+    needs: [build, macos]
+    # Wait for all CLI archives and the tested Mac app and DMG before publishing assets.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -97,19 +104,30 @@ jobs:
       - name: collect platform archives
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          pattern: '{darwin,linux}-*'
           path: out
           merge-multiple: true
 
+      - name: collect the Mac DMG
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: Conductor.dmg
+          path: out
+
       - name: checksums
         working-directory: out
+        env:
+          TAG: ${{ github.event.release.tag_name || github.ref_name }}
         run: |
           set -euo pipefail
           ls -l
           [ "$(ls conductor_*.tar.gz | wc -l)" -eq 4 ] || { echo "expected 4 archives" >&2; exit 1; }
-          sha256sum conductor_*.tar.gz > SHA256SUMS
+          dmg="Conductor-${TAG#v}-macos-universal.dmg"
+          test -s "$dmg"
+          sha256sum conductor_*.tar.gz "$dmg" > SHA256SUMS
           cat SHA256SUMS
 
-      # Provenance binds each archive's digest to this workflow, commit, and tag. Verify with:
+      # Provenance binds each archive and DMG digest to this workflow, commit, and tag. Verify with:
       #   gh attestation verify conductor_vX.Y.Z_linux_amd64.tar.gz --repo OWNER/REPO
       - name: attest build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -123,6 +141,7 @@ jobs:
         working-directory: out
         run: |
           set -euo pipefail
+          dmg="Conductor-${TAG#v}-macos-universal.dmg"
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             # A release created by hand or by release-please before this job may be filled in,
             # but a published asset is never replaced: someone may already have installed and
@@ -134,12 +153,12 @@ jobs:
               echo "refusing to replace them; cut a new tag instead" >&2
               exit 1
             fi
-            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" conductor_*.tar.gz SHA256SUMS
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" conductor_*.tar.gz "$dmg" SHA256SUMS
           else
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
               --title "$TAG" \
               --notes "$(git log -1 --format=%B)" \
-              conductor_*.tar.gz SHA256SUMS
+              conductor_*.tar.gz "$dmg" SHA256SUMS
           fi
 
