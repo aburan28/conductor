@@ -19,7 +19,19 @@ in that task.
 Releases are cut by [release-please](https://github.com/googleapis/release-please): squash-merge
 PR titles need a conventional prefix (`feat:`, `fix:`, `perf:`, …) so the Release PR on `main`
 can bump the version. Merging that PR tags `vX.Y.Z`; `.github/workflows/release.yml` attaches
-the platform archives.
+the platform archives and the macOS DMG.
+
+## Bias for action
+
+Treat requests to fix, implement, or open a PR as authorization to do that work. Make
+reasonable implementation choices, finish reversible work, validate it, and open the PR
+without asking the user to repeat that authorization. Ask only for information or approval
+that is actually missing and necessary to proceed.
+
+Use Conductor claims and reservations whenever the control plane is available. If its CLI
+or connection is unavailable and the user has authorized a standalone PR, proceed on an
+isolated branch and document the missing coordination in the PR. Do not let unavailable
+coordination tooling block that authorized work or silently ignore a known reservation.
 
 ## Token discipline
 
