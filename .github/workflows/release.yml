@@ -4,9 +4,16 @@ name: release
 # DMG, and publishes them with SHA256SUMS and signed build-provenance attestations.
 #
 # Triggers:
-# - tag push `v*` (manual cut, or a PAT/App that can retrigger workflows)
-# - `release` published (release-please with GITHUB_TOKEN: its tag push does not start other
-#   workflows, but the published release event does)
+# - tag push `v*`, or a `release` published, by a person (a manual cut)
+# - `workflow_dispatch` at the tag: how release-please's releases get built. release-please
+#   tags and publishes with GITHUB_TOKEN, and GitHub starts no workflow for anything that
+#   token does — not the tag push, not the published release. workflow_dispatch is exempt,
+#   so release-please.yml's start-release job dispatches this workflow at the new tag.
+#   v0.1.2 shipped with no assets because nothing did.
+# - `workflow_dispatch` from main with `tag`: backfill a release whose tag predates this
+#   trigger. The tag's code is built either way; only this workflow file comes from main.
+#
+# The tag is `inputs.tag`, else the release's tag, else the ref this run started at.
 #
 # Asset names keep the tag's leading "v" (conductor_v1.2.3_linux_amd64.tar.gz), which is what
 # scripts/install-release.sh downloads. Change both together or not at all.
@@ -15,6 +22,12 @@ on:
     tags: ["v*"]
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and publish (vX.Y.Z); empty when dispatched at the tag itself"
+        required: false
+        type: string
 
 # Nothing by default; each job asks for what it needs.
 permissions: {}
@@ -36,8 +49,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # On a release event, ref the tag so the build matches what was published.
-          ref: ${{ github.event.release.tag_name || github.ref }}
+          # Ref the tag, so the build matches what is published however this run started.
+          ref: ${{ inputs.tag || github.event.release.tag_name || github.ref }}
           persist-credentials: false
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -52,10 +65,11 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
-          VERSION: ${{ github.event.release.tag_name || github.ref_name }}
-          COMMIT: ${{ github.sha }}
+          VERSION: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
         run: |
           set -euo pipefail
+          # The checked-out tag's commit; github.sha is main's on a backfill dispatch.
+          COMMIT="$(git rev-parse HEAD)"
           if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "tag $VERSION is not a semantic version (vX.Y.Z); refusing to release it" >&2
             exit 1
@@ -84,7 +98,7 @@ jobs:
       contents: read
     uses: ./.github/workflows/macos-app.yml
     with:
-      version: ${{ github.event.release.tag_name || github.ref_name }}
+      version: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
 
   publish:
     needs: [build, macos]
@@ -98,7 +112,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.release.tag_name || github.ref }}
+          ref: ${{ inputs.tag || github.event.release.tag_name || github.ref }}
           persist-credentials: false
 
       - name: collect platform archives
@@ -117,7 +131,7 @@ jobs:
       - name: checksums
         working-directory: out
         env:
-          TAG: ${{ github.event.release.tag_name || github.ref_name }}
+          TAG: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
         run: |
           set -euo pipefail
           ls -l
@@ -137,7 +151,7 @@ jobs:
       - name: release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name || github.ref_name }}
+          TAG: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
         working-directory: out
         run: |
           set -euo pipefail

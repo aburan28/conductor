@@ -1,8 +1,14 @@
 name: release-please
 
 # On every push to main, open or update a Release PR from conventional commits since the
-# last tagged version. Merging that PR tags vX.Y.Z and publishes a GitHub Release; the
-# existing `release` workflow then builds the platform archives and attaches them.
+# last tagged version. Merging that PR tags vX.Y.Z and publishes a GitHub Release, and the
+# start-release job below dispatches the `release` workflow at that tag to build and attach
+# the platform archives and the Mac DMG.
+#
+# "Dispatches", not "the tag triggers": release-please acts with this workflow's
+# GITHUB_TOKEN, and GitHub starts no workflow for anything that token does — not the tag
+# push, not the published release. v0.1.2 was published with no assets for that reason.
+# workflow_dispatch is one of the two exempt events (repository_dispatch is the other).
 #
 # Squash-merge PR titles need a conventional prefix (feat:/fix:/perf:/…) for a version bump.
 # Without one, release-please stays quiet until a releasable commit lands.
@@ -16,12 +22,41 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # release-please-action is third-party code holding a write token; it gets contents and
+    # pull requests, never `actions: write`, so it cannot dispatch workflows itself.
     permissions:
       contents: write
       pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: release
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+  start-release:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # The only job holding `actions: write`, and it runs no third-party code.
+    permissions:
+      actions: write
+    steps:
+      # Dispatching at the tag makes github.ref the tag, so release.yml runs exactly as for a
+      # tag push, from the tag's own reviewed copy of the workflow.
+      - name: build and attach the release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "release-please reported tag '$TAG', which is not vX.Y.Z; not dispatching" >&2
+            exit 1
+          fi
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"
+          echo "dispatched release.yml at $TAG"
