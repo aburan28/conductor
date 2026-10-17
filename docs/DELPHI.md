@@ -135,6 +135,34 @@ conductor delphi ask --profile frontier --effort max "..."   # flags override th
 - `reasoning_effort: none` sends no effort.
 - The delegation records its `profile`, so spend can be read per tier.
 
+## Task cards: the director and mechanical tiers through delphi
+
+The owner's research repositories (crypto-autoresearcher, crypto, cryptanalysis) split an
+experiment between a director (Sonnet) that writes a frozen task card and a mechanical
+executor that runs it. Delphi carries the director's two model calls at batch price;
+`tools/task_card.py` in those repositories does the rest:
+
+```sh
+python3 tools/task_card.py request compile --design spec.md --bind tools/x.py --out card.yaml > compile.md
+conductor delphi ask --profile director --task T-42 --wait --file compile.md > reply.md
+python3 tools/task_card.py ingest reply.md --expect card --out card.yaml      # only if it lints
+python3 tools/task_card.py run card.yaml                                      # no model
+python3 tools/task_card.py request assess card.yaml > assess.md
+conductor delphi ask --profile director --task T-42 --wait --file assess.md > reply.md
+python3 tools/task_card.py ingest reply.md --expect assessment --card card.yaml --out assessment.yaml
+```
+
+- A delegation is one turn with no tools, so `request` writes every fact into the prompt
+  (commit, file digests, the contract, the receipt) and `ingest` refuses a reply that does
+  not lint or whose outcome the facts contradict.
+- The mechanical tier spends no tokens here: `task_card.py run` executes the card and writes
+  its receipt. `--profile executor.mechanical` (Claude Haiku 5.5, effort low) is for
+  mechanical work that is text, not commands.
+- `--profile director` resolves to the `harness: delphi` director profile in
+  `.conductor/models.yaml`: Claude Sonnet 5.5 at high effort. The agent profile of the same
+  alias stays at medium for routed sessions.
+- With `--task`, each delegation's `delphi.finished` event lands on the task's timeline.
+
 ## Fallback on refusal
 
 A model's safeguards can decline a request (status `refused`, with a category such as
