@@ -138,6 +138,41 @@ the actual tailnet URL when using `--bootstrap`, because bootstrap runs before n
 auto-discovery. Existing configuration on the requested Tailscale HTTPS port is refused
 without being replaced, and shutdown removes only the route this daemon created.
 
+## WireGuard and isolated private networks
+
+Conductor can use a WireGuard network without Tailscale. Prepare configuration
+templates with the [offline renderer](WIREGUARD.md), provision the tunnels and
+routes with your network tooling, bind the API to its private address,
+and use `--nat-mode off`, TLS, and enhanced authentication. WireGuard supplies
+connectivity; Conductor still authenticates and authorizes application requests.
+No public endpoint is required when every participant can reach the private leader.
+
+The bundled DNS directory supports explicit identity without invoking Tailscale:
+
+```bash
+MESH_DNS_SERVICES='{"_conductor-mesh._tcp.mesh.internal.":[8443],"_conductor._tcp.mesh.internal.":[8443]}' \
+  conductor-mesh-dns --listen 10.88.0.1:15353 \
+  --hostname leader.internal --address 10.88.0.1 --mesh-target leader.internal
+```
+
+`--address` accepts a literal IPv4 or IPv6 address and requires `--hostname`.
+The server returns the corresponding A or AAAA record. `--mesh-target` overrides
+the legacy `localhost` mesh target; set it explicitly for remote daemon discovery.
+The defaults preserve the existing local/Tailscale layout. Service overrides replace
+ports for the named services; other built-in services remain in the directory.
+Directory records describe configured endpoints, rather than proving service health.
+
+For daemon mesh discovery, use `--peer-discover-dns _conductor-mesh._tcp.mesh.internal`
+and `--peer-dns-server 10.88.0.1:15353`, together with the existing mesh certificates.
+The DNS override applies to SRV discovery only: TLS connections resolve target names
+through the operating system. Configure internal DNS (or hosts entries) on every
+daemon so `leader.internal` resolves to its WireGuard address. Certificates must
+cover that hostname. DNS records do not grant mesh membership: the mesh CA and
+mutual TLS still establish peer identity.
+
+See [isolated deployment](AIR_GAPPED.md) for offline prerequisites, identity,
+collaboration boundaries, and validation.
+
 ## Connect workers
 
 Issue a project invitation on the leader and use its link on each worker:

@@ -1,0 +1,56 @@
+┌──────────────────────────────────────────────────────┐
+│                                                      │
+│   Running wireguard-go is not required because this  │
+│   kernel has first class support for WireGuard. For  │
+│   information on installing the kernel module,       │
+│   please visit:                                      │
+│         https://www.wireguard.com/install/           │
+│                                                      │
+└──────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│                                                      │
+│   Running wireguard-go is not required because this  │
+│   kernel has first class support for WireGuard. For  │
+│   information on installing the kernel module,       │
+│   please visit:                                      │
+│         https://www.wireguard.com/install/           │
+│                                                      │
+└──────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│                                                      │
+│   Running wireguard-go is not required because this  │
+│   kernel has first class support for WireGuard. For  │
+│   information on installing the kernel module,       │
+│   please visit:                                      │
+│         https://www.wireguard.com/install/           │
+│                                                      │
+└──────────────────────────────────────────────────────┘
+WireGuard templates written to /tmp/conductor-wg-packets.glDpt2/plan; add each private key on its owning node before activation.
+PING 10.88.0.1 (10.88.0.1) 56(84) bytes of data.
+64 bytes from 10.88.0.1: icmp_seq=1 ttl=64 time=0.739 ms
+64 bytes from 10.88.0.1: icmp_seq=2 ttl=64 time=0.820 ms
+64 bytes from 10.88.0.1: icmp_seq=3 ttl=64 time=0.526 ms
+64 bytes from 10.88.0.1: icmp_seq=4 ttl=64 time=0.505 ms
+
+--- 10.88.0.1 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3056ms
+rtt min/avg/max/mdev = 0.505/0.647/0.820/0.135 ms
+PING 10.88.0.3 (10.88.0.3) 56(84) bytes of data.
+64 bytes from 10.88.0.3: icmp_seq=1 ttl=63 time=1.16 ms
+64 bytes from 10.88.0.3: icmp_seq=2 ttl=63 time=1.10 ms
+64 bytes from 10.88.0.3: icmp_seq=3 ttl=63 time=6.17 ms
+64 bytes from 10.88.0.3: icmp_seq=4 ttl=63 time=1.54 ms
+
+--- 10.88.0.3 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3004ms
+rtt min/avg/max/mdev = 1.096/2.491/6.172/2.131 ms
+PING 10.88.0.2 (10.88.0.2) 56(84) bytes of data.
+64 bytes from 10.88.0.2: icmp_seq=1 ttl=63 time=0.935 ms
+64 bytes from 10.88.0.2: icmp_seq=2 ttl=63 time=1.12 ms
+64 bytes from 10.88.0.2: icmp_seq=3 ttl=63 time=0.791 ms
+64 bytes from 10.88.0.2: icmp_seq=4 ttl=63 time=1.07 ms
+
+--- 10.88.0.2 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3026ms
+rtt min/avg/max/mdev = 0.791/0.979/1.120/0.128 ms
+WIREGUARD_PACKET_SMOKE_PASS: native rendered templates, internal Docker underlay, 2 handshakes, 12/12 packets, routed worker reachability, explicit gateway peer revocation

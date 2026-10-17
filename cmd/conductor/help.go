@@ -419,6 +419,21 @@ Usage:
 Example:
   conductor peers
 `},
+	{name: "wireguard", group: "Dispatch", subs: []string{"render"},
+		summary: "render private WireGuard gateway and worker configuration templates",
+		topic: `conductor wireguard — prepare an operator-managed private network
+
+Usage:
+  conductor wireguard render --manifest mesh.yaml --out ./wireguard-plan
+
+Writes owner-only configuration templates and deployment instructions to a new directory.
+Private keys stay on their owning nodes: replace each template's local placeholder there.
+No tunnels, routes, firewall rules, or host settings are changed. See docs/WIREGUARD.md.
+
+Example:
+  conductor wireguard render --manifest mesh.yaml --out ./wireguard-plan
+`},
+
 	{name: "worker", group: "Dispatch",
 		summary: "run a runner: claim, execute, verify, report"},
 

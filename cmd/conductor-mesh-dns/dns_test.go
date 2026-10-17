@@ -286,3 +286,81 @@ func TestOverTheWireWithNetResolver(t *testing.T) {
 		t.Fatalf("net.Resolver ports = %d/%d, want 8443/8444", records[0].Port, records[1].Port)
 	}
 }
+
+// Real resolver queries verify the complete SRV + address discovery chain on a
+// private network, with no Tailscale process or upstream DNS server.
+func TestExplicitPrivateNetworkDiscovery(t *testing.T) {
+	for _, address := range []string{"10.88.0.1", "fd88::1"} {
+		t.Run(address, func(t *testing.T) {
+			s := newDNSServer("leader.internal.", net.ParseIP(address), map[string][]uint16{
+				"_conductor-mesh._tcp.mesh.internal.": {8443},
+			})
+			s.meshTarget = s.hostname
+			conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			go func() {
+				buf := make([]byte, 512)
+				for {
+					n, remote, err := conn.ReadFrom(buf)
+					if err != nil {
+						return
+					}
+					if _, err := conn.WriteTo(s.answer(buf[:n]), remote); err != nil {
+						return
+					}
+				}
+			}()
+			resolver := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "udp", conn.LocalAddr().String())
+			}}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, records, err := resolver.LookupSRV(ctx, "", "", "_conductor-mesh._tcp.mesh.internal")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(records) != 1 || records[0].Target != s.hostname || records[0].Port != 8443 {
+				t.Fatalf("unexpected mesh SRV: %+v", records)
+			}
+			addresses, err := resolver.LookupIPAddr(ctx, records[0].Target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(addresses) != 1 || !addresses[0].IP.Equal(net.ParseIP(address)) {
+				t.Fatalf("addresses = %v, want %s", addresses, address)
+			}
+		})
+	}
+}
+
+func TestAddressFamilyAnswers(t *testing.T) {
+	for _, tc := range []struct {
+		address string
+		qtype   uint16
+		length  int
+	}{
+		{"10.88.0.1", 1, 4}, {"10.88.0.1", 28, 0},
+		{"fd88::1", 1, 0}, {"fd88::1", 28, 16},
+		{"", 1, 0}, {"", 28, 0},
+	} {
+		s := newDNSServer("leader.internal.", net.ParseIP(tc.address), builtinServices)
+		response := s.answer(buildQuery(1, s.hostname, tc.qtype))
+		rcode, count := parseHeader(t, response)
+		wantCount := 0
+		if tc.length > 0 {
+			wantCount = 1
+		}
+		if rcode != 0 || count != wantCount {
+			t.Fatalf("%s type %d: rcode/count = %d/%d", tc.address, tc.qtype, rcode, count)
+		}
+		if tc.length > 0 {
+			offset := len(response) - tc.length
+			if int(binary.BigEndian.Uint16(response[offset-2:offset])) != tc.length || !net.IP(response[offset:]).Equal(net.ParseIP(tc.address)) {
+				t.Fatalf("malformed address response: %v", response)
+			}
+		}
+	}
+}
