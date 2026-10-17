@@ -161,11 +161,13 @@ to continue a checkpoint. Postgres runs with `jit = off`, which the hardened run
 
 Sparkle 2.10.0, pinned exactly in `Package.swift`. The app starts it only when its
 Info.plist carries `SUPublicEDKey`, which `build-dmg.sh` writes from
-`SPARKLE_PUBLIC_ED_KEY`; a build without it never checks and says why. To publish an
-update, sign the image with Sparkle's `sign_update` (in
-`.build/artifacts/sparkle/Sparkle/bin` after a build) using the private half of that key,
-and publish `appcast.xml` at the `SUFeedURL` in Info.plist. Losing the private key strands
-every installed copy: keep it somewhere that outlives any one machine.
+`SPARKLE_PUBLIC_ED_KEY`. A build without that key (checkout builds, or a DMG built without
+the secret) never starts Sparkle: Check for Updates stays disabled and Settings explains
+that updates need a signed disk image — there is no blocking alert. To publish an update,
+set `SPARKLE_PUBLIC_ED_KEY` in the release environment, sign the image with Sparkle's
+`sign_update` (in `.build/artifacts/sparkle/Sparkle/bin` after a build) using the private
+half of that key, and publish `appcast.xml` at the `SUFeedURL` in Info.plist. Losing the
+private key strands every installed copy: keep it somewhere that outlives any one machine.
 
 ## Settings → Storage
 

@@ -1,4 +1,3 @@
-import AppKit
 import Combine
 import Sparkle
 import SwiftUI
@@ -8,14 +7,16 @@ import SwiftUI
 ///
 /// An update is installed only if its EdDSA signature matches `SUPublicEDKey` in Info.plist,
 /// which packaging/build-dmg.sh writes from `SPARKLE_PUBLIC_ED_KEY` at release time. A build
-/// without the key, a checkout's or any unsigned one, has nothing to verify an update
-/// against, so it never starts Sparkle and the menu item says so.
+/// without the key (a checkout build, or a DMG built without that secret) has nothing to
+/// verify a download against, so Sparkle never starts, the menu item stays disabled, and
+/// Settings explains how to get a signed image — no blocking alert.
 @MainActor
 final class Updates: ObservableObject {
     private let controller: SPUStandardUpdaterController?
     private var observations: Set<AnyCancellable> = []
 
-    @Published private(set) var canCheck = true
+    /// True only when Sparkle is running and reports it can check. Unsigned builds stay false.
+    @Published private(set) var canCheck = false
 
     var isEnabled: Bool { controller != nil }
 
@@ -43,16 +44,10 @@ final class Updates: ObservableObject {
             .store(in: &observations)
     }
 
+    /// Starts a Sparkle check when this build has a public key. Without one, does nothing:
+    /// update checks fail closed, and Settings already says why.
     func check() {
-        if let controller {
-            controller.checkForUpdates(nil)
-            return
-        }
-        let alert = NSAlert()
-        alert.messageText = "This build cannot check for updates"
-        alert.informativeText = "It was built without an update-signing key (SUPublicEDKey), so there is nothing to verify a download against. Install the newest Conductor from its disk image."
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
+        controller?.checkForUpdates(nil)
     }
 
     /// The version a person should read: build-dmg.sh stamps the release's; a checkout's
@@ -68,7 +63,7 @@ struct CheckForUpdatesButton: View {
 
     var body: some View {
         Button("Check for Updates…") { updates.check() }
-            .disabled(!updates.canCheck)
+            .disabled(!updates.isEnabled || !updates.canCheck)
     }
 }
 
@@ -78,7 +73,8 @@ struct UpdatesSettings: View {
     var body: some View {
         Form {
             LabeledContent("Conductor \(Updates.versionLabel)") {
-                Button("Check Now") { updates.check() }.disabled(!updates.canCheck)
+                Button("Check Now") { updates.check() }
+                    .disabled(!updates.isEnabled || !updates.canCheck)
             }
             if updates.isEnabled {
                 Toggle("Check for updates automatically", isOn: Binding(
