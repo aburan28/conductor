@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/aburan28/conductor/compare/v0.1.3...v0.1.4) (2026-10-17)
+
+
+### Bug Fixes
+
+* **release:** dispatch the release build so release-please releases get assets ([#84](https://github.com/aburan28/conductor/issues/84)) ([a0f2217](https://github.com/aburan28/conductor/commit/a0f2217413cae53a2d0d3fa028a2929b24564b06))
+
 ## [0.1.3](https://github.com/aburan28/conductor/compare/v0.1.2...v0.1.3) (2026-10-17)
 
 
