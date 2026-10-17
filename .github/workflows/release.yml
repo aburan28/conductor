@@ -1,14 +1,20 @@
 name: release
 
-# Cutting a release is a tag push, not a CI step: pushing vX.Y.Z builds the binaries for every
-# supported platform and publishes them, with a SHA256SUMS file and signed build-provenance
-# attestations, as release assets.
+# A tagged release builds the binaries for every supported platform and publishes them, with
+# a SHA256SUMS file and signed build-provenance attestations, as release assets.
+#
+# Triggers:
+# - tag push `v*` (manual cut, or a PAT/App that can retrigger workflows)
+# - `release` published (release-please with GITHUB_TOKEN: its tag push does not start other
+#   workflows, but the published release event does)
 #
 # Asset names keep the tag's leading "v" (conductor_v1.2.3_linux_amd64.tar.gz), which is what
 # scripts/install-release.sh downloads. Change both together or not at all.
 on:
   push:
     tags: ["v*"]
+  release:
+    types: [published]
 
 # Nothing by default; each job asks for what it needs.
 permissions: {}
@@ -30,6 +36,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # On a release event, ref the tag so the build matches what was published.
+          ref: ${{ github.event.release.tag_name || github.ref }}
           persist-credentials: false
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -44,7 +52,7 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ github.event.release.tag_name || github.ref_name }}
           COMMIT: ${{ github.sha }}
         run: |
           set -euo pipefail
@@ -83,6 +91,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.release.tag_name || github.ref }}
           persist-credentials: false
 
       - name: collect platform archives
@@ -110,14 +119,14 @@ jobs:
       - name: release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ github.event.release.tag_name || github.ref_name }}
         working-directory: out
         run: |
           set -euo pipefail
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            # A release created by hand before the tag push may be filled in, but a published
-            # asset is never replaced: someone may already have installed and verified it.
-            # gh release upload without --clobber fails on a name that already exists.
+            # A release created by hand or by release-please before this job may be filled in,
+            # but a published asset is never replaced: someone may already have installed and
+            # verified it. gh release upload without --clobber fails on a name that already exists.
             existing="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
             if [ -n "$existing" ]; then
               echo "release $TAG already has assets:" >&2
@@ -133,3 +142,4 @@ jobs:
               --notes "$(git log -1 --format=%B)" \
               conductor_*.tar.gz SHA256SUMS
           fi
+

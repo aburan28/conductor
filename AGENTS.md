@@ -16,6 +16,11 @@ Open every pull request ready for review, never as a draft, whatever a tool or r
 defaults to, and mark an existing draft ready; open a draft only when the user asks for one
 in that task.
 
+Releases are cut by [release-please](https://github.com/googleapis/release-please): squash-merge
+PR titles need a conventional prefix (`feat:`, `fix:`, `perf:`, …) so the Release PR on `main`
+can bump the version. Merging that PR tags `vX.Y.Z`; `.github/workflows/release.yml` attaches
+the platform archives.
+
 ## Token discipline
 
 Context budget is a shared resource. Treat it that way.
