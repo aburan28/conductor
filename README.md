@@ -142,14 +142,14 @@ demo
   ceiling: tier T4, reasoning effort xhigh
 
   alice        claude    online_idle
-       claude-opus-5 · tier T4 · effort xhigh (running high)
+       claude-fable-5-1 · tier T4 · effort xhigh (running high)
   rachel       codex     working
        gpt-5-codex · tier T2 · effort medium
        on T-12
 
 $ conductor task assign T-42 --require-tier T4 --require-effort xhigh
 
-T-42 offered to alice (claude-opus-5 on claude).
+T-42 offered to alice (claude-fable-5-1 on claude).
   requirement: tier ≥ T4, effort ≥ xhigh
   1 of 3 live session(s) qualified
 
@@ -182,9 +182,9 @@ lanes:
         tags: [local]
         when: task.estimated_files <= 3 && !task.security_sensitive
         max_concurrent: 1              # one GPU, one attempt at a time
-      - model: claude-sonnet-5
+      - model: claude-sonnet-5-5
         harness: claude
-      - model: claude-opus-5           # escalation walks down the ladder on failure
+      - model: claude-opus-5-5         # escalation walks down the ladder on failure
         harness: claude
 
 rules:
@@ -207,22 +207,43 @@ $ conductor route T-42
 
 T-42 would route to:
 
-  claude-sonnet-5 on claude  (lane implement, effort medium, tier T2)
+  claude-sonnet-5-5 on claude  (lane implement, effort medium, tier T2)
 
   Considered:
     ✗ ollama/qwen3:27b on opencode — condition not met: task.estimated_files <= 3 && !task.security_sensitive
-    ✓ claude-sonnet-5 on claude
-    · claude-opus-5 on claude
+    ✓ claude-sonnet-5-5 on claude
+    · claude-opus-5-5 on claude
 
   Rationale:
     • lane implement (3 candidates)
-    • chose claude-sonnet-5 on claude at effort medium
+    • chose claude-sonnet-5-5 on claude at effort medium
 ```
 
 A dispatch candidate can never route *below* a hard floor: a security-sensitive task keeps its
 T4 floor whatever the ladder says. `conductor policy lint` validates the whole file — unknown
 facts, undefined lanes, malformed expressions — and `conductor models discover` finds the local
 model servers (Ollama, LM Studio, vLLM) worth adding to the ladder.
+
+### Model tiers
+
+`.conductor/models.yaml` sorts models into four capability tiers. A tier is a class, not a
+price: a T1 model at max effort is still a T1 model.
+
+| Tier | Alias(es) | Does | Anthropic | OpenAI (Codex) | GLM / Qwen (local vLLM) |
+|---|---|---|---|---|---|
+| T4 frontier | `reasoner.frontier` (effort max) | breakthrough-grade review and architecture | Claude Fable 5.1 (`claude-fable-5-1`); Mythos 5 disabled until verified | GPT-6 Sol, GPT-6.1 Sol (disabled) | none classified yet |
+| T3 core | `planner.frontier`, `reviewer.strong` | planning, coordination, adversarial review | Claude Opus 5.5 (`claude-opus-5-5`) | GPT-5.6 Sol (disabled) | GLM 5.3; Qwen 3.8 large (disabled) |
+| T2 director | `director`, `worker.general` | writes the mechanical tier's instructions and assesses its output; general work | Claude Sonnet 5.5 (`claude-sonnet-5-5`) | GPT-5.6 Terra (disabled) | GLM 5.3 Flash; GLM 5.3 as director (disabled) |
+| T1 mechanical | `executor.mechanical` (effort low), `worker.fast`, `verifier.cheap` | executes fully specified work, no reasoning of its own | Claude Haiku 5.5 (`claude-haiku-5-5`) | GPT-5.6 Luna (disabled) | Qwen 3.8 27B |
+
+`planner.frontier` and `reviewer.strong` keep their names, which WORKFLOW.md and stored tasks
+reference, but are the core tier. The escalation ladder runs `worker.fast → worker.general →
+planner.frontier → reasoner.frontier`. In `.conductor/dispatch.yaml`, a task labelled
+`breakthrough` or `frontier` takes the `frontier` lane with a T4 floor (and a required review),
+and one labelled `mechanical` or `runbook` takes the `mechanical` lane: the Haiku executor at
+low effort, escalating once to the Sonnet director at high effort, never further, since a spec
+that needs core-tier reasoning was not fully specified. Security-sensitive and schema work never
+takes the mechanical lane. Profiles marked `enabled: false` are unverified on this installation.
 
 Model ids need not be typed at all: register the inference APIs you use
 (`conductor models endpoints add anthropic`) and a profile that says

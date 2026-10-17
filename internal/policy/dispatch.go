@@ -306,6 +306,23 @@ func CompileDispatch(p *domain.DispatchPolicy) (*Dispatch, []Issue) {
 				issues = append(issues, Issue{"error", where, fmt.Sprintf("lane %q is not defined", r.Lane)})
 			}
 		}
+		// An unknown tier ranks below T0 in Tier.AtLeast, so a typo such as `T5` or `t4` would
+		// silently turn a floor into no floor at all. Name the valid values instead.
+		if r.Require != nil && r.Require.Tier != "" {
+			if err := domain.Validate(r.Require.Tier, allTiers, "require.tier"); err != nil {
+				issues = append(issues, Issue{"error", where, err.Error()})
+			}
+		}
+		if r.Require != nil && r.Require.Effort != "" {
+			if err := domain.Validate(r.Require.Effort, domain.AllEfforts, "require.effort"); err != nil {
+				issues = append(issues, Issue{"error", where, err.Error()})
+			}
+		}
+		if r.Effort != "" {
+			if err := domain.Validate(r.Effort, domain.AllEfforts, "effort"); err != nil {
+				issues = append(issues, Issue{"error", where, err.Error()})
+			}
+		}
 		if r.Lane == "" && r.Prefer == nil && r.Require == nil && r.Review == "" && r.Effort == "" {
 			issues = append(issues, Issue{"warning", where, "rule matches but changes nothing"})
 		}
@@ -375,6 +392,9 @@ func CompileDispatch(p *domain.DispatchPolicy) (*Dispatch, []Issue) {
 	}
 	return d, issues
 }
+
+// allTiers is every tier a policy file may name, T0 (cheapest) through T4 (frontier).
+var allTiers = []domain.Tier{domain.TierT0, domain.TierT1, domain.TierT2, domain.TierT3, domain.TierT4}
 
 // HasErrors reports whether any issue forbids using the policy.
 func HasErrors(issues []Issue) bool {
@@ -850,7 +870,7 @@ func LintRouterRules(rules []domain.RouterRule) []Issue {
 		issues = append(issues, unknownVars(where, e)...)
 		for _, t := range []domain.Tier{r.RequireTier, r.PreferTier} {
 			if t != "" {
-				if err := domain.Validate(t, []domain.Tier{domain.TierT0, domain.TierT1, domain.TierT2, domain.TierT3, domain.TierT4}, "tier"); err != nil {
+				if err := domain.Validate(t, allTiers, "tier"); err != nil {
 					issues = append(issues, Issue{"error", where, err.Error()})
 				}
 			}
