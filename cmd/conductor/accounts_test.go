@@ -55,3 +55,21 @@ func TestApplyAccountCursorFlag(t *testing.T) {
 		t.Errorf("explicit --user-data-dir overridden: %v", extra)
 	}
 }
+
+func TestApplyAccountFollowsAlias(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv("CONDUCTOR_STATE_DIR", state)
+	t.Setenv("CONDUCTOR_ACCOUNT", "")
+	t.Setenv("CODEX_HOME", "")
+	project := t.TempDir()
+	if err := accounts.SetAlias("codex", "acme", "work"); err != nil {
+		t.Fatal(err)
+	}
+	if err := accounts.Bind(project, "codex", "acme"); err != nil {
+		t.Fatal(err)
+	}
+	applyAccount("codex", project, nil)
+	if want := filepath.Join(state, "accounts", "codex", "work"); os.Getenv("CODEX_HOME") != want {
+		t.Errorf("CODEX_HOME = %q, want %q", os.Getenv("CODEX_HOME"), want)
+	}
+}

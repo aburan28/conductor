@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -24,7 +25,7 @@ import (
 func cmdAccounts(args []string) error {
 	if len(args) == 0 {
 		fmt.Print(accountsUsage)
-		return fmt.Errorf("pick a subcommand: add, list, switch, exhaust, ok, login, use, unbind")
+		return fmt.Errorf("pick a subcommand: add, list, switch, exhaust, ok, login, use, unbind, alias, unalias")
 	}
 	rest := args[1:]
 	var err error
@@ -45,6 +46,10 @@ func cmdAccounts(args []string) error {
 		err = accountsUse(rest)
 	case "unbind":
 		err = accountsUnbind(rest)
+	case "alias":
+		err = accountsAlias(rest)
+	case "unalias":
+		err = accountsUnalias(rest)
 	default:
 		fmt.Print(accountsUsage)
 		return fmt.Errorf("unknown subcommand %q", args[0])
@@ -75,6 +80,14 @@ logins at the same time (CLAUDE_CONFIG_DIR, CODEX_HOME, XDG_DATA_HOME, Cursor's
 Harnesses: claude, codex, cursor, opencode. Bindings are machine-local
 (~/.conductor/accounts/bindings.json), never repository policy. CONDUCTOR_ACCOUNT=<name>
 overrides the binding for one launch.
+
+Aliases — another name for an account, or for an existing state directory:
+
+  conductor accounts alias <harness> <alias> <account|dir>   e.g. alias claude acme work
+  conductor accounts unalias <harness> <alias>
+
+Any command above takes an alias where it takes a name. A project bound to an alias
+follows it, so re-pointing the alias moves every project that uses it.
 `
 
 func accountsAdd(args []string) error {
@@ -109,7 +122,8 @@ func accountsList(args []string) error {
 	type row struct {
 		Harness     string     `json:"harness"`
 		Name        string     `json:"name"`
-		Kind        string     `json:"kind"` // "snapshot" (switched into the live file) or "isolated" (its own state directory)
+		Kind        string     `json:"kind"`               // "snapshot" (switched into the live file), "isolated" (its own state directory) or "alias"
+		AliasOf     string     `json:"alias_of,omitempty"` // an alias's account name or directory
 		Active      bool       `json:"active"`
 		Bound       bool       `json:"bound,omitempty"` // an isolated account this project is bound to
 		Dir         string     `json:"dir,omitempty"`
@@ -135,9 +149,20 @@ func accountsList(args []string) error {
 		if bound != "" && !slices.Contains(names, bound) {
 			names = append(names, bound)
 		}
+		aliases, err := accounts.Aliases(harness)
+		if err != nil {
+			return err
+		}
 		for _, name := range names {
+			if slices.ContainsFunc(aliases, func(a accounts.Alias) bool { return a.Alias == name }) {
+				continue // listed as the alias below
+			}
 			dir, _ := accounts.StateDir(harness, name)
 			rows = append(rows, row{Harness: harness, Name: name, Kind: "isolated", Bound: name == bound, Dir: dir})
+		}
+		for _, a := range aliases {
+			dir, _ := accounts.StateDir(harness, a.Alias)
+			rows = append(rows, row{Harness: harness, Name: a.Alias, Kind: "alias", AliasOf: a.Target, Bound: a.Alias == bound, Dir: dir})
 		}
 	}
 	sort.Slice(rows, func(i, j int) bool {
@@ -145,7 +170,7 @@ func accountsList(args []string) error {
 			return rows[i].Harness < rows[j].Harness
 		}
 		if rows[i].Kind != rows[j].Kind {
-			return rows[i].Kind > rows[j].Kind // snapshots first
+			return kindOrder[rows[i].Kind] < kindOrder[rows[j].Kind]
 		}
 		return rows[i].Name < rows[j].Name
 	})
@@ -164,6 +189,18 @@ func accountsList(args []string) error {
 		mark := "  "
 		if r.Active || r.Bound {
 			mark = "* "
+		}
+		if r.Kind == "alias" {
+			target := r.AliasOf
+			if filepath.IsAbs(target) {
+				target = shortPath(target)
+			}
+			state := "alias for " + target
+			if r.Bound {
+				state += " (this project)"
+			}
+			fmt.Printf("  %s%-9s %-20s %s\n", mark, r.Harness, r.Name, state)
+			continue
 		}
 		if r.Kind == "isolated" {
 			state := "isolated, " + shortPath(r.Dir)
@@ -230,6 +267,9 @@ func accountsClear(args []string) error {
 	fmt.Printf("Marked %s account %q usable again.\n", fs.Arg(0), fs.Arg(1))
 	return nil
 }
+
+// kindOrder lists snapshots, then isolated accounts, then aliases within a harness.
+var kindOrder = map[string]int{"snapshot": 0, "isolated": 1, "alias": 2}
 
 // loginCommand is how each harness signs in, run with the isolated account's directory in
 // place so the credentials land there and nowhere else.
@@ -372,6 +412,44 @@ func applyAccount(harness, project string, toolArgs []string) []string {
 			return nil // the user chose a profile directory on the command line
 		}
 	}
-	fmt.Fprintf(os.Stderr, "Running %s as account %q (%s).\n", harness, iso.Account, shortPath(iso.Dir))
+	name := fmt.Sprintf("%q", iso.Account)
+	if iso.AliasOf != "" && !filepath.IsAbs(iso.AliasOf) {
+		name += fmt.Sprintf(", alias for %q", iso.AliasOf)
+	}
+	fmt.Fprintf(os.Stderr, "Running %s as account %s (%s).\n", harness, name, shortPath(iso.Dir))
 	return iso.Args
+}
+
+func accountsAlias(args []string) error {
+	fs := flag.NewFlagSet("accounts alias", flag.ExitOnError)
+	fs.Usage = func() { fmt.Fprint(os.Stderr, accountsUsage) }
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 3 {
+		return fmt.Errorf("usage: conductor accounts alias <harness> <alias> <account|dir>")
+	}
+	harness, alias := fs.Arg(0), fs.Arg(1)
+	if err := accounts.SetAlias(harness, alias, fs.Arg(2)); err != nil {
+		return err
+	}
+	dir, _ := accounts.StateDir(harness, alias)
+	fmt.Printf("%s account %q is now an alias (%s).\n", harness, alias, shortPath(dir))
+	return nil
+}
+
+func accountsUnalias(args []string) error {
+	fs := flag.NewFlagSet("accounts unalias", flag.ExitOnError)
+	fs.Usage = func() { fmt.Fprint(os.Stderr, accountsUsage) }
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 2 {
+		return fmt.Errorf("usage: conductor accounts unalias <harness> <alias>")
+	}
+	if err := accounts.RemoveAlias(fs.Arg(0), fs.Arg(1)); err != nil {
+		return err
+	}
+	fmt.Printf("Removed %s alias %q.\n", fs.Arg(0), fs.Arg(1))
+	return nil
 }

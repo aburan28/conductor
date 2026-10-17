@@ -1085,6 +1085,22 @@ conversation under the bound account too. Bindings are machine-local, in
 repository is yours, not repository policy. A `CLAUDE_CONFIG_DIR` or `CODEX_HOME` you export
 yourself always wins over the binding.
 
+Accounts can have aliases, per harness: another name for an account, or a name for a state
+directory you already have.
+
+```bash
+conductor accounts alias claude acme work              # acme means work
+conductor accounts alias codex legacy ~/codex-old      # adopt an existing CODEX_HOME
+conductor accounts use claude acme                     # bind the alias, not the account
+conductor accounts alias claude acme client            # every project bound to acme moves
+conductor accounts unalias claude acme
+```
+
+An alias works anywhere a name does (`use`, `login`, `switch`, `exhaust`, `ok`,
+`CONDUCTOR_ACCOUNT`, `checkpoint resume --account`). Aliases live in
+`~/.conductor/accounts/aliases.json`; they cannot shadow a real account or point at another
+alias, so a lookup is always one step.
+
 ### Surviving a shutdown, and the machine itself
 
 You should not have to remember to run `save` before a reboot. Three layers make a shutdown

@@ -109,6 +109,9 @@ func List(harness string) ([]Profile, error) {
 // how an account gets into the rotation: log in with the harness as usual, then
 // `conductor accounts add <harness> <name>`.
 func Add(harness, name string) error {
+	if isAlias(harness, name) {
+		return fmt.Errorf("%q is an alias for %s; pick another name or `conductor accounts unalias %s %s`", name, harness, harness, name)
+	}
 	live, ok := LivePath(harness)
 	if !ok {
 		return fmt.Errorf("no known credential file for harness %q", harness)
@@ -128,10 +131,14 @@ func Add(harness, name string) error {
 	return writeFile(filepath.Join(dir, name+".json"), body)
 }
 
-// Switch makes a profile the harness's live account by copying its credentials
+// Switch makes a profile (or an alias for one) the harness's live account by copying its credentials
 // over the harness's own file. Harnesses read that file on startup, so switch
 // before resuming sessions for them to come up under the new account.
 func Switch(harness, name string) error {
+	name, err := canonical(harness, name)
+	if err != nil {
+		return err
+	}
 	body, err := readProfile(harness, name)
 	if err != nil {
 		return err
@@ -182,6 +189,10 @@ func Active(harness string) string {
 // MarkExhausted records that this account's quota window ran out. Until the
 // marker is cleared, resume-all will not bring sessions back under it.
 func MarkExhausted(harness, name string) error {
+	name, err := canonical(harness, name)
+	if err != nil {
+		return err
+	}
 	root, err := Root()
 	if err != nil {
 		return err
@@ -197,6 +208,10 @@ func MarkExhausted(harness, name string) error {
 // ClearExhausted forgets the marker: the account's window has rolled over, or
 // the marker was a false alarm. Clearing an account with no marker is a no-op.
 func ClearExhausted(harness, name string) error {
+	name, err := canonical(harness, name)
+	if err != nil {
+		return err
+	}
 	root, err := Root()
 	if err != nil {
 		return err

@@ -36,13 +36,18 @@ func IsolatedHarnesses() []string {
 	return []string{"claude", "codex", "cursor", "opencode"}
 }
 
-// StateDir is where an isolated account keeps its state. The community convention for
+// StateDir is where an isolated account keeps its state; an alias resolves to the account
+// (or directory) it names. The community convention for
 // Claude Code is ~/.claude-<name>, so an existing ~/.<harness>-<name> is honoured; otherwise
 // the directory is ~/.conductor/accounts/<harness>/<name> (beside, not inside, the
 // credential snapshots, which are <name>.json files).
 func StateDir(harness, name string) (string, error) {
 	if err := validName(name); err != nil {
 		return "", err
+	}
+	name, dir := resolveAlias(harness, name)
+	if dir != "" {
+		return dir, nil
 	}
 	if os.Getenv("CONDUCTOR_STATE_DIR") == "" {
 		if home, err := os.UserHomeDir(); err == nil {
@@ -83,7 +88,8 @@ func Isolated(harness string) ([]string, error) {
 // Isolation is what a launch needs to run a harness under an isolated account.
 type Isolation struct {
 	Harness string
-	Account string
+	Account string // the name asked for, which may be an alias
+	AliasOf string // what Account is an alias for (an account name or a directory); empty if none
 	Dir     string
 	Env     string // the variable to set to Dir; empty when the harness takes a flag
 	Args    []string
@@ -106,6 +112,11 @@ func Prepare(harness, name string) (Isolation, error) {
 		return Isolation{}, err
 	}
 	iso := Isolation{Harness: harness, Account: name, Dir: dir, Env: how.env}
+	if real, aliasDir := resolveAlias(harness, name); aliasDir != "" {
+		iso.AliasOf = aliasDir
+	} else if real != name {
+		iso.AliasOf = real
+	}
 	if how.flag != "" {
 		iso.Args = []string{how.flag, dir}
 	}
