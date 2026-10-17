@@ -69,8 +69,21 @@ database:
 ```
 
 ```bash
+conductord config check --config leader.yaml
 conductor leader --config leader.yaml --bootstrap --project myrepo
 ```
+
+`config check` validates and prints a redacted effective configuration without opening
+the database or applying migrations. Before cutover, an operator with an owner-only DSN
+file can run a read-only live connection check:
+
+```bash
+CI_RDS_DATABASE_URL_FILE=/etc/conductor/database.url \
+  go test ./internal/db -run '^TestRDSLiveConnection$' -v
+```
+
+The live check confirms a connection and TLS negotiation; it does not test migrations,
+writes, failover, or restore. Test those on a disposable RDS database before production.
 
 RDS mode requires verified TLS and an explicitly configured CA trust pool for every
 database host and fallback. `sslmode=require`, plaintext, and certificate-chain-only
@@ -85,6 +98,8 @@ need access to RDS. Budget connections across replicas: the existing pool reserv
 maximum-connection floor of eight per daemon. This release supports PostgreSQL password
 authentication; it does not refresh expiring RDS IAM authentication tokens or provision
 AWS resources.
+For the proposed operator-hosted paid tier and its data boundaries, see
+[Hosted Conductor storage](HOSTED_DATABASE.md).
 
 ## UPnP on a home or office router
 
