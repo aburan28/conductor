@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/aburan28/conductor/compare/v0.1.1...v0.1.2) (2026-10-17)
+
+
+### Bug Fixes
+
+* stop unsigned Sparkle modal and stale mesh peer errors ([#76](https://github.com/aburan28/conductor/issues/76)) ([dcce520](https://github.com/aburan28/conductor/commit/dcce5208ec971b72c8995c660bec909054bf0fda))
+
 ## [0.1.1](https://github.com/aburan28/conductor/compare/v0.1.0...v0.1.1) (2026-10-17)
 
 
