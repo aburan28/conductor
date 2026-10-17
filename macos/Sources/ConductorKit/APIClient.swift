@@ -83,22 +83,71 @@ public struct APIClient: Sendable {
     }
 
     public func send(_ req: URLRequest) async throws -> (Data, Int) {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<(Data, Int), Error>) in
+        let (data, status, _) = try await sendWithHeaders(req)
+        return (data, status)
+    }
+
+    private func sendWithHeaders(_ req: URLRequest) async throws -> (Data, Int, String?) {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<(Data, Int, String?), Error>) in
             let task = session.dataTask(with: req) { data, response, error in
                 if let error {
                     continuation.resume(throwing: APIError.transport(error.localizedDescription))
                     return
                 }
-                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-                continuation.resume(returning: (data ?? Data(), status))
+                let http = response as? HTTPURLResponse
+                let status = http?.statusCode ?? 0
+                let retryAfter = http?.value(forHTTPHeaderField: "Retry-After")
+                continuation.resume(returning: (data ?? Data(), status, retryAfter))
             }
             task.resume()
         }
     }
 
+    /// Transient control-plane answers worth another try: 429 and gateway failures.
+    /// 404 is never retried — it is usually a wrong project or a missing resource.
+    private static let retryableStatuses: Set<Int> = [408, 429, 500, 502, 503, 504]
+    private static let maxAttempts = 4
+
     public func call<T: Decodable>(_ method: String, _ path: String, body: Data? = nil, as type: T.Type) async throws -> T {
-        let (data, status) = try await send(request(method, path, body: body))
-        return try Self.decodeResponse(data: data, status: status, as: type)
+        var lastError: Error?
+        let req = request(method, path, body: body)
+        for attempt in 0..<Self.maxAttempts {
+            do {
+                let (data, status, retryAfter) = try await sendWithHeaders(req)
+                if Self.retryableStatuses.contains(status), attempt + 1 < Self.maxAttempts {
+                    lastError = Self.error(from: data, status: status)
+                    try await Task.sleep(nanoseconds: Self.retryDelayNanos(attempt: attempt, retryAfter: retryAfter))
+                    continue
+                }
+                return try Self.decodeResponse(data: data, status: status, as: type)
+            } catch let err as APIError {
+                if case .transport = err, attempt + 1 < Self.maxAttempts {
+                    lastError = err
+                    try await Task.sleep(nanoseconds: Self.retryDelayNanos(attempt: attempt, retryAfter: nil))
+                    continue
+                }
+                throw err
+            }
+        }
+        throw lastError ?? APIError.transport("request failed")
+    }
+
+    private static func error(from data: Data, status: Int) -> APIError {
+        if let body = try? JSONDecoder().decode(APIErrorBody.self, from: data) {
+            return .server(status: status, code: body.code, message: body.error)
+        }
+        let text = String(decoding: data.prefix(500), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return .server(status: status, code: nil, message: text)
+    }
+
+    private static func retryDelayNanos(attempt: Int, retryAfter: String?) -> UInt64 {
+        if let retryAfter, let secs = Int(retryAfter.trimmingCharacters(in: .whitespaces)), secs >= 0 {
+            return UInt64(min(secs, 30)) * 1_000_000_000
+        }
+        // 200ms, 400ms, 800ms
+        let ms = 200 << attempt
+        return UInt64(ms) * 1_000_000
     }
 
     /// The body as `T` on a 2xx, else the server's error body as an `APIError`.

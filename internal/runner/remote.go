@@ -180,6 +180,10 @@ func remoteErr(err error) error {
 		return domain.ErrCapacity
 	case "budget_exhausted":
 		return domain.ErrBudgetExhausted
+	case "rate_limited":
+		// Leave the typed APIError so callers can read RetryAfter; the client already
+		// waited through its own budget before returning.
+		return apiErr
 	}
 	if apiErr.Status == http.StatusNotFound {
 		return domain.ErrNotFound

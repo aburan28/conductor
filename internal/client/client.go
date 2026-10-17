@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -79,24 +80,42 @@ func caPoolFrom(path string) (*x509.CertPool, error) {
 
 // APIError carries a structured failure from the control plane.
 type APIError struct {
-	Status    int             `json:"-"`
-	Code      string          `json:"code"`
-	Message   string          `json:"error"`
-	RequestID string          `json:"request_id"`
-	Body      json.RawMessage `json:"-"`
+	Status  int             `json:"-"`
+	Code    string          `json:"code"`
+	Message string          `json:"error"`
+	Body    json.RawMessage `json:"-"`
+	// RetryAfter is set when the control plane asked us to wait (a 429 or 503 with
+	// Retry-After). Callers that manage their own backoff can honour it; Do already does.
+	RetryAfter time.Duration `json:"-"`
 }
 
 func (e *APIError) Error() string {
 	if e.Code != "" {
-		if e.RequestID != "" {
-			return fmt.Sprintf("%s (%d %s, request %s)", e.Message, e.Status, e.Code, e.RequestID)
-		}
 		return fmt.Sprintf("%s (%d %s)", e.Message, e.Status, e.Code)
 	}
-	if e.RequestID != "" {
-		return fmt.Sprintf("request failed: %d (request %s)", e.Status, e.RequestID)
-	}
 	return fmt.Sprintf("request failed: %d", e.Status)
+}
+
+// RateLimited reports a 429, or any error the control plane tagged rate_limited.
+func (e *APIError) RateLimited() bool {
+	return e != nil && (e.Status == http.StatusTooManyRequests || e.Code == "rate_limited")
+}
+
+// Transient reports a failure that is worth retrying: rate limits, gateway timeouts, and
+// other 5xx answers that usually mean "try again shortly".
+func (e *APIError) Transient() bool {
+	if e == nil {
+		return false
+	}
+	if e.RateLimited() {
+		return true
+	}
+	switch e.Status {
+	case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout, http.StatusRequestTimeout:
+		return true
+	}
+	return false
 }
 
 // Blocked reports whether the error is a coordination refusal — a conflict or duplicate —
@@ -117,22 +136,61 @@ func (e *APIError) Blocked() bool {
 	return false
 }
 
+// Retry budget for a single logical call. Four tries covers a brief blip or one rate-limit
+// window without turning a hard failure into a long stall.
+const maxAttempts = 4
+
 // Do performs a request and decodes the response into out.
+//
+// Transient failures — transport errors, 429 (honouring Retry-After), 502/503/504, and 408 —
+// are retried with exponential backoff. Permanent 4xx answers, including 404, are not: those
+// are decisions, not blips, and retrying them would amplify load on a misconfigured client.
 func (c *Client) Do(ctx context.Context, method, path string, body, out any) error {
-	var reader io.Reader
+	var payload []byte
 	if body != nil {
-		encoded, err := json.Marshal(body)
+		var err error
+		payload, err = json.Marshal(body)
 		if err != nil {
 			return err
 		}
-		reader = bytes.NewReader(encoded)
+	}
+
+	var last error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := c.doOnce(ctx, method, path, payload, out)
+		if err == nil {
+			return nil
+		}
+		last = err
+		wait, ok := retryWait(err, attempt)
+		if !ok || attempt == maxAttempts-1 {
+			return err
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return last
+}
+
+func (c *Client) doOnce(ctx context.Context, method, path string, payload []byte, out any) error {
+	var reader io.Reader
+	if payload != nil {
+		reader = bytes.NewReader(payload)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, c.Endpoint+path, reader)
 	if err != nil {
 		return err
 	}
-	if body != nil {
+	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	if c.Token != "" {
@@ -145,29 +203,84 @@ func (c *Client) Do(ctx context.Context, method, path string, body, out any) err
 	}
 	defer resp.Body.Close()
 
-	payload, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
 		return err
 	}
 
 	if resp.StatusCode >= 400 {
-		apiErr := &APIError{Status: resp.StatusCode, Body: payload}
+		apiErr := &APIError{Status: resp.StatusCode, Body: body}
 		// A conflict response carries the explanation (who holds what) in its body, so it
 		// is decoded rather than discarded.
-		_ = json.Unmarshal(payload, apiErr)
+		_ = json.Unmarshal(body, apiErr)
 		if apiErr.Message == "" {
-			apiErr.Message = strings.TrimSpace(string(payload))
+			apiErr.Message = strings.TrimSpace(string(body))
+		}
+		if wait, ok := parseRetryAfter(resp.Header.Get("Retry-After")); ok {
+			apiErr.RetryAfter = wait
 		}
 		if out != nil && resp.StatusCode == http.StatusConflict {
-			_ = json.Unmarshal(payload, out)
+			_ = json.Unmarshal(body, out)
 		}
 		return apiErr
 	}
 
-	if out == nil || len(payload) == 0 {
+	if out == nil || len(body) == 0 {
 		return nil
 	}
-	return json.Unmarshal(payload, out)
+	return json.Unmarshal(body, out)
+}
+
+// retryWait reports whether err is worth another attempt and how long to wait first.
+func retryWait(err error, attempt int) (time.Duration, bool) {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		if !apiErr.Transient() {
+			return 0, false
+		}
+		if apiErr.RetryAfter > 0 {
+			return capWait(apiErr.RetryAfter), true
+		}
+	} else if err == nil {
+		return 0, false
+	}
+	// Transport errors (connection reset, dial timeout) have no Retry-After; back off the
+	// same way. Base 200ms doubles per attempt: 200ms, 400ms, 800ms.
+	return capWait(200 * time.Millisecond << attempt), true
+}
+
+const maxRetryWait = 30 * time.Second
+
+func capWait(d time.Duration) time.Duration {
+	if d < 0 {
+		return 0
+	}
+	if d > maxRetryWait {
+		return maxRetryWait
+	}
+	return d
+}
+
+// parseRetryAfter accepts either a delay-seconds integer or an HTTP-date, as RFC 7231 §7.1.3.
+func parseRetryAfter(v string) (time.Duration, bool) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, false
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs < 0 {
+			return 0, false
+		}
+		return time.Duration(secs) * time.Second, true
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		d := time.Until(t)
+		if d < 0 {
+			return 0, true
+		}
+		return d, true
+	}
+	return 0, false
 }
 
 func (c *Client) Get(ctx context.Context, path string, out any) error {
@@ -188,6 +301,32 @@ func (c *Client) Delete(ctx context.Context, path string, out any) error {
 
 // Raw fetches a non-JSON endpoint, such as the Markdown task card.
 func (c *Client) Raw(ctx context.Context, path string) ([]byte, error) {
+	var last error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		body, err := c.rawOnce(ctx, path)
+		if err == nil {
+			return body, nil
+		}
+		last = err
+		wait, ok := retryWait(err, attempt)
+		if !ok || attempt == maxAttempts-1 {
+			return nil, err
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, last
+}
+
+func (c *Client) rawOnce(ctx context.Context, path string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.Endpoint+path, nil)
 	if err != nil {
 		return nil, err
@@ -197,7 +336,7 @@ func (c *Client) Raw(ctx context.Context, path string) ([]byte, error) {
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("contacting %s: %w", c.Endpoint, err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
@@ -205,7 +344,12 @@ func (c *Client) Raw(ctx context.Context, path string) ([]byte, error) {
 		return nil, err
 	}
 	if resp.StatusCode >= 400 {
-		return nil, &APIError{Status: resp.StatusCode, Message: string(body), Body: body}
+		apiErr := &APIError{Status: resp.StatusCode, Message: strings.TrimSpace(string(body)), Body: body}
+		_ = json.Unmarshal(body, apiErr)
+		if wait, ok := parseRetryAfter(resp.Header.Get("Retry-After")); ok {
+			apiErr.RetryAfter = wait
+		}
+		return nil, apiErr
 	}
 	return body, nil
 }
