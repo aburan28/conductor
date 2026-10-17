@@ -1,0 +1,27 @@
+name: release-please
+
+# On every push to main, open or update a Release PR from conventional commits since the
+# last tagged version. Merging that PR tags vX.Y.Z and publishes a GitHub Release; the
+# existing `release` workflow then builds the platform archives and attaches them.
+#
+# Squash-merge PR titles need a conventional prefix (feat:/fix:/perf:/…) for a version bump.
+# Without one, release-please stays quiet until a releasable commit lands.
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
