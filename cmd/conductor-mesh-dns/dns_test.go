@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"net"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -12,6 +14,88 @@ import (
 // and the built-in services.
 func testServer() *dnsServer {
 	return newDNSServer("host-a.tail1234.ts.net.", net.ParseIP("100.64.0.1"), builtinServices)
+}
+
+func TestDNSQuestionTruncationAndCountBoundaries(t *testing.T) {
+	server := testServer()
+	query := buildQuery(0x1234, server.hostname, 1)
+	for size := 0; size < len(query); size++ {
+		response := server.answer(query[:size])
+		if size < 12 {
+			if response != nil {
+				t.Fatalf("%d-byte prefix answered: %x", size, response)
+			}
+			continue
+		}
+		if rcode, count := parseHeader(t, response); rcode != 3 || count != 0 {
+			t.Fatalf("%d-byte partial question = %d/%d; want no answer", size, rcode, count)
+		}
+		if !bytes.Equal(response[:2], query[:2]) {
+			t.Fatalf("%d-byte prefix lost transaction ID", size)
+		}
+	}
+	for _, count := range []uint16{0, 2, 65535} {
+		packet := append([]byte(nil), query...)
+		binary.BigEndian.PutUint16(packet[4:6], count)
+		if rcode, answers := parseHeader(t, server.answer(packet)); rcode != 3 || answers != 0 {
+			t.Fatalf("unsupported %d questions = %d/%d", count, rcode, answers)
+		}
+	}
+	for _, tail := range [][]byte{{0xc0}, {0xc0, 0x0c}, {3, 'x'}, {0x40, 0, 0, 1, 0, 1}} {
+		packet := append(append([]byte(nil), query[:12]...), tail...)
+		if _, count := parseHeader(t, server.answer(packet)); count != 0 {
+			t.Fatalf("malformed name %x answered", tail)
+		}
+	}
+}
+
+func TestDNSMappedIPv4AndUnknownAddressNames(t *testing.T) {
+	server := newDNSServer("leader.internal.", net.ParseIP("::ffff:10.88.0.1"), builtinServices)
+	for _, qtype := range []uint16{1, 28} {
+		response := server.answer(buildQuery(0x1234, "LEADER.INTERNAL.", qtype))
+		rcode, count := parseHeader(t, response)
+		wantCount := 0
+		if qtype == 1 {
+			wantCount = 1
+		}
+		if rcode != 0 || count != wantCount {
+			t.Fatalf("mapped IPv4 type %d = %d/%d", qtype, rcode, count)
+		}
+		if qtype == 1 && !net.IP(response[len(response)-4:]).Equal(net.ParseIP("10.88.0.1")) {
+			t.Fatalf("mapped A data = %x", response)
+		}
+		if rcode, count := parseHeader(t, server.answer(buildQuery(1, "unknown.internal.", qtype))); rcode != 3 || count != 0 {
+			t.Fatalf("unknown address name type %d = %d/%d", qtype, rcode, count)
+		}
+	}
+}
+
+func TestServiceConfigurationPortTypesAndStableListing(t *testing.T) {
+	for _, value := range []string{`{"_custom._tcp.mesh.internal.":[-1]}`, `{"_custom._tcp.mesh.internal.":[65536]}`, `{"_custom._tcp.mesh.internal.":[1.5]}`, `{"_custom._tcp.mesh.internal.":["443"]}`, `[]`, `{} {}`} {
+		if _, err := servicesFromEnv(value); err == nil {
+			t.Errorf("invalid port configuration accepted: %s", value)
+		}
+	}
+	services, err := servicesFromEnv(`{"_Z._tcp.mesh.internal.":[65535],"_a._tcp.mesh.internal.":[1]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := newDNSServer("leader.internal.", nil, services)
+	names := server.serviceNames()
+	for i := 1; i < len(names); i++ {
+		if names[i-1] >= names[i] {
+			t.Fatalf("unstable service order: %v", names)
+		}
+	}
+	if !reflect.DeepEqual(names, server.serviceNames()) {
+		t.Fatal("service listing changed between calls")
+	}
+	for name, port := range map[string]uint16{"_z._tcp.mesh.internal.": 65535, "_a._tcp.mesh.internal.": 1} {
+		records := parseSRVAnswers(t, server.answer(buildQuery(1, name, 33)))
+		if len(records) != 1 || records[0].port != port {
+			t.Fatalf("service %s boundary port = %+v", name, records)
+		}
+	}
 }
 
 // buildQuery encodes a one-question DNS query for name/qtype.
