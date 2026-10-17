@@ -15,6 +15,10 @@ MagicDNS names devices so clients can reach a known host. It does not discover C
 projects or synchronize databases. Pick the first topology for agents in different tools
 and checkouts that need one task ledger.
 
+The [private AWS control-plane runbook](../deploy/aws/README.md) provisions that
+topology on EC2 and describes a verified database cutover. Tailscale Serve exposes
+the loopback API to the tailnet without opening an EC2 inbound rule.
+
 ## Recommended path: Tailscale (or Headscale)
 
 1. Install and sign in to [Tailscale](https://tailscale.com/) (or a self-hosted

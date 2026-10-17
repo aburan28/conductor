@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Conductor PostgreSQL backup
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=30m
+Persistent=true
+Unit=conductor-backup.service
+
+[Install]
+WantedBy=timers.target

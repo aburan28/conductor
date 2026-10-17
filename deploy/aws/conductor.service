@@ -1,0 +1,27 @@
+[Unit]
+Description=Conductor private control plane
+After=network-online.target postgresql.service tailscaled.service
+Wants=network-online.target
+Requires=postgresql.service
+ConditionPathExists=/etc/conductor/secret.key
+
+[Service]
+Type=simple
+User=conductor
+Group=conductor
+WorkingDirectory=/var/lib/conductor
+Environment=CONDUCTOR_STATE_DIR=/var/lib/conductor
+Environment=DATABASE_URL=postgresql://conductor@/conductor?host=/var/run/postgresql
+EnvironmentFile=-/etc/conductor/conductor.env
+ExecStartPre=/usr/bin/pg_isready -q -h /var/run/postgresql -U conductor -d conductor
+ExecStart=/opt/conductor/bin/conductord --addr 127.0.0.1:8080 --behind-proxy --security-mode enhanced --secret-key-file /etc/conductor/secret.key
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=0
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
