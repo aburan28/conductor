@@ -109,13 +109,12 @@ func TestOpenCodeLocalVLLMProfiles(t *testing.T) {
 	}
 	got := map[string][]string{}
 	for _, p := range bundle.ModelProfiles("org-1") {
-		if p.Harness != "opencode" || !p.Enabled {
+		// Restrict to vLLM so OpenRouter (and other) OpenCode profiles do not
+		// enter this local-capacity assertion.
+		if p.Harness != "opencode" || p.Provider != "vllm" || !p.Enabled {
 			continue
 		}
 		got[p.Model] = append(got[p.Model], p.Alias)
-		if p.Provider != "vllm" {
-			t.Errorf("%s: provider = %q, want vllm", p.Model, p.Provider)
-		}
 		if p.Billing != "capacity" {
 			t.Errorf("%s: billing = %q, want capacity (local GPU, not per-token)", p.Model, p.Billing)
 		}

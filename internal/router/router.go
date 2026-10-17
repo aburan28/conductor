@@ -10,6 +10,7 @@ package router
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
@@ -452,19 +453,15 @@ func (c Catalog) ladderAbove(alias string) []string {
 	return c.Ladder[idx+1:]
 }
 
-// cost gives a comparable price for ranking. Capacity-billed profiles (subscription tools)
-// have no per-token price, so they sort as free — which is correct, since using them consumes
-// an allowance rather than money.
+// cost gives a comparable price for ranking. Capacity-billed profiles consume
+// an allowance rather than incurring a per-token charge. A token-billed profile
+// without both prices has unknown cost and must not outrank a priced profile.
 func cost(p domain.ModelProfile) float64 {
 	if p.Billing == "capacity" {
 		return 0
 	}
-	var total float64
-	if p.InputCostPerMTok != nil {
-		total += *p.InputCostPerMTok
+	if p.InputCostPerMTok == nil || p.OutputCostPerMTok == nil {
+		return math.Inf(1)
 	}
-	if p.OutputCostPerMTok != nil {
-		total += *p.OutputCostPerMTok
-	}
-	return total
+	return *p.InputCostPerMTok + *p.OutputCostPerMTok
 }
