@@ -377,3 +377,47 @@ func TestConflictMessages(t *testing.T) {
 		}
 	}
 }
+
+// The pull request events (docs/COLLABORATION.md §4.5) are subscribable, read as sentences, and
+// say nothing but "a private task" when they are about one.
+func TestPullRequestEventMessages(t *testing.T) {
+	ev := func(typ string, payload map[string]any) domain.Event {
+		payload["repository"], payload["number"] = "acme/widgets", float64(118)
+		return domain.Event{ID: "e", Type: typ, Visibility: domain.VisibilityTeamSummary, OccurredAt: time.Now(), Payload: payload}
+	}
+	for typ, c := range map[string]struct {
+		payload map[string]any
+		want    string
+	}{
+		"github.pr_opened":  {map[string]any{"branch": "feature/retry"}, "Pull request acme/widgets#118 opened (feature/retry)"},
+		"github.pr_updated": {map[string]any{"task_ref": "T-42"}, "Pull request acme/widgets#118 (T-42) has new commits"},
+		"github.pr_ready":   {map[string]any{}, "Pull request acme/widgets#118 is ready for review"},
+		"github.pr_review":  {map[string]any{"decision": "approved"}, "Pull request acme/widgets#118 was approved"},
+		"github.pr_checks":  {map[string]any{"failed": float64(2), "passed": float64(1)}, "Pull request acme/widgets#118 has 2 failing check(s)"},
+	} {
+		if err := validEntry(typ); err != nil {
+			t.Errorf("%s is not subscribable: %v", typ, err)
+		}
+		if got := buildMessage("p", ev(typ, c.payload), "").Text; got != c.want {
+			t.Errorf("%s: %q, want %q", typ, got, c.want)
+		}
+	}
+	if got := buildMessage("p", ev("github.pr_review", map[string]any{"decision": "changes_requested"}), "").Text; !strings.Contains(got, "changes requested") {
+		t.Errorf("changes requested: %q", got)
+	}
+	if got := buildMessage("p", ev("github.pr_checks", map[string]any{"passed": float64(5), "failed": float64(0)}), "").Text; got != "Pull request acme/widgets#118 checks passed (5)" {
+		t.Errorf("checks passed: %q", got)
+	}
+
+	// About a private task, an event names neither the task nor the repository's branch.
+	for _, typ := range []string{"github.pr_opened", "github.pr_updated", "github.pr_ready", "github.pr_review", "github.pr_checks"} {
+		e := ev(typ, map[string]any{"task_ref": "T-42", "branch": "feature/secret", "decision": "approved", "author": "octo"})
+		e.Visibility = domain.VisibilityPrivate
+		raw, _ := json.Marshal(buildMessage("p", e, "https://conductor.example.com"))
+		for _, leak := range []string{"T-42", "feature/secret", "acme/widgets", "octo", "/tasks/"} {
+			if strings.Contains(string(raw), leak) {
+				t.Errorf("private %s carries %q: %s", typ, leak, raw)
+			}
+		}
+	}
+}

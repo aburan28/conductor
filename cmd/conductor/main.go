@@ -11,6 +11,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
@@ -177,6 +178,10 @@ func runCommand(ctx context.Context, name string, args []string) error {
 		return cmdUsage(ctx, args)
 	case "task":
 		return cmdTask(ctx, args)
+	case "pulls":
+		return cmdPulls(ctx, args)
+	case "pull":
+		return cmdPull(ctx, args)
 	case "scope":
 		return cmdScope(ctx, args)
 	case "worker":
@@ -235,8 +240,11 @@ func parseFlags(fs *flag.FlagSet, args []string) ([]string, error) {
 }
 
 // emit prints a value as JSON, for --json mode.
-func emit(v any) error {
-	enc := json.NewEncoder(os.Stdout)
+func emit(v any) error { return emitTo(os.Stdout, v) }
+
+// emitTo prints a value as indented JSON to w.
+func emitTo(w io.Writer, v any) error {
+	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
 }

@@ -741,6 +741,9 @@ conductor checkpoint capture --note "tests pass"         # snapshot a session: t
 conductor checkpoint resume 9a474a --account work        # continue it under another login, or --harness codex
 conductor security [local|enhanced]                       # sign in without a token on this machine, or tokens only
 conductor github setup | link | status                    # a "Conductor" check on every pull request
+conductor pulls --needs-review                            # the repository's pull requests: task, checks, review
+conductor pull 118                                        # one pull request: its task, checks, review, attempts
+conductor task link-pr T-42 118                           # say which task a pull request is (outranks every guess)
 conductor github issues enable --label conductor          # labelled GitHub issues become tasks
 conductor integrate cursor                                # wire a coding tool to this project (MCP + hooks)
 conductor route T-42                                      # what would this route to, and why — before spending a token
@@ -829,8 +832,8 @@ projects in their organization can be linked, so another tenant on a shared cont
 neither take the app over nor read a repository through it. In a check run, a private task
 appears as "a private task", and a public repository gets no task references or owners at
 all. A pull request's own task is excluded only for a branch in the repository itself, never
-a fork's. The app asks for read access to contents and pull requests, and write access to
-checks and issues (issues only for issue sync, below). It cannot push, merge, or change settings. Its credentials are kept in Conductor's database, so
+a fork's. The app asks for read access to contents, pull requests and commit statuses, and write
+access to checks and issues (issues only for issue sync, below). It cannot push, merge, or change settings. Its credentials are kept in Conductor's database, so
 every `conductord` sharing it serves the same app, with the private key and secrets sealed
 under a key that is not in the database (`~/.conductor/secret.key`, `--secret-key-file`, or
 `CONDUCTOR_SECRET_KEY`; replicas must share it — see docs/OPERATIONS.md). An app saved by an
@@ -853,6 +856,61 @@ task still being worked is left alone. Without webhooks, the poller does the sam
 pull requests closed since its last pass (and looks up any linked pull request that left the
 open list), so a pull request opened and merged between two polls still completes its task.
 Seeing the same merge twice changes nothing and announces nothing.
+
+#### Pull requests as a list
+
+Every pull request on a linked repository is a row in Conductor, not only the one a task
+travels in: `conductor pulls` (and **Pull requests** in the dashboard) lists them with their
+task, author, checks, and review decision, and `conductor pull 118` shows one in full.
+
+```bash
+conductor pulls                       # open pull requests (--all adds merged and closed)
+conductor pulls --needs-review        # open, ready for review, not yet approved or sent back
+conductor pulls --failing --mine      # failing checks; you opened it, or you own its task
+conductor pulls --unlinked            # no task claims it
+conductor pull 118                    # task and how it was linked, checks, reviews, mergeability, attempts
+conductor task link-pr T-42 118       # by hand: a number, owner/repo#118, or the URL
+conductor task unlink-pr T-42 118
+```
+
+- **What is kept.** The title (bounded), the author's GitHub login and id, the branch and head
+  commit, the state, and counts: checks passed, failed, and pending; unresolved review threads;
+  size. The review decision and mergeability. Never a pull request's description, comments, review
+  text, commit messages, CI logs, or diff: they are written by strangers, and are where prompt
+  injection travels. An agent reads them on its own machine through `gh` when it needs them.
+- **Which task.** By precedence, strongest first: a link made by hand; a `Conductor-Task: T-42`
+  trailer on any commit (the runner writes one); the first `T-42` in the description; the head
+  branch, as above. A task may have several pull requests and a pull request has one task. The
+  trailer and the description are text a pull request's author wrote, so they link only pull
+  requests from a branch in the repository itself; a fork can name a task and be ignored. A link
+  made by hand, or an unlink, is never overridden by the rest.
+- **Several pull requests.** The first linked becomes the task's *primary* (the one `task show`
+  and the card name), and a link by hand takes over. The task is done when its primary merges, or
+  when the last of its open pull requests does. Closing one while another is open leaves the task
+  where it is; closing the last sends waiting work back to `ready`.
+- **Visibility.** Members read a pull request's title, author and states, the same assumption issue
+  sync makes about the repository. A pull request of a private task is shown to everyone but its
+  owner as its number and state ("pull request of a private task").
+- **Freshness.** With webhooks, reviews, review comments, comments, check suites, check runs,
+  commit statuses and pushes each prompt a re-read of the pull request they touch. Without them,
+  the poller (every two minutes) lists open pull requests as a conditional request, so an
+  unchanged repository costs a 304, and reads each changed pull request's checks and review state
+  in one GraphQL call. CI finishing does not change a pull request's `updated_at`, so a pull
+  request with checks pending is read every pass and a settled one every fifteen minutes. A
+  contributor can force a read, rate limited: `POST /v1/projects/{project}/pulls/{owner}/{repo}/{number}/refresh`
+  or **Refresh from GitHub** in the drawer.
+- **Events** for notification channels (`conductor notify events`): `github.pr_opened`,
+  `github.pr_updated` (new commits), `github.pr_review`, `github.pr_checks` (settled: all passed, or
+  some failed), and `github.pr_ready` (left draft). They carry the repository, number and counts,
+  never the title; an event about a private task is private. A pull request first found by the
+  poller long after it opened is not announced as opened.
+- **Permissions.** The check rollup needs `statuses: read`, and the app now subscribes to
+  `pull_request_review`, `pull_request_review_comment`, `issue_comment`, `check_suite`,
+  `check_run`, `status` and `push`. An app created before this lacks them, because GitHub applies a
+  manifest's permissions only when it creates the app: `conductor github status` says so, with the
+  app-settings page to grant them and each installation's page where GitHub asks its owner to
+  accept. Without them the list still works, filled in from the pull request events and the poll,
+  with no check state until they are granted.
 
 #### GitHub Issues as tasks
 

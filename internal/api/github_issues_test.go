@@ -369,7 +369,7 @@ func TestGitHubIssueSyncMissingPermission(t *testing.T) {
 		t.Fatalf("status = %d", code)
 	}
 	gaps := toJSON(st["permission_gaps"])
-	for _, want := range []string{`"scope":"app"`, `"scope":"acme"`, "issues: write",
+	for _, want := range []string{`"scope":"app"`, `"scope":"acme"`, "issues: write", "statuses: read", "pull request list",
 		"https://github.example/organizations/acme/settings/apps/conductor-test/permissions",
 		"https://github.example/organizations/acme/settings/installations/77"} {
 		if !strings.Contains(gaps, want) {

@@ -388,7 +388,7 @@ func cmdConflicts(ctx context.Context, args []string) error {
 
 func cmdTask(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: conductor task <list|show|create|claim|release|done|reopen|handoff|assign|export>")
+		return errors.New("usage: conductor task <list|show|create|claim|release|done|reopen|handoff|assign|export|link-pr|unlink-pr>")
 	}
 	sub, rest := args[0], args[1:]
 
@@ -413,6 +413,10 @@ func cmdTask(ctx context.Context, args []string) error {
 		return cmdTaskAssign(ctx, rest)
 	case "export":
 		return taskExport(ctx, rest)
+	case "link-pr":
+		return taskLinkPR(ctx, rest)
+	case "unlink-pr":
+		return taskUnlinkPR(ctx, rest)
 	default:
 		return fmt.Errorf("unknown task subcommand %q", sub)
 	}

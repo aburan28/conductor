@@ -548,6 +548,11 @@ var EventPayloadAllowlist = map[string]bool{
 	"granted": true, "expired": true, "labels": true, "provider": true, "priority": true,
 	// Pull request lifecycle and released-territory notices.
 	"pull_request": true, "waiting_task_ref": true,
+	// Pull requests as first-class objects (github.pr_opened, pr_updated, pr_review,
+	// pr_checks, pr_ready; task.pull_request_linked). Counts, states, and identifiers
+	// only: never a body, a comment, a review's text, or a log.
+	"repository": true, "number": true, "decision": true, "passed": true, "failed": true,
+	"pending": true, "author": true, "link_source": true, "draft": true, "base": true,
 	// The second task of a conflict edge (conflict.detected).
 	"with_task_ref": true,
 }
@@ -598,4 +603,97 @@ func ClampSummary(s string) string {
 		return s
 	}
 	return string(r[:MaxSummaryLength]) + "…"
+}
+
+// ---------------------------------------------------------------------------
+// Pull requests (docs/COLLABORATION.md §4.5)
+// ---------------------------------------------------------------------------
+
+// PullRequestFacts is a pull request row with the task it is linked to, as the database
+// holds it. It is an input to ProjectPullRequest and is never serialized.
+type PullRequestFacts struct {
+	Repository, URL, State, Title, AuthorLogin, AuthorHandle string
+	Number                                                   int
+	Draft, Primary, FromFork                                 bool
+	TaskRef, LinkSource                                      string
+	TaskStatus                                               domain.TaskStatus
+	TaskOwner                                                domain.ID
+	TaskVisibility                                           domain.Visibility
+	HeadRef, HeadSHA, BaseRef                                string
+	ChecksTotal, ChecksPassed, ChecksFailed, ChecksPending   int
+	ReviewDecision, Mergeable                                string
+	UnresolvedThreads                                        int
+	Additions, Deletions, ChangedFiles                       int
+	UpdatedAt, CreatedAt                                     time.Time
+}
+
+// PullChecks is a pull request's check rollup.
+type PullChecks struct {
+	Total   int `json:"total"`
+	Passed  int `json:"passed"`
+	Failed  int `json:"failed"`
+	Pending int `json:"pending"`
+}
+
+// PullRequestView is what a principal may learn about a pull request.
+//
+// A pull request is the repository's own data: every project member may read its title,
+// author, and states, on the assumption the administrator who linked the project made about
+// the repository's readers (the same one issue sync makes). The exception is a pull request
+// of a private task, which others see as "pull request of a private task": repository,
+// number, URL, and state. Its title, branch, author, checks, and task are the task owner's.
+type PullRequestView struct {
+	Repository string `json:"repository"`
+	Number     int    `json:"number"`
+	URL        string `json:"url"`
+	State      string `json:"state"`
+	// Redacted marks a view narrowed because it belongs to someone else's private task.
+	Redacted bool `json:"redacted,omitempty"`
+
+	Draft        bool              `json:"draft,omitempty"`
+	Title        string            `json:"title,omitempty"`
+	Author       string            `json:"author,omitempty"`
+	AuthorHandle string            `json:"author_handle,omitempty"`
+	TaskRef      string            `json:"task_ref,omitempty"`
+	TaskStatus   domain.TaskStatus `json:"task_status,omitempty"`
+	LinkSource   string            `json:"link_source,omitempty"`
+	Primary      bool              `json:"primary,omitempty"`
+	HeadRef      string            `json:"head_ref,omitempty"`
+	HeadSHA      string            `json:"head_sha,omitempty"`
+	BaseRef      string            `json:"base_ref,omitempty"`
+	FromFork     bool              `json:"from_fork,omitempty"`
+
+	Checks            *PullChecks `json:"checks,omitempty"`
+	ReviewDecision    string      `json:"review_decision,omitempty"`
+	UnresolvedThreads int         `json:"unresolved_threads,omitempty"`
+	Mergeable         string      `json:"mergeable,omitempty"`
+	Additions         int         `json:"additions,omitempty"`
+	Deletions         int         `json:"deletions,omitempty"`
+	ChangedFiles      int         `json:"changed_files,omitempty"`
+
+	UpdatedAt time.Time `json:"updated_at"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// MaxPullRequestTitle bounds a stored pull request title, in characters.
+const MaxPullRequestTitle = 256
+
+// ProjectPullRequest builds a pull request's view for a viewer, from an allowlist.
+func ProjectPullRequest(v Viewer, f PullRequestFacts) PullRequestView {
+	view := PullRequestView{Repository: f.Repository, Number: f.Number, URL: f.URL, State: f.State,
+		UpdatedAt: f.UpdatedAt, CreatedAt: f.CreatedAt}
+	if f.TaskRef != "" && f.TaskVisibility == domain.VisibilityPrivate && !v.IsSelf(Owner{PrincipalID: f.TaskOwner}) {
+		view.Redacted = true
+		return view
+	}
+	view.Draft, view.Title = f.Draft, f.Title
+	view.Author, view.AuthorHandle = f.AuthorLogin, f.AuthorHandle
+	view.TaskRef, view.TaskStatus, view.LinkSource, view.Primary = f.TaskRef, f.TaskStatus, f.LinkSource, f.Primary
+	view.HeadRef, view.HeadSHA, view.BaseRef, view.FromFork = f.HeadRef, f.HeadSHA, f.BaseRef, f.FromFork
+	if f.ChecksTotal > 0 {
+		view.Checks = &PullChecks{Total: f.ChecksTotal, Passed: f.ChecksPassed, Failed: f.ChecksFailed, Pending: f.ChecksPending}
+	}
+	view.ReviewDecision, view.UnresolvedThreads, view.Mergeable = f.ReviewDecision, f.UnresolvedThreads, f.Mergeable
+	view.Additions, view.Deletions, view.ChangedFiles = f.Additions, f.Deletions, f.ChangedFiles
+	return view
 }

@@ -31,25 +31,25 @@ import (
 //   - closed without merging: a task that was waiting on the pull request goes back to ready
 //     and drops its hold; a task still being worked is left alone (db.PullRequestClosed).
 //
-// Which task a pull request belongs to is decided exactly as the check run decides "the pull
-// request's own task" (checkPull): a branch in the repository itself — never a fork's, whose
-// branch name is whatever its author typed — that an attempt recorded, or Conductor's
-// agent/<ref>/attempt-<n> convention; or a pull request already linked to the task.
+// Which task a pull request belongs to is decided by link precedence, strongest first:
+//
+//   manual    a person said so (conductor task link-pr)
+//   request   created by a work request (phase B)
+//   trailer   a Conductor-Task: T-42 trailer on any commit of the pull request
+//   body_ref  the first T-42 in the pull request's body
+//   branch    a branch in the repository itself — never a fork's, whose branch name is
+//             whatever its author typed — that an attempt recorded, or Conductor's
+//             agent/<ref>/attempt-<n> convention
+//
+// The trailer and the body reference are text a pull request's author wrote, so they link
+// only pull requests from a branch in the repository itself, like the branch rule: a stranger's
+// fork cannot name a task and have its merge complete it. A person's manual link is the
+// maintainers' call and has no such limit. The linking itself lives in github_pulls.go; this
+// file is the lifecycle that follows it.
 
-// pullTask finds the open task in a project a pull request belongs to. ok is false when none
-// does.
-func (g *GitHub) pullTask(ctx context.Context, p domain.Project, pr githubapp.PullRequest) (taskID domain.ID, ref string, ok bool, err error) {
-	if pr.HTMLURL != "" {
-		linked, err := g.store.TasksWithOpenPullRequests(ctx, p.ID)
-		if err != nil {
-			return "", "", false, err
-		}
-		for _, t := range linked {
-			if t.URL == pr.HTMLURL {
-				return t.TaskID, t.Ref, true, nil
-			}
-		}
-	}
+// branchTask finds the open task in a project that a pull request's head branch names. ok is
+// false when none does, and always for a fork.
+func (g *GitHub) branchTask(ctx context.Context, p domain.Project, pr githubapp.PullRequest) (taskID domain.ID, ref string, ok bool, err error) {
 	if pr.FromFork() || pr.Head.Ref == "" {
 		return "", "", false, nil
 	}
@@ -64,29 +64,6 @@ func (g *GitHub) pullTask(ctx context.Context, p domain.Project, pr githubapp.Pu
 		}
 	}
 	return "", "", false, nil
-}
-
-// linkPulls records, for each open pull request, the task it belongs to. It is what lets the
-// poller later notice that pull request's merge without ever receiving a webhook.
-func (g *GitHub) linkPulls(ctx context.Context, pulls []githubapp.PullRequest, projects []domain.Project) error {
-	for _, pr := range pulls {
-		if pr.HTMLURL == "" {
-			continue
-		}
-		for _, p := range projects {
-			taskID, _, ok, err := g.pullTask(ctx, p, pr)
-			if err != nil {
-				return err
-			}
-			if !ok {
-				continue
-			}
-			if _, err := g.store.LinkPullRequest(ctx, taskID, pr.HTMLURL); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
 }
 
 // maxClosedLookups bounds how many vanished pull requests one poll looks up, so a burst of
@@ -135,14 +112,11 @@ func (p *pullSweep) done(repo string, at time.Time) {
 }
 
 // syncPullLifecycle is the poller's half of the lifecycle, run after each repository's open
-// pull requests are checked: link the open ones to their tasks, then look up every linked
-// pull request that is no longer open and apply how it ended. The open list is the evidence;
-// the linked set in the database is the memory of what was seen open, so a restart forgets
-// nothing.
+// pull requests are recorded: look up everything that closed since the last pass, then every
+// pull request last seen open that is no longer on the open list, and apply how each ended.
+// The open list is the evidence; the rows in the database are the memory of what was seen
+// open, so a restart forgets nothing.
 func (g *GitHub) syncPullLifecycle(ctx context.Context, installationID int64, owner, repo string, open []githubapp.PullRequest, projects []domain.Project) error {
-	if err := g.linkPulls(ctx, open, projects); err != nil {
-		return err
-	}
 	stillOpen := map[int]bool{}
 	for _, pr := range open {
 		stillOpen[pr.Number] = true
@@ -163,23 +137,22 @@ func (g *GitHub) syncPullLifecycle(ctx context.Context, installationID int64, ow
 		if pr.State != "closed" {
 			continue
 		}
-		if _, err := g.pullClosed(ctx, pr, projects); err != nil {
+		if _, err := g.pullClosed(ctx, installationID, pr, projects); err != nil {
 			return err
 		}
 	}
 	g.sweep.done(key, started)
 
-	// Linked pull requests that left the open list but were not in the sweep (older than
+	// Pull requests seen open that left the open list but were not in the sweep (older than
 	// its pages reach): look each one up.
 	lookups := 0
 	for _, p := range projects {
-		linked, err := g.store.TasksWithOpenPullRequests(ctx, p.ID)
+		numbers, err := g.store.OpenPullRequestNumbers(ctx, p.ID, owner+"/"+repo)
 		if err != nil {
 			return err
 		}
-		for _, t := range linked {
-			o, r, number, ok := parsePullURL(t.URL)
-			if !ok || !strings.EqualFold(o, owner) || !strings.EqualFold(r, repo) || stillOpen[number] {
+		for _, number := range numbers {
+			if stillOpen[number] {
 				continue
 			}
 			// The open list is capped (100, newest first). A pull request missing from it may
@@ -195,7 +168,7 @@ func (g *GitHub) syncPullLifecycle(ctx context.Context, installationID int64, ow
 			if pr.State != "closed" {
 				continue
 			}
-			if _, err := g.applyPullClosed(ctx, p, t.TaskID, pr); err != nil {
+			if _, err := g.applyPullClosed(ctx, installationID, p, pr); err != nil {
 				return err
 			}
 		}
@@ -203,19 +176,12 @@ func (g *GitHub) syncPullLifecycle(ctx context.Context, installationID int64, ow
 	return nil
 }
 
-// pullClosed applies a closed pull request (from a webhook) to whichever task it belongs to,
-// in each project the repository maps to.
-func (g *GitHub) pullClosed(ctx context.Context, pr githubapp.PullRequest, projects []domain.Project) ([]db.PullRequestOutcome, error) {
+// pullClosed applies a closed pull request (from a webhook or the sweep) in each project the
+// repository maps to.
+func (g *GitHub) pullClosed(ctx context.Context, installationID int64, pr githubapp.PullRequest, projects []domain.Project) ([]db.PullRequestOutcome, error) {
 	var out []db.PullRequestOutcome
 	for _, p := range projects {
-		taskID, _, ok, err := g.pullTask(ctx, p, pr)
-		if err != nil {
-			return out, err
-		}
-		if !ok {
-			continue
-		}
-		res, err := g.applyPullClosed(ctx, p, taskID, pr)
+		res, err := g.applyPullClosed(ctx, installationID, p, pr)
 		if err != nil {
 			return out, err
 		}
@@ -224,32 +190,46 @@ func (g *GitHub) pullClosed(ctx context.Context, pr githubapp.PullRequest, proje
 	return out, nil
 }
 
-func (g *GitHub) applyPullClosed(ctx context.Context, p domain.Project, taskID domain.ID, pr githubapp.PullRequest) (db.PullRequestOutcome, error) {
+// applyPullClosed records a closed pull request in a project — the row, its task link — then
+// its end, which completes or releases the task by db.EndPullRequest's rule: a merge
+// completes the task when it is the primary pull request or the last open one, and a close
+// without merging returns a waiting task to ready only when none of its pull requests is
+// still open.
+func (g *GitHub) applyPullClosed(ctx context.Context, installationID int64, p domain.Project, pr githubapp.PullRequest) (db.PullRequestOutcome, error) {
 	var res db.PullRequestOutcome
-	var err error
-	merged := pr.WasMerged()
-	event := "github.pr_closed"
-	if merged {
-		res, err = g.store.PullRequestMerged(ctx, taskID, pr.HTMLURL)
-		event = "github.pr_merged"
-	} else {
-		res, err = g.store.PullRequestClosed(ctx, taskID, pr.HTMLURL)
+	repo := pr.Repository()
+	if repo == "" {
+		return res, nil
 	}
+	rec, err := g.recordPullIn(ctx, installationID, p, repo, pr, rollupNever, false)
+	if err != nil {
+		return res, err
+	}
+	merged := pr.WasMerged()
+	res, err = g.store.EndPullRequest(ctx, p.ID, repo, pr.Number, merged)
 	if err != nil || !res.Recorded {
 		// Already on record (a redelivery, or the sweep seeing it again): nothing to say.
 		return res, err
 	}
+	if res.TaskRef == "" {
+		return res, nil
+	}
+	event := "github.pr_closed"
+	if merged {
+		event = "github.pr_merged"
+	}
 	payload := map[string]any{
 		"task_ref": res.TaskRef, "pull_request": pr.HTMLURL, "branch": pr.Head.Ref,
 		"from": string(res.From), "status": string(res.Status),
+		"repository": repo, "number": pr.Number,
 	}
 	if pr.MergeCommitSHA != "" && merged {
 		payload["commit_sha"] = pr.MergeCommitSHA
 	}
-	_ = g.store.AppendEvent(ctx, p.OrganizationID, p.ID, "", "task", taskID, event,
-		domain.VisibilityTeamSummary, payload)
+	_ = g.store.AppendEvent(ctx, p.OrganizationID, p.ID, "", "task", rec.row.TaskID, event,
+		eventVisibility(rec.row), payload)
 	g.logger.Info("pull request closed", "project", p.Slug, "task", res.TaskRef,
-		"merged", merged, "from", res.From, "status", res.Status)
+		"merged", merged, "from", res.From, "status", res.Status, "others_open", res.OthersOpen)
 	return res, nil
 }
 
@@ -275,7 +255,7 @@ func parsePullURL(u string) (owner, repo string, number int, ok bool) {
 // githubPullClosed handles a pull_request "closed" delivery. Unlike a check it is applied
 // before answering: it is a few database statements, and doing it inline means GitHub's
 // delivery log shows whether a merge actually completed a task.
-func (s *Server) githubPullClosed(w http.ResponseWriter, r *http.Request, owner, repo string, pr githubapp.PullRequest) {
+func (s *Server) githubPullClosed(w http.ResponseWriter, r *http.Request, installationID int64, owner, repo string, pr githubapp.PullRequest) {
 	if !githubapp.ValidRepo(owner, repo) {
 		s.ok(w, r, http.StatusAccepted, map[string]any{"ignored": "not a repository"})
 		return
@@ -287,7 +267,7 @@ func (s *Server) githubPullClosed(w http.ResponseWriter, r *http.Request, owner,
 		s.fail(w, r, err)
 		return
 	}
-	outcomes, err := s.github.pullClosed(ctx, pr, projects)
+	outcomes, err := s.github.pullClosed(ctx, installationID, pr, projects)
 	if err != nil {
 		s.logger.Warn("github pull request close failed", "repo", owner+"/"+repo, "pr", pr.Number, "error", err)
 		s.fail(w, r, err)

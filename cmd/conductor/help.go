@@ -347,7 +347,7 @@ Sources, and which are documented or not: docs/USAGE_LIMITS.md.
 
 	// Work
 	{name: "task", group: "Work", short: true,
-		subs:    []string{"list", "show", "create", "claim", "release", "done", "reopen", "handoff", "assign", "export"},
+		subs:    []string{"list", "show", "create", "claim", "release", "done", "reopen", "handoff", "assign", "export", "link-pr", "unlink-pr"},
 		summary: "file, claim, release, and hand off work",
 		topic: `conductor task — file work, take it, and hand it back
 
@@ -362,6 +362,8 @@ Usage:
   conductor task handoff <ref> --to <harness>  hand off to another harness
   conductor task assign <ref>                  offer work to a session that meets a floor
   conductor task export <ref>                  write the Markdown task card
+  conductor task link-pr <ref> <pull request>  link a pull request by hand (a number, owner/repo#N, or a URL)
+  conductor task unlink-pr <ref> <pull request>
 
 Example:
   conductor task create --title "Retry-aware routing" --scope dir:internal/router
@@ -369,6 +371,43 @@ Example:
 
 Run ` + "`conductor task <subcommand> -h`" + ` for its flags. --scope takes path:FILE, dir:DIR or
 migration:NAME, optionally followed by :read.
+`},
+	{name: "pulls", group: "Work", flags: true,
+		summary: "the project's pull requests: task, checks, review",
+		topic: `conductor pulls — the pull requests Conductor has seen on the project's repository
+
+Each line is one pull request with its task, author, checks, and review decision. Conductor
+keeps titles, states, and counts, never a pull request's body, comments, or logs. Run
+` + "`conductor github status`" + ` to see which repository the project is linked to.
+
+Usage:
+  conductor pulls [--open] [--all] [--mine] [--unlinked] [--needs-review] [--failing]
+                  [--task T-42] [--limit N] [--json]
+
+  --open          open pull requests (the default)
+  --all           merged and closed ones too
+  --mine          you opened it (by your linked GitHub account) or you own its task
+  --unlinked      not linked to any task
+  --needs-review  open, ready for review, and not yet approved or sent back
+  --failing       at least one failed check
+
+Example:
+  conductor pulls --needs-review
+`},
+	{name: "pull", group: "Work", flags: true,
+		summary: "one pull request: its task, checks, review, and attempts",
+		topic: `conductor pull — one pull request in detail
+
+Usage:
+  conductor pull <number | owner/repo#N | URL> [--repo owner/name] [--json]
+
+Shows the pull request's task and how it was linked (branch, a Conductor-Task trailer, a task
+reference in the body, or by hand), its checks, review decision, unresolved review threads,
+mergeability, size, and the task's attempts. A pull request of someone's private task shows its
+number and state only.
+
+Example:
+  conductor pull 118
 `},
 	{name: "inbox", group: "Work", flags: true,
 		summary: "work offered to this session",
