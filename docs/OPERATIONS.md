@@ -420,6 +420,17 @@ For less, run Postgres with continuous WAL archiving (RDS and most managed Postg
 with automated backups; self-hosted, `archive_mode` plus pgBackRest or WAL-G) and restore to
 a timestamp. conductord needs nothing special for either.
 
+**RDS deployments.** Enable RDS automated backups and set a retention period before
+cutover. Restore a point in time into a separate RDS instance during drills, then verify
+the restored Conductor schema and API with the separately backed-up secret-sealing key.
+The `conductor db archive-wal` and `base-backup` commands in [STORAGE.md](STORAGE.md)
+configure a local PostgreSQL server; they do not archive an RDS instance. If an operator
+also needs copies in its own S3 bucket, schedule a separate logical export and test its
+restore. Store database credentials in an owner-only secret file or secret manager and
+restart the affected services after rotating a password: the current pool reads its DSN
+at startup. A proposed paid hosted deployment is described in
+[HOSTED_DATABASE.md](HOSTED_DATABASE.md).
+
 **Drill it.** A backup that has never been restored is a hope. Periodically restore the
 latest dump into a scratch database, start a conductord against it with `--no-scheduler`
 on a spare port, and check `/v1/ready`.
