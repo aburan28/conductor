@@ -105,3 +105,30 @@ func TestValidateName(t *testing.T) {
 		t.Fatal("ShellName does not match portable identifiers")
 	}
 }
+
+// A secret is exported into contributors' shells and wrap's child environment, so a name a
+// loader, shell, git or runtime acts on would be code execution, not a credential.
+func TestReservedNamesAreRefused(t *testing.T) {
+	for _, name := range []string{"PATH", "path", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES",
+		"PROMPT_COMMAND", "BASH_ENV", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_SSH_COMMAND",
+		"NODE_OPTIONS", "BASH_FUNC_x%%", "npm_config_script_shell", "CONDUCTOR_ENDPOINT", "HTTPS_PROXY"} {
+		if !ReservedName(name) {
+			t.Errorf("ReservedName(%q) = false", name)
+		}
+	}
+	for _, name := range []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GITHUB_TOKEN", "NPM_TOKEN",
+		"PATHFINDER_KEY", "GIT_TOKEN", "DATABASE_URL"} {
+		if ReservedName(name) {
+			t.Errorf("ReservedName(%q) = true", name)
+		}
+	}
+
+	raw, err := secretbox.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := New(nil, &secretbox.Source{Env: raw}) // refused before the store is touched
+	if _, err := v.Set(context.Background(), domain.Project{ID: "p"}, "", SetRequest{Name: "LD_PRELOAD", Value: "/tmp/x.so"}); err == nil {
+		t.Error("the vault stored a secret named LD_PRELOAD")
+	}
+}

@@ -87,6 +87,65 @@ func TestQueueAdmissionOverHTTP(t *testing.T) {
 	}
 }
 
+// A task id names a task in any project, but a project's tasks and tickets can only refer
+// to its own: a dependency or a queue ticket on another project's task is refused as
+// unknown, so it neither links across projects nor confirms the id exists.
+func TestTaskReferencesStayInTheProject(t *testing.T) {
+	h := newHarness(t)
+	other := newHarness(t)
+	foreign := other.createTask(t, other.aliceTok, "another project's task")
+	own := h.createTask(t, h.aliceTok, "this project's task")
+
+	if code, body := h.do(h.aliceTok, http.MethodPost, h.projectPath("/tasks"), map[string]any{
+		"title": "depends across projects", "depends_on": []string{foreign.ID}}); code != http.StatusBadRequest {
+		t.Errorf("a dependency on another project's task = %d, want 400\n%s", code, body)
+	}
+	if code, body := h.do(h.aliceTok, http.MethodPost, h.projectPath("/tasks"), map[string]any{
+		"title": "depends within the project", "depends_on": []string{own.ID}}); code != http.StatusCreated {
+		t.Errorf("a dependency on this project's task = %d\n%s", code, body)
+	}
+	if code, body := h.do(h.aliceTok, http.MethodPost, h.projectPath("/queue"), map[string]any{
+		"kind": "session", "harness": "claude", "task": foreign.ID}); code != http.StatusNotFound {
+		t.Errorf("a ticket for another project's task = %d, want 404\n%s", code, body)
+	}
+}
+
+// route/explain on someone else's private task says where it would route and nothing about
+// why: no rationale, no matched rules, no features — as for its recorded decisions.
+func TestRouteExplainRedactsAPrivateTask(t *testing.T) {
+	h := newHarness(t)
+	h.seedProfiles(t)
+	code, body := h.do(h.bobTok, http.MethodPost, h.projectPath("/tasks"), map[string]any{
+		"title": "rotate the signing keys", "visibility": "private"})
+	if code != http.StatusCreated {
+		t.Fatalf("create task = %d\n%s", code, body)
+	}
+	var task struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(body, &task)
+	explain := func(tok string) map[string]any {
+		code, body := h.do(tok, http.MethodGet, "/v1/tasks/"+task.ID+"/route/explain", nil)
+		if code != http.StatusOK {
+			t.Fatalf("route/explain = %d\n%s", code, body)
+		}
+		var out map[string]any
+		_ = json.Unmarshal(body, &out)
+		return out
+	}
+	theirs := explain(h.aliceTok)
+	decision, _ := theirs["decision"].(map[string]any)
+	if theirs["redacted"] != true || theirs["features"] != nil || decision["model"] == "" {
+		t.Errorf("another member's explain = %v, want a redacted route", theirs)
+	}
+	if r, _ := decision["rationale"].([]any); len(r) != 0 || decision["matched_rules"] != nil {
+		t.Errorf("another member's explain carries the rationale: %v", decision)
+	}
+	if mine := explain(h.bobTok); mine["redacted"] == true || mine["features"] == nil {
+		t.Errorf("the owner's explain = %v, want it in full", mine)
+	}
+}
+
 // The swarm view rolls up capacity and is readable by any member.
 func TestSwarmView(t *testing.T) {
 	h := newHarness(t)

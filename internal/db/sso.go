@@ -282,6 +282,10 @@ type SSOLogin struct {
 	ExpiresAt       time.Time
 	// Set once the callback has issued a ticket.
 	PrincipalID domain.ID
+	// For a link sign-in, the account the provider verified and its GitHub organizations,
+	// staged by the callback and linked only when the ticket is redeemed.
+	LinkAccount ExternalAccount
+	LinkOrgs    []string
 }
 
 // maxSSOLoginsInFlight bounds unfinished sign-ins. Starting one needs no credential, so
@@ -314,12 +318,15 @@ func (s *Store) CreateSSOLogin(ctx context.Context, l SSOLogin) error {
 }
 
 const ssoLoginColumns = `state_hash, provider, client, nonce, verifier, binder_hash, client_challenge,
-	return_to, COALESCE(link_principal::text, ''), expires_at, COALESCE(principal_id::text, '')`
+	return_to, COALESCE(link_principal::text, ''), expires_at, COALESCE(principal_id::text, ''),
+	link_issuer, link_subject, link_email, link_orgs`
 
 func scanSSOLogin(row pgx.Row) (SSOLogin, error) {
 	var l SSOLogin
 	err := row.Scan(&l.StateHash, &l.Provider, &l.Client, &l.Nonce, &l.Verifier, &l.BinderHash,
-		&l.ClientChallenge, &l.ReturnTo, &l.LinkPrincipal, &l.ExpiresAt, &l.PrincipalID)
+		&l.ClientChallenge, &l.ReturnTo, &l.LinkPrincipal, &l.ExpiresAt, &l.PrincipalID,
+		&l.LinkAccount.Issuer, &l.LinkAccount.Subject, &l.LinkAccount.Email, &l.LinkOrgs)
+	l.LinkAccount.Provider = l.Provider
 	return l, err
 }
 
@@ -337,12 +344,18 @@ func (s *Store) ConsumeSSOState(ctx context.Context, stateHash string) (SSOLogin
 	return l, err == nil, err
 }
 
-// IssueSSOTicket attaches a one-time ticket for principalID to a consumed sign-in.
-func (s *Store) IssueSSOTicket(ctx context.Context, stateHash, ticketHash string, principalID domain.ID, ttl time.Duration) error {
+// IssueSSOTicket attaches a one-time ticket for principalID to a consumed sign-in. For a
+// link sign-in, link is the verified account the redemption will link (zero otherwise).
+func (s *Store) IssueSSOTicket(ctx context.Context, stateHash, ticketHash string, principalID domain.ID,
+	link ExternalAccount, linkOrgs []string, ttl time.Duration) error {
+	if linkOrgs == nil {
+		linkOrgs = []string{}
+	}
 	tag, err := s.pool.Exec(ctx, `
-		UPDATE sso_logins SET ticket_hash = $2, principal_id = $3::uuid, ticket_expires_at = now() + make_interval(secs => $4)
+		UPDATE sso_logins SET ticket_hash = $2, principal_id = $3::uuid, ticket_expires_at = now() + make_interval(secs => $4),
+		       link_issuer = $5, link_subject = $6, link_email = $7, link_orgs = $8
 		 WHERE state_hash = $1 AND used_at IS NOT NULL AND ticket_hash IS NULL`,
-		stateHash, ticketHash, principalID, ttl.Seconds())
+		stateHash, ticketHash, principalID, ttl.Seconds(), link.Issuer, link.Subject, link.Email, linkOrgs)
 	if err != nil {
 		return err
 	}

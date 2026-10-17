@@ -704,7 +704,9 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request, p domain.Pri
 		if dep == "" {
 			continue
 		}
-		if dt, err := s.store.GetTask(r.Context(), dep); err == nil {
+		// An id names a task in any project; only this project's count. A task elsewhere is
+		// reported as unknown, so the answer does not confirm that the id exists.
+		if dt, err := s.store.GetTask(r.Context(), dep); err == nil && dt.ProjectID == project.ID {
 			dependsOn = append(dependsOn, dt.ID)
 		} else if dt, err := s.store.GetTaskByRef(r.Context(), project.ID, dep); err == nil {
 			dependsOn = append(dependsOn, dt.ID)
@@ -822,11 +824,39 @@ func (s *Server) getTaskCard(w http.ResponseWriter, r *http.Request, p domain.Pr
 		lease = &l
 	}
 
+	// The card is one more read path, so it shows what the privacy projections show and no
+	// more: dependencies with the title, the commits with the artifacts (team_artifacts), and
+	// the worktree, harness and model as privacy.ProjectAttempt decides for this viewer.
+	viewer := caller.Viewer()
+	ownerRef := privacy.Owner{PrincipalID: owner.ID, Handle: owner.Handle}
+	view := privacy.ProjectTask(viewer, task, privacy.TaskProjection{Owner: ownerRef, DependsOn: task.DependsOn})
+	artifactsVisible := viewer.IsSelf(ownerRef) || task.Visibility.AtLeast(domain.VisibilityTeamArtifacts)
+	if !artifactsVisible {
+		task.BaseSHA = ""
+	}
+	if attempt != nil {
+		sponsor := privacy.Owner{PrincipalID: attempt.SponsorPrincipal}
+		if sp, err := s.store.GetPrincipal(r.Context(), attempt.SponsorPrincipal); err == nil {
+			sponsor.Handle = sp.Handle
+		}
+		av := privacy.ProjectAttempt(viewer, *attempt, sponsor,
+			privacy.AttemptTask{Owner: ownerRef, Visibility: task.Visibility},
+			privacy.AttemptPolicy{PublishModelIdentity: project.Config.PublishModelIdentity,
+				PublishHarnessIdentity: project.Config.PublishHarnessIdentity})
+		shown := domain.Attempt{AttemptNumber: av.AttemptNumber, Role: av.Role, Branch: av.Branch,
+			WorktreePath: av.WorktreePath, Harness: av.Harness, ModelAlias: av.ModelAlias,
+			ResolvedModel: av.ResolvedModel, ReasoningEffort: av.Effort}
+		if artifactsVisible {
+			shown.BaseCommitSHA, shown.CommitSHA = av.BaseSHA, av.CommitSHA
+		}
+		attempt = &shown
+	}
+
 	card := taskcard.FromTask(task, project.Slug, owner.Handle, attempt, lease,
-		reservations, task.DependsOn, project.Config.RequiredChecks)
-	if redacted && (attempt == nil || attempt.SponsorPrincipal != caller.Principal.ID) {
-		// Where the work runs is task detail, as in privacy.ProjectAttempt.
-		card.Worktree = ""
+		reservations, view.DependsOn, project.Config.RequiredChecks)
+	if attempt != nil && attempt.Harness == "" {
+		// The executor names the harness; without it the card says only which attempt runs.
+		card.Executor = fmt.Sprintf("agent:attempt-%d", attempt.AttemptNumber)
 	}
 	if lease != nil && card.Lease != nil {
 		// Everyone may see that the task is held, by whom, and until when — that is what

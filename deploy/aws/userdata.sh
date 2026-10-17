@@ -3,7 +3,12 @@
 # both under systemd. launch.py fills in the three double-underscore values below before sending it.
 # Progress goes to the serial console, so `ec2 get-console-output` shows it without SSH.
 set -euo pipefail
-exec > >(tee -a /var/log/conductor-bootstrap.log /dev/console) 2>&1
+# The log ends up holding the administrator token printed below, so it is root-only before
+# anything is written to it: tee would otherwise create it 0644 under the default umask.
+BOOTSTRAP_LOG=/var/log/conductor-bootstrap.log
+(umask 077 && touch "$BOOTSTRAP_LOG")
+chmod 0600 "$BOOTSTRAP_LOG"
+exec > >(tee -a "$BOOTSTRAP_LOG" /dev/console) 2>&1
 echo "conductor-bootstrap: start $(date -u +%FT%TZ)"
 
 COMMIT="__COMMIT__"          # full commit sha of github.com/aburan28/conductor to build

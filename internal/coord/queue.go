@@ -142,9 +142,13 @@ func (s *Service) emitTicket(ctx context.Context, project domain.Project, actor 
 		})
 }
 
-// resolveTask finds a task by id or project-scoped ref.
+// resolveTask finds a task of projectID by id or project-scoped ref. A task id from another
+// project is not found: the caller was authorized for this project, not that one.
 func resolveTask(ctx context.Context, store *db.Store, projectID domain.ID, ref string) (domain.Task, error) {
 	if task, err := store.GetTask(ctx, ref); err == nil {
+		if task.ProjectID != projectID {
+			return domain.Task{}, domain.ErrNotFound
+		}
 		return task, nil
 	} else if !errors.Is(err, domain.ErrNotFound) && !badUUID(err) {
 		return domain.Task{}, err

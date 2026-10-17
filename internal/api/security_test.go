@@ -354,6 +354,80 @@ func TestTaskCardShowsLeaseIdentifiersOnlyToTheHolder(t *testing.T) {
 	}
 }
 
+// The card is a read path like any other: a private task's commits and dependencies stay
+// with its owner, and the harness and model follow the project's publish switches.
+func TestTaskCardFollowsThePrivacyProjections(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	cfg := h.project.Config
+	cfg.PublishModelIdentity, cfg.PublishHarnessIdentity = false, false
+	if err := h.store.UpdateProjectConfig(ctx, h.project.ID, cfg); err != nil {
+		t.Fatal(err)
+	}
+	const base = "0123456789abcdef0123456789abcdef01234567"
+	started := h.startWork(h.bobTok, map[string]any{"summary": "card privacy", "title": "Card privacy",
+		"visibility": "private", "harness": "zqxharness", "model_alias": "zqxmodel", "base_sha": base,
+		"scopes": []map[string]any{{"resource": "path:card/privacy.go", "mode": "write_exclusive"}}})
+	card := func(tok string) string {
+		code, body := h.do(tok, http.MethodGet, "/v1/tasks/"+started.TaskID+"/card", nil)
+		if code != http.StatusOK {
+			t.Fatalf("card = %d\n%s", code, body)
+		}
+		return string(body)
+	}
+	mine, theirs := card(h.bobTok), card(h.aliceTok)
+	for _, want := range []string{base, "zqxharness", "zqxmodel"} {
+		if !strings.Contains(mine, want) {
+			t.Errorf("the owner's card lacks %q:\n%s", want, mine)
+		}
+	}
+	for _, leak := range []string{base, "zqxharness", "zqxmodel"} {
+		if strings.Contains(theirs, leak) {
+			t.Errorf("another member's card carries %q:\n%s", leak, theirs)
+		}
+	}
+	if !strings.Contains(theirs, "card/privacy.go") {
+		t.Errorf("another member's card lost the task's territory:\n%s", theirs)
+	}
+}
+
+// Where model identity is not published, ?model= is not an oracle for who uses a model:
+// the filter covers only the caller's own usage.
+func TestUsageModelFilterFollowsPublishModelIdentity(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	cfg := h.project.Config
+	cfg.PublishModelIdentity = false
+	if err := h.store.UpdateProjectConfig(ctx, h.project.ID, cfg); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339)
+	if code, body := h.do(h.bobTok, http.MethodPost, h.projectPath("/usage"), map[string]any{"buckets": []map[string]any{{
+		"harness": "claude", "external_session_id": "s-1", "model": "zqx-secret-model", "bucket_start": start,
+		"requests": 1, "input_tokens": 100, "output_tokens": 50}}}); code != http.StatusOK {
+		t.Fatalf("sync usage = %d\n%s", code, body)
+	}
+	total := func(tok string) float64 {
+		code, body := h.do(tok, http.MethodGet, h.projectPath("/usage?since=1d&by=principal&model=zqx-secret-model"), nil)
+		if code != http.StatusOK {
+			t.Fatalf("usage = %d\n%s", code, body)
+		}
+		var report struct {
+			Total struct {
+				TotalTokens float64 `json:"total_tokens"`
+			} `json:"total"`
+		}
+		_ = json.Unmarshal(body, &report)
+		return report.Total.TotalTokens
+	}
+	if got := total(h.aliceTok); got != 0 {
+		t.Errorf("another member's ?model= matched bob's usage (%v tokens)", got)
+	}
+	if got := total(h.bobTok); got != 150 {
+		t.Errorf("bob's own ?model= = %v tokens, want 150", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // H4: private task content on read paths
 // ---------------------------------------------------------------------------
