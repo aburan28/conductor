@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/aburan28/conductor/compare/v0.1.2...v0.1.3) (2026-10-17)
+
+
+### Features
+
+* **network:** add private WireGuard plans and offline discovery ([#78](https://github.com/aburan28/conductor/issues/78)) ([8b9e99a](https://github.com/aburan28/conductor/commit/8b9e99a68229aa4d5b3d42b45237dcfed72869de))
+
 ## [0.1.2](https://github.com/aburan28/conductor/compare/v0.1.1...v0.1.2) (2026-10-17)
 
 
