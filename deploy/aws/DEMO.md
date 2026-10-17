@@ -20,7 +20,10 @@ Checked:
   --token-ttl 24h`, a request with the token (200, `admin`), and without it (401), and no
   login file written;
 - `userdata.sh` passes `bash -n`, `launch.py` compiles, and the user-data renders for both
-  `amd64` and `arm64` within EC2's 16 KB limit.
+  `amd64` and `arm64` within EC2's 16 KB limit;
+- offline, against a fake EC2/SSM: `plan` creates nothing, shows a closed port by default and
+  the open CIDR when given one, stops on a DryRun refusal and on an existing instance;
+  `plan` and `launch` build the same request.
 
 Not checked: cloud-init, the systemd unit, the Go build on a `t3.small`, and every EC2 and SSM
 call. Expect the first real launch to need a fix or two.
@@ -30,23 +33,41 @@ call. Expect the first real launch to need a fix or two.
 ```sh
 pip install boto3
 # credentials from any boto3 source, e.g. AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
-python3 deploy/aws/launch.py launch --region us-east-1 --allow-cidr 203.0.113.9/32
-python3 deploy/aws/launch.py allow  --allow-cidr 203.0.113.9/32   # open the port later
+python3 deploy/aws/launch.py plan   --region us-east-1 --allow-my-ip   # preview: creates nothing
+python3 deploy/aws/launch.py launch --region us-east-1 --allow-my-ip
+python3 deploy/aws/launch.py launch --region us-east-1 --allow-cidr 203.0.113.9/32   # or name it yourself
+python3 deploy/aws/launch.py allow  --allow-my-ip                 # open the port later
 python3 deploy/aws/launch.py status
 python3 deploy/aws/launch.py teardown                             # removes everything it made
 ```
 
-Without `--allow-cidr` the port stays closed. `0.0.0.0/0` is refused unless you also pass
-`--allow-world`. `--commit` chooses what to build (a full 40-character sha; the default is
-the `main` this was written against). The first admin token (valid 24 hours) is written to
-`conductor-admin-token.txt` with mode 0600. The bootstrap takes about five to eight minutes,
-because the instance builds Conductor from source.
+`plan` takes the same flags as `launch` and creates nothing. It resolves the AMI, the VPC and
+subnet, asks EC2 to validate the instance request with `DryRun` (it does not dry-run the
+security group, which has no such call here), and prints the instance type, the address the
+port would be opened to, the commit and the user-data size. Run it first, read it, then run
+`launch` with the same flags.
+
+Without `--allow-cidr` or `--allow-my-ip` the port stays closed. `0.0.0.0/0` is refused unless
+you also pass `--allow-world`.
+
+`--allow-my-ip` looks up the public IPv4 address of **the machine running the script** (it asks
+api.ipify.org, then ipv4.icanhazip.com, then checkip.amazonaws.com), prints it, and opens the
+port to that one `/32`. So run it from the machine you will browse from. If you run it somewhere
+else (a CI runner, a cloud sandbox, a jump host) that machine's address is the one that gets
+opened, not yours, and such hosts often send traffic from a changing pool of addresses. Behind a
+shared NAT, VPN or office network the address is the shared one, so everyone behind it can reach
+the port (the admin token is still required). An IPv6-only answer is not usable, because the
+security group is IPv4; the script then asks you to pass `--allow-cidr`. `--commit` chooses what
+to build (a full 40-character sha; the default is the `main` this was written against). The
+first admin token (valid 24 hours) is written to `conductor-admin-token.txt` with mode 0600.
+The bootstrap takes about five to eight minutes, because the instance builds Conductor from
+source.
 
 ## What it creates
 
 Everything is tagged `conductor-aws-demo=<name>`:
 
-- one security group, with TCP 8443 open to `--allow-cidr` only;
+- one security group, with TCP 8443 open to `--allow-cidr` / `--allow-my-ip` only;
 - one instance (`t3.small` by default; an instance type ending in `g` selects `arm64`), a 20 GB
   encrypted gp3 root volume, IMDSv2 required, a public IPv4 address.
 
