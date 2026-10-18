@@ -14,6 +14,7 @@ import { renderConnect } from './views/connect.js';
 import { openTaskDrawer } from './views/task-detail.js';
 import home from './views/home.js';
 import tasks from './views/tasks.js';
+import delphi from './views/delphi.js';
 import people from './views/people.js';
 import more from './views/more.js';
 import fleet from './views/fleet.js';
@@ -32,6 +33,7 @@ import adminView from './views/admin.js';
 const CORE = [
   { path: '/', name: 'home', label: 'Home', icon: 'home', view: home, key: 'h' },
   { path: '/tasks', name: 'tasks', label: 'Tasks', icon: 'tasks', view: tasks, key: 't' },
+  { path: '/delphi', name: 'delphi', label: 'Delphi', icon: 'events', view: delphi, key: 'd' },
   { path: '/people', name: 'people', label: 'People', icon: 'people', view: people, key: 'p' },
 ];
 const MORE = [
