@@ -18,7 +18,8 @@ func TestWIFChildEnvOverridesCredentials(t *testing.T) {
 	got := wifChildEnv([]string{
 		"PATH=/bin", "ANTHROPIC_API_KEY=old", "ANTHROPIC_AUTH_TOKEN=old",
 		"CLAUDE_CODE_OAUTH_TOKEN=old",
-		"ANTHROPIC_PROFILE=old", "ANTHROPIC_BASE_URL=https://other.example",
+		"ANTHROPIC_PROFILE=old", "ANTHROPIC_CUSTOM_HEADERS=X-Api-Key: old",
+		"ANTHROPIC_BASE_URL=https://other.example",
 		"CLAUDE_CODE_USE_BEDROCK=1", "ANTHROPIC_FEDERATION_RULE_ID=old",
 	}, map[string]string{
 		"ANTHROPIC_FEDERATION_RULE_ID":  "fdrl_new",
@@ -27,7 +28,7 @@ func TestWIFChildEnvOverridesCredentials(t *testing.T) {
 	s := strings.Join(got, "\n")
 	for _, forbidden := range []string{"ANTHROPIC_API_KEY=", "ANTHROPIC_AUTH_TOKEN=",
 		"CLAUDE_CODE_OAUTH_TOKEN=",
-		"ANTHROPIC_PROFILE=", "ANTHROPIC_BASE_URL=", "CLAUDE_CODE_USE_BEDROCK=", "fdrl_old"} {
+		"ANTHROPIC_PROFILE=", "ANTHROPIC_CUSTOM_HEADERS=", "ANTHROPIC_BASE_URL=", "CLAUDE_CODE_USE_BEDROCK=", "fdrl_old"} {
 		if strings.Contains(s, forbidden) {
 			t.Fatalf("conflicting credential leaked into child: %s", s)
 		}
@@ -85,8 +86,11 @@ func TestWIFExecMintsLocalAssertionForSupportedClients(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test shim uses a POSIX shell")
 	}
-	for _, executable := range []string{"claude", "delphi"} {
+	for _, executable := range []string{"claude", "delphi", "conductord"} {
 		t.Run(executable, func(t *testing.T) {
+			if executable == "conductord" {
+				t.Setenv("CONDUCTOR_DELPHI_WIF_PROJECT_ID", "project-test-id")
+			}
 			dir := t.TempDir()
 			keyPath := filepath.Join(dir, "issuer.pem")
 			if _, err := wif.CreateLocalKey(keyPath); err != nil {
@@ -135,7 +139,17 @@ func TestWIFExecDoesNotWrapHostedDelphi(t *testing.T) {
 		"--provider", "local", "--rule-id", "fdrl_test", "--organization-id", "org-test",
 		"--service-account-id", "svac_test", "--", "conductor", "delphi", "ask",
 	})
-	if err == nil || !strings.Contains(err.Error(), "accepts only claude, delphi, or conductor wrap claude") {
+	if err == nil || !strings.Contains(err.Error(), "accepts only claude, delphi, project-scoped conductord, or conductor wrap claude") {
 		t.Fatalf("unexpected hosted Delphi result: %v", err)
+	}
+}
+
+func TestWIFExecConductordRequiresProject(t *testing.T) {
+	err := cmdWIFExec(context.Background(), []string{
+		"--provider", "local", "--rule-id", "fdrl_test", "--organization-id", "org-test",
+		"--service-account-id", "svac_test", "--", "conductord",
+	})
+	if err == nil || !strings.Contains(err.Error(), "CONDUCTOR_DELPHI_WIF_PROJECT_ID") {
+		t.Fatalf("unscoped server unexpectedly accepted: %v", err)
 	}
 }

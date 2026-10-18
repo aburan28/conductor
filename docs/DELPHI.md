@@ -9,10 +9,11 @@ about while it carries on.
 
 It runs in two forms:
 
-- **Hosted by conductord** (this page). Members and agents submit through the API or
-  `conductor delphi`. Keys come from the project vault, and a background loop polls the
-  providers. Spend lands in the usage ledger, and a linked task's timeline is told when
-  the answer is in.
+- **Hosted by conductord** (this page). Members and agents submit through the
+  Conductor UI, API, or `conductor delphi`. Anthropic can use the server's
+  project-scoped workload identity, while other projects and OpenAI use project
+  vault keys. A background loop polls the providers. Spend lands in the usage
+  ledger, and a linked task's timeline is told when the answer is in.
 - **Standalone**: `cmd/delphi`, one binary with a local file-backed queue and
   credentials from the environment (API key or Anthropic workload identity
   federation), for use without a control plane. Run `delphi` with no arguments
@@ -53,10 +54,52 @@ Mythos availability is a separate model entitlement.
 For a persistent local queue, wrap `delphi serve` the same way. Queue work with
 `delphi ask -prompt "..."` and read a finished response with `delphi get -wait
 ID`. The `conductor delphi ask` command below uses the hosted `conductord`
-service and its project vault credential; a WIF wrapper on the laptop does
-not change that server-side authentication.
+service. A WIF wrapper on the laptop only changes hosted authentication if it
+also starts that `conductord` process as described below.
 
 ### Hosted Delphi
+
+Open the Conductor dashboard and choose **Delphi** in the navigation. Pick a
+model-catalog profile or enter a provider and model ID, set effort and the
+output-token ceiling, enter a question, then select **Launch batch**. The page
+shows progress and offers **Read answer** when the batch succeeds or refuses. It keeps
+question drafts and fetched answers in browser memory only; navigation or reload
+discards them. The server stores request metadata but not question or answer text.
+Contributors and higher project roles can launch and read answers; observers
+and reviewers see metadata.
+
+For an Anthropic project using workload identity, configure the issuer and
+federation rule in [ANTHROPIC_WIF.md](ANTHROPIC_WIF.md). Set the **Conductor
+project ID** from Settings, then start the server through the WIF wrapper on
+the same machine as the server:
+
+```sh
+export CONDUCTOR_DELPHI_WIF_PROJECT_ID='YOUR_CONDUCTOR_PROJECT_ID'
+conductor wif exec \
+  --provider local \
+  --issuer https://oidc.YOUR-DOMAIN.example/conductor \
+  --subject conductor:laptop:YOUR-LAPTOP \
+  --rule-id fdrl_YOUR_RULE \
+  --organization-id YOUR_ORGANIZATION_UUID \
+  --service-account-id svac_YOUR_SERVICE_ACCOUNT \
+  --workspace-id wrkspc_YOUR_WORKSPACE \
+  -- conductord --config ./leader.yaml
+```
+
+`conductord` must be on `PATH`; use the usual server config and database.
+The wrapper rotates a short-lived identity assertion file while the server
+runs. For that one project, hosted Delphi uses Anthropic federation and never
+opens its vault API key. Other projects continue to use their own vault keys;
+OpenAI still uses its project vault key. Do not set `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_PROFILE`, `ANTHROPIC_CUSTOM_HEADERS`,
+`ANTHROPIC_BASE_URL`, or `ANTHROPIC_IDENTITY_TOKEN` on
+the server process: hosted WIF rejects those overrides. The Anthropic service
+account must belong to the selected Anthropic workspace, and that workspace
+must have access to the requested model. If the server runs remotely, its own
+host needs an available WIF identity provider; a browser or laptop token does
+not supply credentials to a remote server.
+
+For projects using API keys instead, install keys in the project vault:
 
 ```sh
 conductor secrets set ANTHROPIC_API_KEY      # and/or OPENAI_API_KEY (maintainers)
