@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.6](https://github.com/aburan28/conductor/compare/v0.1.5...v0.1.6) (2026-10-18)
+
+
+### Features
+
+* **delphi:** launch project batches from dashboard with scoped WIF ([#98](https://github.com/aburan28/conductor/issues/98)) ([e6d99fb](https://github.com/aburan28/conductor/commit/e6d99fb5afb23fc873c63ec63bb6ac6b7e4f690f))
+
+
+### Bug Fixes
+
+* **test:** give the throwaway PostgreSQL a locale so PostgreSQL 18 starts on macOS ([#94](https://github.com/aburan28/conductor/issues/94)) ([d99a2bb](https://github.com/aburan28/conductor/commit/d99a2bbb23d5e59862d7614886e414c95c3dfe13))
+
 ## [0.1.5](https://github.com/aburan28/conductor/compare/v0.1.4...v0.1.5) (2026-10-17)
 
 
