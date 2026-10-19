@@ -437,6 +437,8 @@ func TestUsageModelFilterFollowsPublishModelIdentity(t *testing.T) {
 var privateMarkers = []string{
 	"ZQXTITLE", "ZQXOBJECTIVE", "ZQXCRITERION", "ZQXINTENT", "ZQXSUMMARY", "ZQXBLOCKER",
 	"ZQXHANDOFFWORK", "ZQXDECISION", "ZQXQUESTION", "ZQXPATH", "ZQXWORKTREE",
+	// A pull request of the private task (docs/COLLABORATION.md §4.5): its title and branch.
+	"ZQXPRTITLE", "ZQXPRBRANCH",
 }
 
 // TestNoGETRouteLeaksAPrivateTask builds a private task with an attempt, progress, a handoff,
@@ -492,7 +494,21 @@ func TestNoGETRouteLeaksAPrivateTask(t *testing.T) {
 		t.Fatalf("handoff = %d\n%s", code, body)
 	}
 
+	// The private task's pull request: others may know it exists, by number and state, and
+	// nothing of what it says.
+	if _, _, err := h.store.UpsertPullRequest(ctx, db.PullRequestUpsert{ProjectID: h.project.ID, Repository: "acme/widgets", Number: 7,
+		URL: "https://github.com/acme/widgets/pull/7", State: db.PullRequestOpen, Title: "ZQXPRTITLE rework billing",
+		HeadRef: "ZQXPRBRANCH", HeadSHA: "abc", AuthorLogin: "alice-gh"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.LinkPullRequestTask(ctx, h.project.ID, "acme/widgets", 7, started.TaskID, db.LinkManual); err != nil {
+		t.Fatal(err)
+	}
+
 	// The owner sees their own words — otherwise this test proves nothing.
+	if _, body := h.do(h.aliceTok, http.MethodGet, h.projectPath("/pulls"), nil); !strings.Contains(string(body), "ZQXPRTITLE") || !strings.Contains(string(body), "ZQXPRBRANCH") {
+		t.Fatalf("the owner cannot see their own pull request:\n%s", body)
+	}
 	if _, body := h.do(h.aliceTok, http.MethodGet, "/v1/tasks/"+started.TaskID+"/handoff", nil); !strings.Contains(string(body), "ZQXHANDOFFWORK") {
 		t.Fatalf("the owner cannot see their own handoff:\n%s", body)
 	}
@@ -504,6 +520,7 @@ func TestNoGETRouteLeaksAPrivateTask(t *testing.T) {
 		"{project}": h.project.ID, "{task}": started.TaskID, "{attempt}": started.AttemptID,
 		"{session}": session.ID, "{ticket}": ticket.ID, "{provider}": "google",
 		"{id}": string(h.alice.ID), "{name}": "does-not-exist", "{ref}": "does-not-exist",
+		"{owner}": "acme", "{repo}": "widgets", "{number}": "7",
 	}
 	routes := []string{
 		"/v1/whoami", "/v1/projects", "/v1/projects/{project}", "/v1/projects/{project}/members",
@@ -516,6 +533,10 @@ func TestNoGETRouteLeaksAPrivateTask(t *testing.T) {
 		"/v1/projects/{project}/status", "/v1/projects/{project}/swarm",
 		"/v1/projects/{project}/tasks", "/v1/projects/{project}/usage",
 		"/v1/projects/{project}/external-observations",
+		// Pull requests: the list (also asked by task, so a private task's own are targeted)
+		// and one pull request with its task and attempts.
+		"/v1/projects/{project}/pulls", "/v1/projects/{project}/pulls?task={task}&state=all",
+		"/v1/projects/{project}/pulls/{owner}/{repo}/{number}",
 		"/v1/queue/{ticket}", "/v1/sessions/{session}/assignments?all=true",
 		"/v1/tasks/{task}", "/v1/tasks/{task}/attempts", "/v1/tasks/{task}/card",
 		"/v1/tasks/{task}/decisions", "/v1/tasks/{task}/handoff", "/v1/tasks/{task}/route/explain",

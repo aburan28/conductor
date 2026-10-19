@@ -1338,6 +1338,13 @@ Where it does not, the Git watcher detects drift after the tool batch and pauses
 
 ### 17.5 Issue tracker sync
 
+> Pull requests are first-class objects too, on the same GitHub App: a `pull_requests` table
+> (migration 0020), several per task with a primary one, linked by precedence, with checks,
+> review, and mergeability read in one GraphQL call. That is COLLABORATION.md §4.5 (phase A)
+> and the README's "Pull requests as a list". The merge/close rule in this section's "a pull
+> request's `Closes #N`…" bullets is unchanged: the task is done when its primary pull request
+> or its last open one merges.
+
 Conductor does not replace the team's tracker (§3.2); it reads from it. A separate task
 backlog is an adoption tax, so a project can opt in to having its tracker's issues become
 tasks, and to having each task's claim and completion written back to its issue.

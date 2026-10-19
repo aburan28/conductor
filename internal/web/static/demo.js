@@ -277,6 +277,7 @@ export function installDemo(api) {
     if (m('v1/projects/:p/queue') && method === 'POST') return demoEnqueue(body);
     if ((mm = m('v1/queue/:id')) && method === 'DELETE') { const t = D.queue.tickets.find(x => x.id === mm.id); if (t) t.state = 'cancelled'; repositionQueue(); return null; }
     if (m('v1/projects/:p/usage')) return demoUsage(q);
+    if (m('v1/projects/:p/pulls') && method === 'GET') return { pulls: [] };
     if (m('v1/projects/:p/tasks') && method === 'GET') return { tasks: filterTasks(q) };
     if (m('v1/projects/:p/tasks') && method === 'POST') return demoCreateTask(body);
 

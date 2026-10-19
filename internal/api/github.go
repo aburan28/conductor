@@ -98,6 +98,10 @@ type GitHub struct {
 	// sweep remembers, per repository, when closed pull requests were last swept, so the
 	// poller pages only through what closed since (github_merge.go).
 	sweep pullSweep
+	// memory is what the pull request poller remembers between passes (github_pulls.go).
+	memory pullMemory
+	// refresh rate-limits on-demand pull request reads (github_pulls_http.go).
+	refresh pullRefreshLimiter
 }
 
 // credsRefresh bounds how long a replica keeps serving an app another replica has replaced.
@@ -371,7 +375,7 @@ func (g *GitHub) pollOnce(ctx context.Context) error {
 			if len(projects) == 0 {
 				continue
 			}
-			pulls, err := c.OpenPullRequests(ctx, inst.ID, repo.Owner, repo.Name)
+			pulls, changed, err := g.openPulls(ctx, c, inst.ID, repo.Owner, repo.Name)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("%s: %w", repo.FullName, err))
 				continue
@@ -379,6 +383,11 @@ func (g *GitHub) pollOnce(ctx context.Context) error {
 			for i, pr := range pulls {
 				if i >= maxPullsPerRepo {
 					break
+				}
+				// Every open pull request becomes a row, drafts included; an unchanged list
+				// (a 304) rewrites none of them, only re-reads what has gone stale.
+				if err := g.recordPull(ctx, inst.ID, pr, projects, rollupIfStale, !changed); err != nil {
+					errs = append(errs, err)
 				}
 				if pr.Draft {
 					continue
@@ -766,6 +775,9 @@ func md(s string) string {
 // ---------------------------------------------------------------------------
 
 func (s *Server) githubRoutes(m *http.ServeMux) {
+	// The pull request list reads the database, so it is served even where no app is
+	// configured; only refreshing from GitHub needs one (github_pulls_http.go).
+	s.pullRoutes(m)
 	if s.github == nil {
 		return
 	}
@@ -1118,7 +1130,10 @@ const maxWebhookBody = 5 << 20
 // webhookEvents are the deliveries the handler acts on; anything else is acknowledged
 // without reading the body.
 var webhookEvents = map[string]bool{"ping": true, "installation": true, "installation_repositories": true,
-	"pull_request": true, "issues": true}
+	"pull_request": true, "issues": true,
+	// Each of these only says a pull request's rollup or head may have moved (github_pulls.go).
+	"pull_request_review": true, "pull_request_review_comment": true, "issue_comment": true,
+	"check_suite": true, "check_run": true, "status": true, "push": true}
 
 func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 	c := s.github.current(r.Context())
@@ -1158,6 +1173,10 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 	case "issues":
 		s.githubIssueEvent(w, r, body)
 		return
+	case "pull_request_review", "pull_request_review_comment", "issue_comment",
+		"check_suite", "check_run", "status", "push":
+		s.githubPullSignal(w, r, event, body)
+		return
 	}
 	var ev struct {
 		Action      string                `json:"action"`
@@ -1179,16 +1198,16 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	owner, repo := ev.Repository.Owner.Login, ev.Repository.Name
 	switch ev.Action {
-	case "opened", "reopened", "synchronize", "ready_for_review", "edited":
+	case "opened", "reopened", "synchronize", "ready_for_review", "converted_to_draft", "edited":
 	case "closed":
-		s.githubPullClosed(w, r, owner, repo, ev.PullRequest)
+		s.githubPullClosed(w, r, ev.Installation.ID, owner, repo, ev.PullRequest)
 		return
 	default:
 		s.ok(w, r, http.StatusAccepted, map[string]any{"ignored": ev.Action})
 		return
 	}
-	if ev.PullRequest.Draft || ev.Installation.ID == 0 || !githubapp.ValidRepo(owner, repo) {
-		s.ok(w, r, http.StatusAccepted, map[string]any{"ignored": "draft, not installed, or not a repository"})
+	if ev.Installation.ID == 0 || !githubapp.ValidRepo(owner, repo) {
+		s.ok(w, r, http.StatusAccepted, map[string]any{"ignored": "not installed, or not a repository"})
 		return
 	}
 	// Answer GitHub at once (it times a delivery out after ten seconds) and check in the
@@ -1202,8 +1221,12 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		if err != nil || len(projects) == 0 {
 			return
 		}
-		if err := s.github.linkPulls(ctx, []githubapp.PullRequest{ev.PullRequest}, projects); err != nil {
-			s.logger.Warn("github link failed", "repo", owner+"/"+repo, "pr", ev.PullRequest.Number, "error", err)
+		if err := s.github.recordPull(ctx, ev.Installation.ID, ev.PullRequest, projects, rollupAlways, false); err != nil {
+			s.logger.Warn("github record failed", "repo", owner+"/"+repo, "pr", ev.PullRequest.Number, "error", err)
+		}
+		// A draft is listed but not checked: the check run is for pull requests ready to merge.
+		if ev.PullRequest.Draft {
+			return
 		}
 		if _, err := s.github.checkPull(ctx, ev.Installation.ID, owner, repo, ev.Repository.Private, ev.PullRequest, projects); err != nil {
 			s.logger.Warn("github check failed", "repo", owner+"/"+repo, "pr", ev.PullRequest.Number, "error", err)

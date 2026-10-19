@@ -210,6 +210,28 @@ func summarize(typ, subject string, d map[string]any) string {
 	case "github.pr_checked":
 		s := with("Checked a pull request", "branch", " on %s")
 		return with(s, "outcome", ": %s")
+	case "github.pr_opened":
+		return with(pullSubject(d, task, "opened"), "branch", " (%s)")
+	case "github.pr_updated":
+		return pullSubject(d, task, "has new commits")
+	case "github.pr_ready":
+		return pullSubject(d, task, "is ready for review")
+	case "github.pr_review":
+		switch str(d, "decision") {
+		case "approved":
+			return pullSubject(d, task, "was approved")
+		case "changes_requested":
+			return pullSubject(d, task, "has changes requested")
+		case "review_required":
+			return pullSubject(d, task, "needs a review")
+		}
+		return pullSubject(d, task, "review changed")
+	case "github.pr_checks":
+		if failed, _ := num(d, "failed"); failed > 0 {
+			return pullSubject(d, task, fmt.Sprintf("has %d failing check(s)", int(failed)))
+		}
+		passed, _ := num(d, "passed")
+		return pullSubject(d, task, fmt.Sprintf("checks passed (%d)", int(passed)))
 	case "task.pull_request_linked":
 		return "A pull request was linked to " + task
 	case "task.claimed":
@@ -340,4 +362,18 @@ func discordBody(m Message) ([]byte, error) {
 		"content":          content,
 		"allowed_mentions": map[string]any{"parse": []string{}},
 	})
+}
+
+// pullSubject names the pull request an event is about — "Pull request acme/widgets#12",
+// with the task when the event may name it — followed by what happened. The title is never in
+// an event payload, so it is never in a notification.
+func pullSubject(d map[string]any, task, what string) string {
+	s := "Pull request"
+	if repo, n := str(d, "repository"), str(d, "number"); repo != "" && n != "" {
+		s += " " + repo + "#" + n
+	}
+	if ref := str(d, "task_ref"); ref != "" {
+		s += " (" + task + ")"
+	}
+	return s + " " + what
 }

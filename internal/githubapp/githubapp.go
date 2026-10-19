@@ -292,10 +292,17 @@ var Permissions = map[string]string{
 	"pull_requests": "read",  // pull request events and their file lists
 	"checks":        "write", // the "Conductor" check run on each pull request
 	"issues":        "write", // issue sync: read issues; comment, label, and close them
+	"statuses":      "read",  // commit statuses, part of a pull request's check rollup
 }
 
 // Events Conductor subscribes to. Installation events are always delivered.
-var Events = []string{"pull_request", "push", "issues"}
+//
+// The pull request set feeds the pull-request list (internal/api/github_pulls.go): reviews and
+// comments change a pull request's review decision and thread count, check suites, check runs
+// and statuses change its check rollup, and a push moves a head or the base it merges into.
+// Only counts and states are kept; no comment, review, or log text is ever stored.
+var Events = []string{"pull_request", "pull_request_review", "pull_request_review_comment", "issue_comment",
+	"check_suite", "check_run", "status", "push", "issues"}
 
 // Grants reports whether a permission set (an installation's or the app's) grants name at
 // level or above: write implies read.
@@ -441,8 +448,11 @@ const (
 // call is one request to GitHub. header carries conditional-request headers (If-None-Match).
 type call struct {
 	method, path, bearer string
-	body, out            any
-	header               http.Header
+	// url, when set, is the full address to call instead of API+path (GraphQL, which GitHub
+	// Enterprise serves beside the REST API rather than under it).
+	url       string
+	body, out any
+	header    http.Header
 }
 
 func (c *Client) do(ctx context.Context, method, path, bearer string, body, out any) error {
@@ -468,7 +478,11 @@ func (c *Client) send(ctx context.Context, k call) (int, http.Header, error) {
 		}
 		rd = bytes.NewReader(b)
 	}
-	req, err := http.NewRequestWithContext(ctx, k.method, c.API+k.path, rd)
+	target := c.API + k.path
+	if k.url != "" {
+		target = k.url
+	}
+	req, err := http.NewRequestWithContext(ctx, k.method, target, rd)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -692,7 +706,11 @@ type PullRequest struct {
 	State   string `json:"state"`
 	HTMLURL string `json:"html_url"`
 	Draft   bool   `json:"draft"`
-	Head    struct {
+	// Title is what the repository shows its readers; it is stored, bounded. Body is read
+	// only to find a task reference and is never stored (docs/COLLABORATION.md §4.5).
+	Title string `json:"title"`
+	Body  string `json:"body"`
+	Head  struct {
 		Ref  string `json:"ref"`
 		SHA  string `json:"sha"`
 		Repo struct {
@@ -707,7 +725,13 @@ type PullRequest struct {
 	} `json:"base"`
 	User struct {
 		Login string `json:"login"`
+		ID    int64  `json:"id"`
 	} `json:"user"`
+	// Size, present on the webhook payload and the single-PR endpoint but not in list
+	// responses (which leave them zero).
+	Additions    int `json:"additions"`
+	Deletions    int `json:"deletions"`
+	ChangedFiles int `json:"changed_files"`
 	// Merged and MergeCommitSHA say how a closed pull request ended: merged, or closed
 	// without merging. Both are present on the webhook payload and the single-PR endpoint.
 	Merged         bool   `json:"merged"`
@@ -716,6 +740,7 @@ type PullRequest struct {
 	// not carry Merged. UpdatedAt orders the closed list the poller pages through.
 	MergedAt  *time.Time `json:"merged_at"`
 	UpdatedAt time.Time  `json:"updated_at"`
+	CreatedAt time.Time  `json:"created_at"`
 }
 
 // WasMerged reports whether a closed pull request ended in a merge, whichever of the two

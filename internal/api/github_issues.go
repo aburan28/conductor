@@ -417,15 +417,37 @@ type permissionGap struct {
 	URL     string `json:"url,omitempty"`
 }
 
-// permissionGaps compares the issues permission issue sync needs with what the app and each
-// installation hold. An app created before Conductor asked for it lacks it at the app level:
-// GitHub applies a manifest's permissions only when it creates the app, so the owner raises
-// them in the app's settings. Every installation must then accept the new permission, which
-// GitHub asks its owner to do on the installation's settings page. Until both happen issue
-// sync cannot work, and saying so here beats a sync that fails without explanation.
+// permissionNeed is a permission the integration uses, and what to tell someone who lacks it.
+type permissionNeed struct {
+	name, level string
+	// appFix and installFix say what to do at the app's settings and on an installation.
+	appFix, installFix string
+}
+
+// permissionNeeds are the permissions beyond the original set. Each is optional: without it the
+// feature that uses it is limited, not the integration.
+var permissionNeeds = []permissionNeed{
+	{name: "issues", level: "write",
+		appFix: "The app was created before Conductor asked for Issues access, which issue sync needs. " +
+			"Open the app's settings, set Issues to \"Read and write\" under Repository permissions, " +
+			"subscribe to the Issues event, and save; then accept the change on each installation.",
+		installFix: "GitHub is waiting for %s to accept the app's new permission: open the installation's " +
+			"settings and accept the requested permissions (GitHub shows a \"Review request\" banner)."},
+	{name: "statuses", level: "read",
+		appFix: "The app was created before Conductor read commit statuses, which the pull request list's check " +
+			"rollup counts. Open the app's settings, set Commit statuses to \"Read-only\" under Repository permissions, " +
+			"subscribe to the Pull request review, Pull request review comment, Issue comment, Check suite, Check run, " +
+			"Status and Push events, and save; then accept the change on each installation. Pull requests are listed " +
+			"without it, with no check state.",
+		installFix: "GitHub is waiting for %s to accept the app's new permission (commit statuses, for the pull request " +
+			"list's check rollup): open the installation's settings and accept the requested permissions."},
+}
+
+// permissionGaps compares the permissions Conductor uses beyond the original set with what
+// the app and each installation hold. An app created before Conductor asked for one lacks it
+// at the app level: GitHub applies a manifest's permissions only when it creates the app.
 func (g *GitHub) permissionGaps(ctx context.Context, c *githubapp.Client, installs []githubapp.Installation) []permissionGap {
 	gaps := []permissionGap{}
-	const need = "issues: write"
 	if info, err := c.App(ctx); err == nil {
 		perms := map[string]string{}
 		if raw, ok := info["permissions"].(map[string]any); ok {
@@ -433,20 +455,23 @@ func (g *GitHub) permissionGaps(ctx context.Context, c *githubapp.Client, instal
 				perms[k], _ = v.(string)
 			}
 		}
-		if !githubapp.Grants(perms, "issues", "write") {
-			gaps = append(gaps, permissionGap{Scope: "app", Missing: need, URL: g.appSettingsURL(c, info),
-				Fix: "The app was created before Conductor asked for Issues access, which issue sync needs. " +
-					"Open the app's settings, set Issues to \"Read and write\" under Repository permissions, " +
-					"subscribe to the Issues event, and save; then accept the change on each installation."})
+		for _, need := range permissionNeeds {
+			if !githubapp.Grants(perms, need.name, need.level) {
+				gaps = append(gaps, permissionGap{Scope: "app", Missing: need.name + ": " + need.level,
+					URL: g.appSettingsURL(c, info), Fix: need.appFix})
+			}
 		}
 	}
 	for _, inst := range installs {
-		if inst.Permissions == nil || githubapp.Grants(inst.Permissions, "issues", "write") {
+		if inst.Permissions == nil {
 			continue
 		}
-		gaps = append(gaps, permissionGap{Scope: inst.Account, Missing: need, URL: inst.HTMLURL,
-			Fix: "GitHub is waiting for " + inst.Account + " to accept the app's new permission: open the installation's " +
-				"settings and accept the requested permissions (GitHub shows a \"Review request\" banner)."})
+		for _, need := range permissionNeeds {
+			if !githubapp.Grants(inst.Permissions, need.name, need.level) {
+				gaps = append(gaps, permissionGap{Scope: inst.Account, Missing: need.name + ": " + need.level,
+					URL: inst.HTMLURL, Fix: fmt.Sprintf(need.installFix, inst.Account)})
+			}
+		}
 	}
 	return gaps
 }

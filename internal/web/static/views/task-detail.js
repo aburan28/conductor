@@ -4,6 +4,7 @@ import { card, empty, kv, markdown, skeleton, errorBox } from '../components/ui.
 import { pill, chip, chips, riskChip, tierChip } from '../components/pill.js';
 import { table } from '../components/table.js';
 import { relTime, fmtDate, fmtTokens, fmtUSD, fmtDuration, durationBetween } from '../lib/format.js';
+import { pullsCard } from './pulls.js';
 import { claimTask, releaseTask, assignTask, transitionTask, handoffTask, dispatchTask, cancelTask, markDone, reopenTask } from '../lib/actions.js';
 
 // Task detail renders inside a drawer over the board on wide screens and as a full-width
@@ -34,7 +35,7 @@ export function openTaskDrawer(ref, ctx, { onClose } = {}) {
   async function refresh() {
     const p = ctx.project;
     const t = suffix => ctx.api.task(p, ref, suffix);
-    const [task, attempts, validation, decisions, handoff, cardText, caps, explain] = await settle([
+    const [task, attempts, validation, decisions, handoff, cardText, caps, explain, pulls] = await settle([
       ctx.api.get(t('')),
       ctx.api.get(t('/attempts')),
       ctx.api.get(t('/validation')),
@@ -43,6 +44,7 @@ export function openTaskDrawer(ref, ctx, { onClose } = {}) {
       ctx.api.get(t('/card')),
       ctx.api.get(ctx.api.project(p, '/capabilities')),
       ctx.api.post(t('/route/explain'), {}),
+      ctx.api.get(ctx.api.project(p, '/pulls' + ctx.api.query({ task: ref, state: 'all' }))),
     ]);
     if (!alive) return;
     if (!task) { replace(body, errorBox(new Error(`Task ${ref} could not be loaded`), refresh)); return; }
@@ -51,10 +53,11 @@ export function openTaskDrawer(ref, ctx, { onClose } = {}) {
     if (!alive) return;
     replace(body, render({ task, attempts: (attempts && attempts.attempts) || [], validation: (validation && validation.results) || task.validation || [],
       decisions: (decisions && decisions.decisions) || [], handoff: handoff && handoff.bundle ? handoff.bundle : handoff && handoff.task_ref ? handoff : null,
-      cardText: typeof cardText === 'string' ? cardText : '', sessions: (caps && caps.sessions) || [], explain, issue }));
+      cardText: typeof cardText === 'string' ? cardText : '', sessions: (caps && caps.sessions) || [], explain, issue,
+      pulls: (pulls && pulls.pulls) || [] }));
   }
 
-  function render({ task, attempts, validation, decisions, handoff, cardText, sessions, explain, issue }) {
+  function render({ task, attempts, validation, decisions, handoff, cardText, sessions, explain, issue, pulls }) {
     const act = async fn => { const r = await fn(); if (r) { refresh(); if (ctx.refreshAll) ctx.refreshAll(); } };
     const isOpen = !['done', 'cancelled', 'superseded', 'failed'].includes(task.status);
     const actions = h('div', { class: 'btn-row' },
@@ -157,12 +160,17 @@ export function openTaskDrawer(ref, ctx, { onClose } = {}) {
       h('div', { class: 'muted', style: { fontSize: '12px' } }, 'A bundle carries decisions and open questions, never the conversation that produced them.')),
     }) : null;
 
+    // Every pull request of the task, not just the primary one the Facts card names. Shown when
+    // there is one, or while the work is at the stage where one is opened or waited on.
+    const pullsEl = pulls.length || ['claimed', 'running', 'verifying', 'review_required', 'merging'].includes(task.status)
+      ? pullsCard(ctx, task, pulls, { onChange: () => { refresh(); if (ctx.refreshAll) ctx.refreshAll(); } }) : null;
+
     const cardEl = cardText ? card({ title: 'Task card', body: markdown(cardText), footer: 'Rendered from the same Markdown the CLI exports with `conductor task export`.' }) : null;
 
     return h('div', { class: 'stack', style: { gap: '16px' } },
       head, actions,
       h('div', { class: 'detail-grid' },
-        h('div', { class: 'stack', style: { gap: '16px' } }, overview, route, attemptsCard, validationCard, decisionsCard, handoffCard, cardEl),
+        h('div', { class: 'stack', style: { gap: '16px' } }, overview, pullsEl, route, attemptsCard, validationCard, decisionsCard, handoffCard, cardEl),
         h('div', { class: 'stack', style: { gap: '16px' } }, facts)));
   }
 
