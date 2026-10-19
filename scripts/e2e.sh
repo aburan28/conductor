@@ -392,7 +392,7 @@ echo "$INFO" | grep -q '"name": *"mesh-a"' || fail "peer info did not identify t
 
 # And the CLI sees the same mesh.
 CLI_PEERS=$(CONDUCTOR_ENDPOINT="$MESH_A" CONDUCTOR_CA_CERT="$MESH_CERTS/ca.pem" \
-  CONDUCTOR_TOKEN="$ALICE_TOKEN" "$BIN/conductor" peers)
+  CONDUCTOR_TOKEN="$ALICE_TOKEN" CONDUCTOR_PROJECT="$PROJECT" "$BIN/conductor" peers)
 echo "$CLI_PEERS" | grep -q "mesh-b" || fail "conductor peers did not list mesh-b: $CLI_PEERS"
 note "$CLI_PEERS" | grep -m1 mesh-b
 
