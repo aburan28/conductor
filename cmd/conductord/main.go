@@ -640,6 +640,7 @@ func serve(args []string) error {
 	if cfg.delphiInterval >= 0 {
 		delphiSvc = &hosted.Service{
 			Store: store, Logger: logger,
+			WIFProjectID: os.Getenv("CONDUCTOR_DELPHI_WIF_PROJECT_ID"),
 			Key: func(ctx context.Context, project domain.Project, name string) (string, error) {
 				opened, err := vault.Open(ctx, project, name)
 				return opened.Value, err

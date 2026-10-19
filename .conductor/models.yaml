@@ -47,6 +47,10 @@ models:
       capability_floor: [code_edit, tests]
       default_effort: low
       tier: T1
+    worker.public-free:
+      capability_floor: [code_edit, tests]
+      default_effort: low
+      tier: T1
     executor.mechanical:
       capability_floor: [follow_spec]
       default_effort: low
@@ -172,6 +176,19 @@ profiles:
     capabilities: [write_spec, assess_output, read_diff, test_analysis, code_edit, tests, multi_file]
     enabled: false
 
+  # Delphi's director tier: batch delegations of the director's compile and assess steps
+  # (docs/DELPHI.md, "Task cards"). A `harness: delphi` profile wins over the agent profile
+  # under the same alias for delphi only, so the agent router keeps the medium default above
+  # while delegated director work runs at the high effort its contract asks for.
+  - alias: director
+    harness: delphi
+    provider: anthropic
+    model: claude-sonnet-5-5
+    select: {endpoint: anthropic, match: ["claude-sonnet-*"]}
+    reasoning_effort: high
+    capabilities: [write_spec, assess_output, read_diff]
+    billing: tokens
+
   # ---- T1 mechanical ----------------------------------------------------------------------
   # A superset of worker.fast's and verifier.cheap's capabilities, for the same reason.
   - alias: executor.mechanical
@@ -220,6 +237,21 @@ profiles:
     reasoning_effort: medium
     capabilities: [code_edit, tests, multi_file]
     enabled: false
+
+  # Isolated OpenCode probe on 2026-10-17 returned text and wrote a file through
+  # a tool call. This alias is outside the default ladder: only the dispatch
+  # rule with public-free-ok selects it automatically. Free-tier availability
+  # and rate limits can change; re-probe before relying on it.
+  - alias: worker.public-free
+    harness: opencode
+    provider: openrouter
+    model: openrouter/poolside/laguna-xs-2.1:free
+    reasoning_effort: low
+    capabilities: [code_edit, tests, read_diff]
+    tier: T1
+    billing: tokens
+    input_cost_per_mtok: 0
+    output_cost_per_mtok: 0
 
   # ---- Local (OpenCode -> vLLM via `conductor serve`) -------------------------------------
   # Model ids match --served-model-name.

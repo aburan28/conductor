@@ -46,6 +46,24 @@ func testCatalog() Catalog {
 	}
 }
 
+func TestUnknownTokenPriceDoesNotRankAsFree(t *testing.T) {
+	cat := testCatalog()
+	cat.Profiles = append(cat.Profiles, domain.ModelProfile{
+		ID: "unpriced", Alias: "worker.general", Harness: "opencode",
+		Model: "unpriced-model", Capabilities: []string{"code_edit", "tests", "multi_file"},
+		Tier: domain.TierT2, Billing: "tokens", Enabled: true,
+	})
+	p, err := cat.Resolve("worker.general", domain.TierT2, Request{
+		AvailableHarnesses: []string{"claude", "opencode"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Model != "mid-model" {
+		t.Fatalf("resolved %q; unknown token price must not outrank a priced model", p.Model)
+	}
+}
+
 func TestTrivialWorkRoutesCheap(t *testing.T) {
 	d, err := Route(testCatalog(), Request{
 		Role:     domain.RoleImplementer,

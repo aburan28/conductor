@@ -109,13 +109,12 @@ func TestOpenCodeLocalVLLMProfiles(t *testing.T) {
 	}
 	got := map[string][]string{}
 	for _, p := range bundle.ModelProfiles("org-1") {
-		if p.Harness != "opencode" || !p.Enabled {
+		// Restrict to vLLM so OpenRouter (and other) OpenCode profiles do not
+		// enter this local-capacity assertion.
+		if p.Harness != "opencode" || p.Provider != "vllm" || !p.Enabled {
 			continue
 		}
 		got[p.Model] = append(got[p.Model], p.Alias)
-		if p.Provider != "vllm" {
-			t.Errorf("%s: provider = %q, want vllm", p.Model, p.Provider)
-		}
 		if p.Billing != "capacity" {
 			t.Errorf("%s: billing = %q, want capacity (local GPU, not per-token)", p.Model, p.Billing)
 		}
@@ -386,6 +385,22 @@ func TestShippedModelTiers(t *testing.T) {
 		if enabledByAlias[name] == 0 {
 			t.Errorf("alias %s has no enabled profile", name)
 		}
+	}
+
+	// Delegated director work (delphi --profile director: task-card compile and assess) runs
+	// at the high effort the director contract asks for; routed sessions keep medium.
+	var delphiDirector *domain.ModelProfile
+	for _, p := range bundle.ModelProfiles("org-1") {
+		if p.Alias == "director" && p.Harness == domain.DelphiHarness && p.Enabled {
+			delphiDirector = &p
+		}
+	}
+	if delphiDirector == nil {
+		t.Fatal("no enabled delphi profile for the director alias")
+	}
+	if delphiDirector.Model != "claude-sonnet-5-5" || delphiDirector.ReasoningEffort != domain.EffortHigh {
+		t.Errorf("delphi director = %s at %s, want claude-sonnet-5-5 at high",
+			delphiDirector.Model, delphiDirector.ReasoningEffort)
 	}
 }
 

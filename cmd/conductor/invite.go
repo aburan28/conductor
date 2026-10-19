@@ -349,6 +349,27 @@ func connectAndSave(ctx context.Context, creds client.Credentials) (client.Crede
 	if creds.Project == "" && len(who.Projects) == 1 {
 		creds.Project = who.Projects[0].Slug
 	}
+	// A project slug left over from a previous principal (or a typo) would make every
+	// subsequent command 404. Drop it when this token cannot see it; the caller can
+	// pass --project or log in again with an explicit slug.
+	if creds.Project != "" && !hasProject(who.Projects, creds.Project) {
+		fmt.Fprintf(os.Stderr, "conductor: dropping saved project %q — %s cannot reach it", creds.Project, creds.Handle)
+		if len(who.Projects) > 0 {
+			fmt.Fprintf(os.Stderr, " (have:")
+			for i, p := range who.Projects {
+				if i > 0 {
+					fmt.Fprint(os.Stderr, ",")
+				}
+				fmt.Fprintf(os.Stderr, " %s", p.Slug)
+			}
+			fmt.Fprint(os.Stderr, ")")
+		}
+		fmt.Fprintln(os.Stderr)
+		creds.Project = ""
+		if len(who.Projects) == 1 {
+			creds.Project = who.Projects[0].Slug
+		}
+	}
 	if err := client.SaveCredentials(creds); err != nil {
 		return creds, who.Projects, err
 	}

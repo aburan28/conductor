@@ -33,9 +33,9 @@ function mkTask(n, title, status, owner, o = {}) {
 }
 
 D.sessions = [
-  mkSession('s1', 'alice', 'claude', 'working', { model: 'claude-opus-5', tier: 'T4', effort: 'high', max: 'xhigh', task: 'T-1', machine: 'alice-mbp', branch: 'conductor/T-1', resolved: true }),
+  mkSession('s1', 'alice', 'claude', 'working', { model: 'claude-opus-5-5', tier: 'T3', effort: 'high', max: 'xhigh', task: 'T-1', machine: 'alice-mbp', branch: 'conductor/T-1', resolved: true }),
   mkSession('s2', 'rachel', 'codex', 'working', { model: 'gpt-5-codex', tier: 'T2', effort: 'medium', max: 'medium', task: 'T-2', machine: 'rachel-desktop', resolved: true }),
-  mkSession('s3', 'you', 'claude', 'online_idle', { model: 'claude-sonnet-5', tier: 'T2', effort: 'medium', max: 'high', machine: 'your-mbp', resolved: true }),
+  mkSession('s3', 'you', 'claude', 'online_idle', { model: 'claude-sonnet-5-5', tier: 'T2', effort: 'medium', max: 'high', machine: 'your-mbp', resolved: true }),
   mkSession('s4', 'you', 'opencode', 'online_idle', { model: 'ollama/qwen3:27b', machine: 'your-mbp', resolved: false }),
 ];
 
@@ -78,17 +78,17 @@ D.presence = D.sessions.filter(s => s.state !== 'closed').map(s => ({
 
 D.runners = [
   { id: 'r1', name: 'build-box', state: 'online', in_flight: 1, max_concurrency: 4, heartbeat_at: iso(now - 12 * 1000),
-    capabilities: { harnesses: ['claude', 'opencode'], models: ['claude-sonnet-5', 'ollama/qwen3:27b'], platform: 'linux', repo_path: '/srv/repo' } },
+    capabilities: { harnesses: ['claude', 'opencode'], models: ['claude-sonnet-5-5', 'ollama/qwen3:27b'], platform: 'linux', repo_path: '/srv/repo' } },
   { id: 'r2', name: 'alice-mbp', state: 'offline', in_flight: 0, max_concurrency: 2, heartbeat_at: iso(now - 3 * hour),
     capabilities: { harnesses: ['claude'], models: [], platform: 'darwin', repo_path: '~/work/repo' } },
 ];
 
 D.profiles = [
-  mkProfile('planner.frontier', 'claude', 'anthropic', 'claude-opus-5', 'high', 'T4', ['architecture', 'long_context', 'strong_tool_use'], 15, 75),
-  mkProfile('worker.general', 'claude', 'anthropic', 'claude-sonnet-5', 'medium', 'T2', ['code_edit', 'tests', 'multi_file'], 3, 15),
-  mkProfile('worker.fast', 'claude', 'anthropic', 'claude-haiku-4-5-20251001', 'low', 'T1', ['code_edit', 'tests'], 1, 5),
+  mkProfile('planner.frontier', 'claude', 'anthropic', 'claude-opus-5-5', 'high', 'T3', ['architecture', 'long_context', 'strong_tool_use'], 15, 75),
+  mkProfile('worker.general', 'claude', 'anthropic', 'claude-sonnet-5-5', 'medium', 'T2', ['code_edit', 'tests', 'multi_file'], 3, 15),
+  mkProfile('worker.fast', 'claude', 'anthropic', 'claude-haiku-5-5', 'low', 'T1', ['code_edit', 'tests'], 1, 5),
   mkProfile('worker.local', 'opencode', 'ollama', 'ollama/qwen3:27b', 'none', 'T1', ['code_edit'], null, null),
-  mkProfile('reviewer.strong', 'claude', 'anthropic', 'claude-opus-5', 'high', 'T4', ['code_review', 'architecture'], 15, 75),
+  mkProfile('reviewer.strong', 'claude', 'anthropic', 'claude-opus-5-5', 'high', 'T3', ['code_review', 'architecture'], 15, 75),
 ];
 function mkProfile(alias, harness, provider, model, effort, tier, caps, inC, outC) {
   return { id: 'mp-' + alias + harness, alias, harness, provider, model, reasoning_effort: effort, tier, capabilities: caps,
@@ -99,7 +99,7 @@ D.queue = {
   policy: { max_active_sessions: 4, max_sessions_per_principal: 2, max_concurrent_attempts: 4 },
   active: { sessions: 4, attempts: 2 },
   tickets: [
-    { id: 'q-101', principal: 'you', kind: 'session', harness: 'claude', model: 'claude-sonnet-5', state: 'queued', position: 1, requested_at: iso(now - 6 * min), expires_at: iso(now + 30 * min) },
+    { id: 'q-101', principal: 'you', kind: 'session', harness: 'claude', model: 'claude-sonnet-5-5', state: 'queued', position: 1, requested_at: iso(now - 6 * min), expires_at: iso(now + 30 * min) },
     { id: 'q-102', principal: 'rachel', kind: 'attempt', task_ref: 'T-4', harness: 'opencode', model: 'ollama/qwen3:27b', state: 'queued', position: 2, requested_at: iso(now - 3 * min), expires_at: iso(now + 30 * min) },
     { id: 'q-100', principal: 'alice', kind: 'session', harness: 'claude', state: 'granted', requested_at: iso(now - 2 * hour), granted_at: iso(now - 2 * hour + 40 * 1000), expires_at: iso(now + hour) },
   ],
@@ -120,9 +120,9 @@ D.tokens = [{ name: 'bootstrap', created_at: iso(now - 12 * day), last_used_at: 
 
 D.swarm = {
   contributors: [
-    { principal: 'alice', principal_id: 'pr-alice', kind: 'session', name: 'alice-mbp', harness: 'claude', harnesses: ['claude'], models: ['claude-opus-5'], state: 'working', in_flight: 1, max_concurrency: 1, last_heartbeat: iso(now - 15 * 1000), budget: D.budget.members[0] },
+    { principal: 'alice', principal_id: 'pr-alice', kind: 'session', name: 'alice-mbp', harness: 'claude', harnesses: ['claude'], models: ['claude-opus-5-5'], state: 'working', in_flight: 1, max_concurrency: 1, last_heartbeat: iso(now - 15 * 1000), budget: D.budget.members[0] },
     { principal: 'rachel', principal_id: 'pr-rachel', kind: 'session', name: 'rachel-desktop', harness: 'codex', harnesses: ['codex'], models: ['gpt-5-codex'], state: 'working', in_flight: 1, max_concurrency: 1, last_heartbeat: iso(now - 8 * 1000), budget: D.budget.members[1] },
-    { principal: 'you', principal_id: 'pr-you', kind: 'runner', name: 'build-box', harness: '', harnesses: ['claude', 'opencode'], models: ['claude-sonnet-5', 'ollama/qwen3:27b'], state: 'online', in_flight: 1, max_concurrency: 4, last_heartbeat: iso(now - 12 * 1000), budget: D.budget.members[2] },
+    { principal: 'you', principal_id: 'pr-you', kind: 'runner', name: 'build-box', harness: '', harnesses: ['claude', 'opencode'], models: ['claude-sonnet-5-5', 'ollama/qwen3:27b'], state: 'online', in_flight: 1, max_concurrency: 4, last_heartbeat: iso(now - 12 * 1000), budget: D.budget.members[2] },
   ],
   capacity: { runners: 1, sessions_accepting: 2, slots_free: 3 },
   queue_depth: 2,
@@ -151,8 +151,8 @@ D.events = [];
 D.usage = [];
 (function seedUsage() {
   const lanes = [
-    ['claude', 'claude-opus-5', 'alice', 9],
-    ['claude', 'claude-sonnet-5', 'you', 6],
+    ['claude', 'claude-opus-5-5', 'alice', 9],
+    ['claude', 'claude-sonnet-5-5', 'you', 6],
     ['codex', 'gpt-5-codex', 'rachel', 4],
     ['opencode', 'ollama/qwen3:27b', 'you', 2],
   ];
@@ -176,13 +176,13 @@ D.usage = [];
 })();
 
 D.attempts = {
-  'T-1': [mkAttempt(1, 'failed_retryable', 'claude', 'claude-sonnet-5', 'medium', { fail: 'tests_failed', in: 812000, out: 64000, cost: 4.1 }),
-          mkAttempt(2, 'running', 'claude', 'claude-opus-5', 'high', { in: 1420000, out: 96000, cost: 11.7 })],
-  'T-6': [mkAttempt(1, 'succeeded', 'claude', 'claude-sonnet-5', 'medium', { in: 240000, out: 18000, cost: 1.2, done: true })],
+  'T-1': [mkAttempt(1, 'failed_retryable', 'claude', 'claude-sonnet-5-5', 'medium', { fail: 'tests_failed', in: 812000, out: 64000, cost: 4.1 }),
+          mkAttempt(2, 'running', 'claude', 'claude-opus-5-5', 'high', { in: 1420000, out: 96000, cost: 11.7 })],
+  'T-6': [mkAttempt(1, 'succeeded', 'claude', 'claude-sonnet-5-5', 'medium', { in: 240000, out: 18000, cost: 1.2, done: true })],
   'T-7': [mkAttempt(1, 'failed_retryable', 'codex', 'gpt-5-codex', 'medium', { fail: 'review_rejected', in: 300000, out: 20000, cost: 2.0 }),
           mkAttempt(2, 'failed_retryable', 'codex', 'gpt-5-codex', 'high', { fail: 'review_rejected', in: 350000, out: 25000, cost: 2.4 }),
-          mkAttempt(3, 'succeeded', 'claude', 'claude-opus-5', 'high', { in: 900000, out: 60000, cost: 9.0, done: true })],
-  'T-8': [mkAttempt(1, 'failed_terminal', 'claude', 'claude-sonnet-5', 'medium', { fail: 'timeout', in: 2000000, out: 150000, cost: 14 })],
+          mkAttempt(3, 'succeeded', 'claude', 'claude-opus-5-5', 'high', { in: 900000, out: 60000, cost: 9.0, done: true })],
+  'T-8': [mkAttempt(1, 'failed_terminal', 'claude', 'claude-sonnet-5-5', 'medium', { fail: 'timeout', in: 2000000, out: 150000, cost: 14 })],
 };
 function mkAttempt(n, state, harness, model, effort, o) {
   return { id: 'a' + n, attempt_number: n, state, role: 'implementer', harness, model_alias: 'worker.general', resolved_model: model,
@@ -214,11 +214,11 @@ D.explain = ref => {
   return {
     decision: cheap
       ? { lane: 'implement', role: 'implementer', harness: 'opencode', model: 'ollama/qwen3:27b', reasoning_effort: 'none', tier: 'T1', rule: 'docs-are-cheap', rationale: ['rule docs-are-cheap matched: task.labels has "docs"', 'candidate ollama/qwen3:27b on opencode is available', 'local model: zero marginal cost'] }
-      : { lane: 'implement', role: 'implementer', harness: 'claude', model: 'claude-sonnet-5', reasoning_effort: 'medium', tier: 'T2', rule: '', rationale: ['base tier T2 from task shape', 'cheapest qualifying candidate wins'] },
+      : { lane: 'implement', role: 'implementer', harness: 'claude', model: 'claude-sonnet-5-5', reasoning_effort: 'medium', tier: 'T2', rule: '', rationale: ['base tier T2 from task shape', 'cheapest qualifying candidate wins'] },
     candidates: [
       { lane: 'implement', model: 'ollama/qwen3:27b', harness: 'opencode', eligible: cheap, reason: cheap ? 'when: task.labels has "docs"' : 'when clause did not match' },
-      { lane: 'implement', model: 'claude-sonnet-5', harness: 'claude', eligible: true, reason: 'default candidate' },
-      { lane: 'implement', model: 'claude-opus-5', harness: 'claude', eligible: false, reason: 'reserved: attempt.failures >= 2' },
+      { lane: 'implement', model: 'claude-sonnet-5-5', harness: 'claude', eligible: true, reason: 'default candidate' },
+      { lane: 'implement', model: 'claude-opus-5-5', harness: 'claude', eligible: false, reason: 'reserved: attempt.failures >= 2' },
     ],
   };
 };
@@ -373,12 +373,12 @@ function statusCounts() {
 function inventory() {
   return { sessions: 4, available: 2, max_tier: 'T4', max_reasoning_effort: 'xhigh', harnesses: ['claude', 'codex', 'opencode'],
     models: [
-      { model: 'claude-opus-5', harness: 'claude', tier: 'T4', max_reasoning_effort: 'xhigh', sessions: 1, available: 1 },
-      { model: 'claude-sonnet-5', harness: 'claude', tier: 'T2', max_reasoning_effort: 'high', sessions: 1, available: 1 },
+      { model: 'claude-opus-5-5', harness: 'claude', tier: 'T4', max_reasoning_effort: 'xhigh', sessions: 1, available: 1 },
+      { model: 'claude-sonnet-5-5', harness: 'claude', tier: 'T2', max_reasoning_effort: 'high', sessions: 1, available: 1 },
       { model: 'gpt-5-codex', harness: 'codex', tier: 'T2', max_reasoning_effort: 'medium', sessions: 1, available: 1 },
       { model: 'ollama/qwen3:27b', harness: 'opencode', tier: '', max_reasoning_effort: '', sessions: 1, available: 1 },
     ], tiers: { T4: 1, T2: 2 }, reasoning_efforts: { xhigh: 1, high: 1, medium: 2 }, capabilities: ['architecture', 'code_edit', 'tests'],
-    runners: [{ name: 'build-box', models: ['claude-sonnet-5', 'ollama/qwen3:27b'] }], gaps: [] };
+    runners: [{ name: 'build-box', models: ['claude-sonnet-5-5', 'ollama/qwen3:27b'] }], gaps: [] };
 }
 
 function filterTasks(q) {

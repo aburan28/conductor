@@ -29,10 +29,13 @@ const defaultLocalDBAddr = "localhost:55432"
 
 // doctorReport is what `conductor doctor --json` prints.
 type doctorReport struct {
-	Endpoint       string `json:"endpoint"`
-	Reachable      bool   `json:"reachable"`
-	Principal      string `json:"principal,omitempty"`
-	Project        string `json:"project,omitempty"`
+	Endpoint  string `json:"endpoint"`
+	Reachable bool   `json:"reachable"`
+	Principal string `json:"principal,omitempty"`
+	Project   string `json:"project,omitempty"`
+	// ProjectWarning is set when the saved project slug is not among this token's
+	// memberships — the usual cause of a wall of 404s from every project-scoped command.
+	ProjectWarning string `json:"project_warning,omitempty"`
 	ClientVersion  string `json:"client_version"`
 	ServerVersion  string `json:"server_version,omitempty"`
 	VersionWarning string `json:"version_warning,omitempty"`
@@ -139,10 +142,14 @@ func collectDoctor(ctx context.Context, creds client.Credentials, repoRoot strin
 			Principal struct {
 				Handle string `json:"handle"`
 			} `json:"principal"`
+			Projects []JoinedProject `json:"projects"`
 		}
 		if err := api.Get(ctx, "/v1/whoami", &who); err == nil {
 			out.Reachable = true
 			out.Principal = who.Principal.Handle
+			if creds.Project != "" && !hasProject(who.Projects, creds.Project) {
+				out.ProjectWarning = projectAccessHint(creds.Project, who.Principal.Handle, who.Projects)
+			}
 		}
 	}
 
@@ -309,6 +316,9 @@ func printDoctor(w io.Writer, out doctorReport) {
 	}
 	if out.Project != "" {
 		fmt.Fprintf(w, "  %-12s %s\n", "project", out.Project)
+	}
+	if out.ProjectWarning != "" {
+		fmt.Fprintf(w, "  %-12s %s\n", "warning", out.ProjectWarning)
 	}
 	if out.Repository != "" {
 		fmt.Fprintf(w, "  %-12s %s\n", "repository", out.Repository)

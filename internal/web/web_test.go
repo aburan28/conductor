@@ -18,7 +18,7 @@ func get(t *testing.T, h http.Handler, target string) *httptest.ResponseRecorder
 
 func TestIndexServedAtRootAndDeepLinks(t *testing.T) {
 	h := Handler()
-	for _, target := range []string{"/", "/tasks/T-1", "/usage", "/tasks/T-42?x=1"} {
+	for _, target := range []string{"/", "/tasks/T-1", "/usage", "/delphi", "/tasks/T-42?x=1"} {
 		rec := get(t, h, target)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("%s: status %d", target, rec.Code)
@@ -41,10 +41,11 @@ func TestIndexServedAtRootAndDeepLinks(t *testing.T) {
 func TestAssetsServedWithContentTypes(t *testing.T) {
 	h := Handler()
 	cases := map[string]string{
-		"/static/app.js":         "text/javascript",
-		"/static/app.css":        "text/css",
-		"/static/lib/dom.js":     "text/javascript",
-		"/static/views/usage.js": "text/javascript",
+		"/static/app.js":          "text/javascript",
+		"/static/app.css":         "text/css",
+		"/static/lib/dom.js":      "text/javascript",
+		"/static/views/usage.js":  "text/javascript",
+		"/static/views/delphi.js": "text/javascript",
 	}
 	for target, want := range cases {
 		rec := get(t, h, target)

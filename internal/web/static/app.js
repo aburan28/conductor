@@ -15,6 +15,7 @@ import { openTaskDrawer } from './views/task-detail.js';
 import home from './views/home.js';
 import tasks from './views/tasks.js';
 import pulls from './views/pulls.js';
+import delphi from './views/delphi.js';
 import people from './views/people.js';
 import more from './views/more.js';
 import fleet from './views/fleet.js';
@@ -34,6 +35,7 @@ const CORE = [
   { path: '/', name: 'home', label: 'Home', icon: 'home', view: home, key: 'h' },
   { path: '/tasks', name: 'tasks', label: 'Tasks', icon: 'tasks', view: tasks, key: 't' },
   { path: '/pulls', name: 'pulls', label: 'Pull requests', icon: 'pulls', view: pulls, key: 'r' },
+  { path: '/delphi', name: 'delphi', label: 'Delphi', icon: 'events', view: delphi, key: 'd' },
   { path: '/people', name: 'people', label: 'People', icon: 'people', view: people, key: 'p' },
 ];
 const MORE = [
