@@ -1,6 +1,8 @@
 # Collaboration: shared tasks, triggered work, and pull requests
 
-Status: design, not yet implemented. Companion to [DESIGN.md](DESIGN.md) §8.5, §17.5, §24.
+Status: phased design proposal. Companion to [DESIGN.md](DESIGN.md) §8.5, §17.5, §24.
+The current-behavior inventory below describes source baseline
+`3244ecbbc7a01229e3a33588994ef445305e2660`; later implementation PRs supersede it per phase.
 Conductor task: T-3771.
 
 ## 1. What this adds
@@ -154,10 +156,12 @@ independent of their project role. Three grades:
 
 The owner (creator) and maintainers keep everything they have today; a share only ever adds.
 
-A share has a **visibility ceiling**: what the grantee sees of the task is the *higher* of the
-task's visibility and the share's `visibility` (default `team_artifacts`), never above
-`shared_debug`. Sharing a private task therefore shows the grantee its title and objective —
-that is the point of sharing — while the rest of the team still sees "a private task".
+A share has a **visibility ceiling**: access granted by the share is projected at the share's
+`visibility` (default `team_artifacts`), never above `shared_debug`. A guest has no independent
+project-wide visibility grant, so a task's broader visibility cannot raise that ceiling.
+An existing project member retains any broader access their membership already grants.
+Sharing a private task therefore shows the grantee its title and objective — that is the point
+of sharing — while the rest of the team still sees "a private task".
 
 A share names a **principal**. For a coworker who is already a project member, that is it. For
 a friend who is not, `conductor share` first creates a principal in the project's organization
@@ -541,7 +545,8 @@ principal, which is why shares name a grantee by id and not by membership row.
 | request work on a task | `collaborator`+ share, or contributor+ |
 | request work on an unlinked pull request | contributor+ |
 | request work *on a person* | as above; the person's agent decides (§4.6) |
-| accept/decline a request addressed to me | me, or maintainer+ (audited) |
+| accept/decline execution on my machine | me, or my local standing consent rule; no maintainer override |
+| approve an automation request addressed to maintainers | maintainer+ (audited); executor consent still applies |
 | link/unlink a pull request | contributor+, or `collaborator`+ share on the task |
 | edit `.conductor/recipes`, `automations.yaml` | repository write access (it is code); applied at bootstrap by maintainer+ |
 | approve an `approve: ask` automation | maintainer+ |
@@ -554,9 +559,10 @@ for a guest, only rows about shared tasks — `/members`, `/presence`, `/usage`,
 return empty sets, not errors, so the dashboard renders. Tokens stay principal-wide; the
 principal's role is what confines them, and `api_tokens.project_id` scoping keeps working.
 
-Visibility: `privacy.Viewer` gains `Shares map[taskID]ShareGrade+ceiling`; `ProjectTask` treats
-a viewer with a share as seeing the task at `max(task.Visibility, share.Visibility)`; the same
-ceiling applies in `ProjectEvents`, `HandoffView`, `ValidationView`, `DecisionsView`,
+Visibility: `privacy.Viewer` gains `Shares map[taskID]ShareGrade+ceiling`; `ProjectTask` projects
+share-derived access at `share.Visibility`, then combines it with any independently authorized
+membership view. Guests have only the share-derived view, even when the task's visibility is
+broader. The same ceiling applies in `ProjectEvents`, `HandoffView`, `ValidationView`, `DecisionsView`,
 `ProjectAttempt`, and notify rendering (a guest's inbox). `IsSelf` is unchanged, so the owner's
 view is unchanged. The existing privacy tests gain cases: a guest never sees another task's
 title; a `viewer` share on a private task sees the title but not another member's handle in
@@ -571,7 +577,7 @@ Audit: `task.shared`, `task.unshared`, `work.requested`, `work.accepted`, `work.
 
 ## 6. Data model
 
-Migration `0019_collaboration.sql` (next free number):
+Migration sketch (choose the next free migration number when implementing each phase):
 
 ```sql
 -- §4.1
@@ -886,7 +892,9 @@ should run a stranger's request; the rules file lives with the person, is never 
   allowed text column and a new test walks every writer of it to prove none takes a
   `harness.Event`; event payload allowlist covers every new key.
 - **Authorization**: the matrix in §5 as table-driven tests over `coord.Service.Authorize`;
-  `mode: never` on an agent is honoured when the requester is a maintainer.
+  a guest's `team_summary` share never exposes `team_artifacts` or `shared_debug` fields,
+  regardless of task visibility. `mode: never` on an agent is honoured when the requester is a
+  maintainer, and a maintainer cannot accept execution on another person's behalf.
 - **Concurrency**: two runners racing a targeted task — only the target claims; fallback to
   `any` after TTL claims exactly once; automation dedupe under webhook redelivery + poll overlap
   (the `github_check_runs` test pattern).
