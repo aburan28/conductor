@@ -243,7 +243,10 @@ type PullRequestFilter struct {
 	Failing     bool      // at least one failed check
 	// Mine is a member: pull requests they opened (by linked GitHub identity) or whose
 	// task they own.
-	Mine    domain.ID
+	Mine domain.ID
+	// Viewer limits filters on hidden metadata to tasks this caller may see. Empty
+	// means a trusted internal query, which does not project results to a member.
+	Viewer  domain.ID
 	HeadSHA string
 	HeadRef string
 	Limit   int
@@ -273,6 +276,12 @@ func (s *Store) ListPullRequests(ctx context.Context, projectID domain.ID, f Pul
 	}
 	if f.Unlinked {
 		q.WriteString(" AND p.task_id IS NULL")
+	}
+	if f.Viewer != "" && (f.NeedsReview || f.Failing || f.Mine != "") {
+		// Redacting the response after filtering would still reveal a private task's
+		// checks, review, or author through membership in the result. Apply this before
+		// ordering and LIMIT so pagination cannot reveal those hidden matches either.
+		add("(t.id IS NULL OR t.visibility <> 'private' OR t.created_by = ?::uuid)", f.Viewer)
 	}
 	if f.NeedsReview {
 		q.WriteString(" AND p.state = 'open' AND NOT p.draft AND p.review_decision IN ('', 'review_required')")
@@ -381,6 +390,12 @@ func upsertPullRequestTx(ctx context.Context, tx pgx.Tx, u PullRequestUpsert) (P
 	if state != PullRequestOpen && state != PullRequestMerged && state != PullRequestClosed {
 		return PullRequest{}, ch, fmt.Errorf("%w: pull request state %q", domain.ErrInvalidArgument, state)
 	}
+	// GitHub repository names are case-insensitive. Serialize initial observations too:
+	// a row lock alone cannot protect a pull request that has not been inserted yet.
+	key := "conductor/pull/" + u.ProjectID + "/" + PullRequestKey(strings.ToLower(u.Repository), u.Number)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, key); err != nil {
+		return PullRequest{}, ch, err
+	}
 	prev, err := getPullRequest(ctx, tx, u.ProjectID, u.Repository, u.Number, true)
 	switch {
 	case errors.Is(err, domain.ErrNotFound):
@@ -391,6 +406,9 @@ func upsertPullRequestTx(ctx context.Context, tx pgx.Tx, u PullRequestUpsert) (P
 	case err != nil:
 		return PullRequest{}, ch, err
 	default:
+		// Keep the existing primary-key spelling when a manual reference and GitHub's
+		// response use different case, preserving the task link and its privacy policy.
+		u.Repository = prev.Repository
 		ch.Reopened = prev.State == PullRequestClosed && state == PullRequestOpen
 		ch.HeadMoved = u.HeadSHA != "" && prev.HeadSHA != "" && u.HeadSHA != prev.HeadSHA
 		ch.LeftDraft = prev.Draft && !u.Draft
@@ -499,6 +517,55 @@ func (s *Store) LinkPullRequestTask(ctx context.Context, projectID domain.ID, re
 	err := s.Tx(ctx, func(tx pgx.Tx) error {
 		var err error
 		out, err = linkPullRequestTx(ctx, tx, projectID, repository, number, taskID, source)
+		return err
+	})
+	return out, err
+}
+
+// LinkPullRequestTaskForMember makes a manual link after checking both tasks in the
+// transaction. Moving a pull request also unlinks its previous task; authorization on
+// just the destination would let a member expose someone else's private pull request.
+func (s *Store) LinkPullRequestTaskForMember(ctx context.Context, projectID domain.ID, repository string, number int, taskID, principalID domain.ID, role domain.Role) (PullRequestLink, error) {
+	var out PullRequestLink
+	if !role.Can(domain.RoleContributor) {
+		return out, domain.ErrNotPermitted
+	}
+	err := s.Tx(ctx, func(tx pgx.Tx) error {
+		pr, err := getPullRequest(ctx, tx, projectID, repository, number, true)
+		if err != nil {
+			return err
+		}
+		ids := []string{taskID}
+		if pr.TaskID != "" && pr.TaskID != taskID {
+			ids = append(ids, pr.TaskID)
+		}
+		rows, err := tx.Query(ctx, `SELECT id::text, COALESCE(created_by::text, ''), visibility
+			FROM tasks WHERE project_id = $1::uuid AND id = ANY($2::uuid[])
+			ORDER BY id FOR UPDATE`, projectID, ids)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		found := false
+		for rows.Next() {
+			var id, owner domain.ID
+			var visibility domain.Visibility
+			if err := rows.Scan(&id, &owner, &visibility); err != nil {
+				return err
+			}
+			found = found || id == taskID
+			if visibility == domain.VisibilityPrivate && owner != principalID && !role.Can(domain.RoleMaintainer) {
+				return fmt.Errorf("%w: only the owner of a private task, or a maintainer, can change its pull request links", domain.ErrNotPermitted)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		rows.Close()
+		if !found {
+			return domain.ErrNotFound
+		}
+		out, err = linkPullRequestTx(ctx, tx, projectID, repository, number, taskID, LinkManual)
 		return err
 	})
 	return out, err

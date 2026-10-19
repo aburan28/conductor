@@ -1079,6 +1079,107 @@ func TestLinkingByHandThroughTheAPI(t *testing.T) {
 	}
 }
 
+func TestMovingPrivateTaskPullRequestRequiresSourcePermission(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	private, err := h.store.CreateTask(ctx, db.CreateTaskParams{ProjectID: h.project.ID, CreatedBy: h.alice.ID,
+		Title: "Private source", Status: domain.TaskReady, Visibility: domain.VisibilityPrivate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	public, err := h.store.CreateTask(ctx, db.CreateTaskParams{ProjectID: h.project.ID, CreatedBy: h.bob.ID,
+		Title: "Public destination", Status: domain.TaskReady, Visibility: domain.VisibilityTeamSummary})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedPulls(t, h, "acme/w", private)
+	move := func(token string) int {
+		t.Helper()
+		code, _, _ := pullCall(t, h.server, token, http.MethodPost, "/v1/tasks/"+public.ID+"/pull-requests",
+			map[string]any{"pull_request": "acme/w#1"})
+		return code
+	}
+	if code := move(h.bobTok); code != http.StatusForbidden {
+		t.Fatalf("moving another owner's private pull request = %d, want 403", code)
+	}
+	if row := pullRow(t, h, "acme/w", 1); row.TaskID != private.ID {
+		t.Fatalf("rejected move changed the source task to %s", row.TaskID)
+	}
+	if code := move(h.aliceTok); code != http.StatusCreated {
+		t.Fatalf("owner moving their private pull request = %d, want 201", code)
+	}
+	if _, err := h.store.LinkPullRequestTask(ctx, h.project.ID, "acme/w", 1, private.ID, db.LinkManual); err != nil {
+		t.Fatal(err)
+	}
+	_, maintainer := h.member("morgan", domain.RoleMaintainer)
+	if code := move(maintainer); code != http.StatusCreated {
+		t.Fatalf("maintainer moving a private pull request = %d, want 201", code)
+	}
+}
+
+func TestPrivatePullRequestMetadataCannotBeInferredFromFilters(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	task, err := h.store.CreateTask(ctx, db.CreateTaskParams{ProjectID: h.project.ID, CreatedBy: h.alice.ID,
+		Title: "Private checks", Status: domain.TaskReady, Visibility: domain.VisibilityPrivate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedPulls(t, h, "acme/w", task)
+	if _, _, err := h.store.SetPullRequestRollup(ctx, h.project.ID, "acme/w", 1,
+		db.PullRequestRollup{ChecksTotal: 1, ChecksFailed: 1, ReviewDecision: "review_required"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, filter := range []string{"failing", "needs_review"} {
+		for _, viewer := range []struct {
+			token string
+			want  int
+		}{{h.aliceTok, 1}, {h.bobTok, 0}} {
+			code, body, _ := pullCall(t, h.server, viewer.token, http.MethodGet,
+				h.projectPath("/pulls?number=1&"+filter+"=1"), nil)
+			if got := len(pullsIn(body)); code != http.StatusOK || got != viewer.want {
+				t.Errorf("%s filter = %d, %d rows, want 200 and %d rows", filter, code, got, viewer.want)
+			}
+		}
+	}
+}
+
+func TestManualPullLinkCannotReadAnUnlinkedRepository(t *testing.T) {
+	h := newHarness(t)
+	_, fake, srv := newPullsIntegration(t, h)
+	ctx := context.Background()
+	if err := h.store.SetProjectRemote(ctx, h.project.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	task, err := h.store.CreateTask(ctx, db.CreateTaskParams{ProjectID: h.project.ID, CreatedBy: h.bob.ID,
+		Title: "Manual reference", Status: domain.TaskReady, Visibility: domain.VisibilityTeamSummary})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.put(70, fake.pr(70, "private/branch"))
+	code, body, _ := pullCall(t, srv, h.bobTok, http.MethodPost, "/v1/tasks/"+task.ID+"/pull-requests",
+		map[string]any{"pull_request": fake.name() + "#70"})
+	if code != http.StatusCreated {
+		t.Fatalf("linking a manual reference = %d %v", code, body)
+	}
+	row := pullRow(t, h, fake.name(), 70)
+	if row.Title != "" || row.HeadRef != "" || row.AuthorLogin != "" {
+		t.Fatalf("manual reference fetched data from an unlinked repository: %+v", row)
+	}
+	if err := h.store.SetProjectRemote(ctx, h.project.ID, "https://github.com/"+fake.name()); err != nil {
+		t.Fatal(err)
+	}
+	fake.put(71, fake.pr(71, "linked/branch"))
+	code, body, _ = pullCall(t, srv, h.bobTok, http.MethodPost, "/v1/tasks/"+task.ID+"/pull-requests",
+		map[string]any{"pull_request": fake.name() + "#71"})
+	if code != http.StatusCreated {
+		t.Fatalf("linking a pull request in the linked repository = %d %v", code, body)
+	}
+	if row := pullRow(t, h, fake.name(), 71); row.Title == "" || row.HeadRef != "linked/branch" {
+		t.Fatalf("linked repository was not read: %+v", row)
+	}
+}
+
 // With a GitHub App, a pull request a person names is read from GitHub — and one that does not
 // exist is refused — and refreshing reads it again, rate limited.
 func TestRefreshAndLinkReadFromGitHub(t *testing.T) {

@@ -303,6 +303,59 @@ func TestListPullRequestsFilters(t *testing.T) {
 	}
 }
 
+// A differently capitalized repository name still names the same linked pull request.
+func TestPullRequestUpsertPreservesCaseInsensitiveIdentity(t *testing.T) {
+	f := newFixture(t)
+	task := f.newTask(t, "Linked task")
+	f.seenPull(t, "acme/w", 59)
+	if _, err := f.store.LinkPullRequestTask(f.ctx, f.project.ID, "acme/w", 59, task.ID, LinkManual); err != nil {
+		t.Fatal(err)
+	}
+	row, change, err := f.store.UpsertPullRequest(f.ctx, PullRequestUpsert{ProjectID: f.project.ID,
+		Repository: "Acme/W", Number: 59, State: PullRequestOpen, Title: "Updated from GitHub"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := f.store.ListPullRequests(f.ctx, f.project.ID, PullRequestFilter{Repository: "ACME/W", Number: 59})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || change.Created || row.TaskID != task.ID || row.Title != "Updated from GitHub" {
+		t.Fatalf("case-only repository change lost identity: rows=%d created=%t row=%+v", len(rows), change.Created, row)
+	}
+}
+
+func TestConcurrentPullRequestUpsertsShareCaseInsensitiveIdentity(t *testing.T) {
+	f := newFixture(t)
+	start := make(chan struct{})
+	errs := make(chan error, 8)
+	for i := 0; i < cap(errs); i++ {
+		repository := "Acme/W"
+		if i%2 == 0 {
+			repository = "acme/w"
+		}
+		go func() {
+			<-start
+			_, _, err := f.store.UpsertPullRequest(f.ctx, PullRequestUpsert{ProjectID: f.project.ID,
+				Repository: repository, Number: 59, State: PullRequestOpen})
+			errs <- err
+		}()
+	}
+	close(start)
+	for i := 0; i < cap(errs); i++ {
+		if err := <-errs; err != nil {
+			t.Error(err)
+		}
+	}
+	rows, err := f.store.ListPullRequests(f.ctx, f.project.ID, PullRequestFilter{Repository: "acme/w", Number: 59})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("concurrent observations created %d rows for one pull request", len(rows))
+	}
+}
+
 // The title is bounded: a pull request cannot make this table a place for long text.
 func TestPullRequestTitleIsBounded(t *testing.T) {
 	f := newFixture(t)

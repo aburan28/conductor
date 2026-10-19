@@ -102,7 +102,7 @@ func (s *Server) listPulls(w http.ResponseWriter, r *http.Request, p domain.Prin
 	}
 	q := r.URL.Query()
 	f := db.PullRequestFilter{Unlinked: queryFlag(r, "unlinked"), NeedsReview: queryFlag(r, "needs_review"),
-		Failing: queryFlag(r, "failing"), Repository: q.Get("repository")}
+		Failing: queryFlag(r, "failing"), Repository: q.Get("repository"), Viewer: caller.Principal.ID}
 	switch st := q.Get("state"); st {
 	case "", "all":
 	case db.PullRequestOpen, db.PullRequestMerged, db.PullRequestClosed:
@@ -368,7 +368,19 @@ func (s *Server) ensurePull(ctx context.Context, project domain.Project, reposit
 		return row, err
 	}
 	owner, name, _ := strings.Cut(repository, "/")
+	canRead := false
 	if s.github != nil {
+		// An app installation is not project authorization. Use the same repository
+		// and organization boundary as refresh and webhook ingestion before reading.
+		projects, err := s.github.projectsFor(ctx, owner, name)
+		if err != nil {
+			return db.PullRequest{}, err
+		}
+		for _, linked := range projects {
+			canRead = canRead || linked.ID == project.ID
+		}
+	}
+	if canRead {
 		if c := s.github.current(ctx); c != nil {
 			if inst, ierr := c.RepoInstallation(ctx, owner, name); ierr == nil {
 				pr, gerr := c.GetPullRequest(ctx, inst, owner, name, number)
@@ -444,7 +456,7 @@ func (s *Server) linkPull(w http.ResponseWriter, r *http.Request, p domain.Princ
 		s.fail(w, r, err)
 		return
 	}
-	res, err := s.store.LinkPullRequestTask(ctx, project.ID, repository, number, task.ID, db.LinkManual)
+	res, err := s.store.LinkPullRequestTaskForMember(ctx, project.ID, repository, number, task.ID, caller.Principal.ID, caller.Role)
 	if err != nil {
 		s.fail(w, r, err)
 		return
