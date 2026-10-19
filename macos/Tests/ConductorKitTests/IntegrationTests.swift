@@ -27,6 +27,17 @@ final class IntegrationTests: XCTestCase {
         FileHandle.standardError.write(Data("integration step: \(step)\n".utf8))
     }
 
+    /// An async test can resume on a different thread from the one that launched a
+    /// Process. Foundation's waitUntilExit can then wait forever for its launch run loop,
+    /// even after the child has exited. Its termination handler runs independently.
+    func waitForExit(_ process: Process, notifiedBy exited: DispatchSemaphore) {
+        guard exited.wait(timeout: .now() + 10) == .timedOut else { return }
+        if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+        XCTAssertEqual(exited.wait(timeout: .now() + 5), .success,
+                       "child process did not report termination after forced cleanup")
+        XCTFail("child process did not exit within the cleanup deadline")
+    }
+
     /// argv run as the configured user when there is one.
     func spec(_ exe: URL, _ args: [String], environment: [String: String]? = nil, stdin: Data? = nil) -> CommandSpec {
         if let user = env["CONDUCTOR_IT_RUN_AS"], !user.isEmpty {
@@ -83,6 +94,8 @@ final class IntegrationTests: XCTestCase {
         // Postgres in the foreground, as launchd runs it.
         let pgSpec = spec(URL(fileURLWithPath: setup.postgresArguments[0]), Array(setup.postgresArguments.dropFirst()))
         let pg = Process()
+        let pgExited = DispatchSemaphore(value: 0)
+        pg.terminationHandler = { _ in pgExited.signal() }
         pg.executableURL = pgSpec.executable
         pg.arguments = pgSpec.arguments
         let pgLog = root.appendingPathComponent("postgres.log")
@@ -92,7 +105,7 @@ final class IntegrationTests: XCTestCase {
         try pg.run()
         defer {
             _ = try? ProcessRunner.runBlocking(spec(setup.executable("pg_ctl"), ["stop", "-D", setup.dataDirectory.path, "-m", "fast", "-w"]))
-            pg.waitUntilExit()
+            waitForExit(pg, notifiedBy: pgExited)
         }
 
         announce("pg_isready")
@@ -123,6 +136,8 @@ final class IntegrationTests: XCTestCase {
 
         // conductord with the launch agent's own arguments: the kit's DSN, through pgx.
         let daemon = Process()
+        let daemonExited = DispatchSemaphore(value: 0)
+        daemon.terminationHandler = { _ in daemonExited.signal() }
         daemon.executableURL = URL(fileURLWithPath: agent.programArguments[0])
         daemon.arguments = Array(agent.programArguments.dropFirst())
         daemon.environment = cliEnv
@@ -131,7 +146,10 @@ final class IntegrationTests: XCTestCase {
         daemon.standardError = try FileHandle(forWritingTo: dLog)
         daemon.standardOutput = try FileHandle(forWritingTo: dLog)
         try daemon.run()
-        defer { daemon.terminate(); daemon.waitUntilExit() }
+        defer {
+            daemon.terminate()
+            waitForExit(daemon, notifiedBy: daemonExited)
+        }
 
         announce("conductord start, waiting for /v1/health")
         let api = APIClient(endpoint: URL(string: endpoint)!)
