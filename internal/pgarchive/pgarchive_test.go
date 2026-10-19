@@ -232,6 +232,38 @@ func TestSealedArchiveNeedsTheRightPassphrase(t *testing.T) {
 	}
 }
 
+// With sealing on, the seal's authentication is the defence against whoever else can write
+// the bucket. An unsealed WAL segment or a manifest claiming "sealed": false planted there
+// must not be read: it would be replayed without ever meeting the data key.
+func TestSealedArchiveIgnoresUnsealedObjects(t *testing.T) {
+	a, fake, _ := fakeArchiver(t, true)
+	ctx := context.Background()
+	name := "000000010000000000000004"
+	fake.Put(a.walKey(name, false), []byte("planted segment"))
+	dest := filepath.Join(t.TempDir(), "x")
+	if err := a.FetchWAL(ctx, name, dest); !errors.Is(err, ErrNotArchived) {
+		t.Errorf("fetching a segment present only unsealed = %v, want ErrNotArchived", err)
+	}
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Error("the planted segment was written for recovery")
+	}
+
+	m := Manifest{ID: "20261005T000000Z", StartWAL: name, Sealed: false}
+	body, _ := json.Marshal(m)
+	fake.Put(a.manifestKey(m.ID), body)
+	fake.Put(a.baseTarKey(m.ID, false), []byte("tar"))
+	_, err := a.Restore(ctx, RestoreOptions{DataDir: t.TempDir(), RestoreCommand: "x %f %p"})
+	if err == nil || !strings.Contains(err.Error(), "not sealed") {
+		t.Errorf("restoring an unsealed backup into a sealing archive = %v, want a refusal", err)
+	}
+
+	// Sealing off still reads what was archived before it was turned on.
+	b := New(Config{S3: a.cfg.S3, Prefix: "team", StateDir: t.TempDir()}, "7001")
+	if err := b.FetchWAL(ctx, name, dest); err != nil {
+		t.Errorf("unsealed archive fetch: %v", err)
+	}
+}
+
 func TestPruneKeepsWhatTheNewestBackupsNeed(t *testing.T) {
 	a, fake, _ := fakeArchiver(t, false)
 	ctx := context.Background()

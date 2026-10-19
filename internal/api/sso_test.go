@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aburan28/conductor/internal/admin"
 	"github.com/aburan28/conductor/internal/client"
 	"github.com/aburan28/conductor/internal/coord"
 	"github.com/aburan28/conductor/internal/db"
@@ -214,6 +215,46 @@ func TestSSOSecondIdentityCannotTakeOverAPrincipal(t *testing.T) {
 	ids, _ := sh.store.ListIdentities(context.Background(), sh.bob.ID)
 	if len(ids) != 1 {
 		t.Fatalf("bob has %d identities, want 1", len(ids))
+	}
+}
+
+// An address registered on someone else cannot be registered again — by an invite or by
+// setting it — and a registration in an organization whose policy does not admit the
+// identity neither takes a first sign-in nor makes it ambiguous.
+func TestSSORegisteredAddressIsOneAccounts(t *testing.T) {
+	sh := newSSOHarness(t, nil)
+	ctx := context.Background()
+	sh.register(sh.bob, sh.email("bob"))
+
+	code, out := sh.doJSONOn(sh.srv, sh.aliceTok, http.MethodPost, sh.projectPath("/members"),
+		map[string]any{"handle": "bob-twin", "email": strings.ToUpper(sh.email("bob")), "no_token": true})
+	if code != http.StatusConflict {
+		t.Fatalf("inviting a new account with bob's address = %d %v, want 409", code, out)
+	}
+	if code, out := sh.doJSONOn(sh.srv, sh.aliceTok, http.MethodPut, sh.projectPath("/members/alice/email"),
+		map[string]any{"email": sh.email("bob")}); code != http.StatusConflict {
+		t.Fatalf("setting bob's address on alice = %d %v, want 409", code, out)
+	}
+	// Re-setting bob's own address is not a conflict.
+	if code, out := sh.doJSONOn(sh.srv, sh.aliceTok, http.MethodPut, sh.projectPath("/members/bob/email"),
+		map[string]any{"email": sh.email("bob")}); code != http.StatusOK {
+		t.Fatalf("re-setting bob's own address = %d %v", code, out)
+	}
+
+	// The same address registered (directly, as before this check) in another organization
+	// whose policy admits only another domain.
+	other, err := sh.store.CreateOrganization(ctx, uniq("sso-other", time.Now().UnixNano()), "Other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sh.store.PutOrgPolicy(ctx, other.ID, admin.Policy{AllowedDomains: []string{"elsewhere.example"}}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sh.store.CreatePrincipal(ctx, other.ID, domain.PrincipalHuman, "squatter", "squatter", sh.email("bob")); err != nil {
+		t.Fatal(err)
+	}
+	if _, who := sh.whoami(sh.signInToken("test")); who != "bob" {
+		t.Fatalf("first sign-in signed in as %q, want bob", who)
 	}
 }
 
@@ -566,6 +607,62 @@ func TestSSOLinkAnotherProvider(t *testing.T) {
 	local, _ := sh.store.CreateToken(context.Background(), sh.alice.ID, db.LocalTokenPrefix+"cli", time.Hour)
 	if code, _ := sh.doJSONOn(sh.srv, local, http.MethodPost, "/v1/sso/test/link", map[string]any{}); code < 400 {
 		t.Fatalf("a local sign-in token started a link: %d", code)
+	}
+}
+
+// A link sign-in has no browser binding, so its callback must not link anything: whoever
+// started the link could otherwise send its authorization URL to a victim and have the
+// victim's account linked to theirs (login CSRF). The link is made only when the ticket is
+// redeemed with the verifier of the principal who started it.
+func TestSSOLinkIsMadeOnlyAtRedemption(t *testing.T) {
+	sh := newSSOHarness(t, nil)
+	sh.idp.SetUser(ssotest.User{Subject: "victim-" + sh.tag, Email: sh.email("victim"), EmailVerified: true})
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tickets := make(chan string, 1)
+	go func() {
+		_ = http.Serve(ln, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			tickets <- r.URL.Query().Get("ticket")
+		}))
+	}()
+	t.Cleanup(func() { ln.Close() })
+
+	// Alice starts a link and hands the authorization URL to the victim's browser.
+	verifier := sso.NewVerifier()
+	code, out := sh.doJSONOn(sh.srv, sh.aliceTok, http.MethodPost, "/v1/sso/test/link", map[string]any{
+		"redirect_uri": "http://" + ln.Addr().String() + "/cb", "code_challenge": sso.Challenge(verifier),
+		"code_challenge_method": "S256"})
+	if code != http.StatusCreated {
+		t.Fatalf("link start = %d %v", code, out)
+	}
+	resp, err := browser().Get(out["authorization_url"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	ticket := <-tickets
+	if ticket == "" {
+		t.Fatal("the callback issued no ticket")
+	}
+	ctx := context.Background()
+	if _, found, err := sh.store.IdentityByAccount(ctx, sh.idp.Issuer, "victim-"+sh.tag); err != nil || found {
+		t.Fatalf("the callback linked the account before redemption (found=%v, err=%v)", found, err)
+	}
+	// The ticket alone, which is what reaches the victim's machine, links nothing.
+	if code, _ := sh.redeem(browser(), map[string]any{"ticket": ticket, "code_verifier": sso.NewVerifier()}); code != http.StatusUnauthorized {
+		t.Fatalf("a wrong verifier redeemed a link ticket: %d", code)
+	}
+	if _, found, _ := sh.store.IdentityByAccount(ctx, sh.idp.Issuer, "victim-"+sh.tag); found {
+		t.Fatal("a failed redemption linked the account")
+	}
+	if code, out := sh.redeem(browser(), map[string]any{"ticket": ticket, "code_verifier": verifier}); code != http.StatusOK || out["linked"] != true {
+		t.Fatalf("redeem with the verifier = %d %v", code, out)
+	}
+	if id, found, _ := sh.store.IdentityByAccount(ctx, sh.idp.Issuer, "victim-"+sh.tag); !found || id.PrincipalID != sh.alice.ID {
+		t.Fatalf("after redemption the account is linked to %+v (found=%v), want alice", id, found)
 	}
 }
 

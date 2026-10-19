@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 )
@@ -45,5 +46,22 @@ func TestFormatSecretLine(t *testing.T) {
 	}
 	if _, err := formatSecretLine("json", "OPENAI_API_KEY", "x"); err == nil {
 		t.Fatal("json is not a shell line format")
+	}
+}
+
+// The client drops reserved names whatever the server sends: an older server, or a row
+// stored before the vault refused them, must not reach a shell or wrap's child environment.
+func TestDropReservedSecrets(t *testing.T) {
+	var warn bytes.Buffer
+	env := dropReservedSecrets(map[string]string{
+		"OPENAI_API_KEY": "sk", "PATH": "/evil", "LD_PRELOAD": "/x.so", "GIT_CONFIG_COUNT": "1",
+	}, &warn)
+	if len(env) != 1 || env["OPENAI_API_KEY"] != "sk" {
+		t.Errorf("env = %v, want only OPENAI_API_KEY", env)
+	}
+	for _, name := range []string{"PATH", "LD_PRELOAD", "GIT_CONFIG_COUNT"} {
+		if !strings.Contains(warn.String(), name) {
+			t.Errorf("no warning for %s: %q", name, warn.String())
+		}
 	}
 }

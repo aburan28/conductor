@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -52,8 +53,11 @@ type Service struct {
 	Store       *db.Store
 	Key         KeyOpener
 	NewProvider ProviderFactory
-	Logger      *slog.Logger
-	Now         func() time.Time
+	// WIFProjectID opts one project into the server's Anthropic workload identity.
+	// Other projects continue to use their own vault credentials.
+	WIFProjectID domain.ID
+	Logger       *slog.Logger
+	Now          func() time.Time
 }
 
 func (s *Service) now() time.Time {
@@ -90,6 +94,15 @@ func Offline() delphi.Registry {
 // enabled inference endpoint of that kind names, or the default name; the base URL is always
 // the provider's own (or the operator's environment), never a member-supplied one.
 func (s *Service) provider(ctx context.Context, project domain.Project, kind string) (delphi.Provider, error) {
+	if kind == "anthropic" && s.WIFProjectID != "" && project.ID == s.WIFProjectID {
+		if !federationReady() {
+			return nil, fmt.Errorf("%w: Anthropic workload federation is not ready on this server", domain.ErrInvalidArgument)
+		}
+		if s.NewProvider != nil {
+			return s.NewProvider(kind, "")
+		}
+		return anthropic.New()
+	}
 	if s.Key == nil {
 		return nil, fmt.Errorf("%w: the secret vault is not enabled on this server", domain.ErrInvalidArgument)
 	}
@@ -117,6 +130,24 @@ func (s *Service) provider(ctx context.Context, project domain.Project, kind str
 		factory = DefaultProvider
 	}
 	return factory(kind, key)
+}
+
+// federationReady requires a rotating assertion file and rejects credential settings
+// that could cause the SDK to use a raw key or send the exchanged token to a custom host.
+func federationReady() bool {
+	for _, name := range []string{"ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_ORGANIZATION_ID",
+		"ANTHROPIC_SERVICE_ACCOUNT_ID", "ANTHROPIC_IDENTITY_TOKEN_FILE"} {
+		if os.Getenv(name) == "" {
+			return false
+		}
+	}
+	for _, name := range []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE",
+		"ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_BASE_URL", "ANTHROPIC_IDENTITY_TOKEN"} {
+		if os.Getenv(name) != "" {
+			return false
+		}
+	}
+	return true
 }
 
 // SubmitRequest is the body of a delegation: delphi's input row plus Conductor fields.

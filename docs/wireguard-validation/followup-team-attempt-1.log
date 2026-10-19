@@ -1,0 +1,131 @@
+Evidence: /workspace/conductor-coverage-followup/team-attempt-1
+┌──────────────────────────────────────────────────────┐
+│                                                      │
+│   Running wireguard-go is not required because this  │
+│   kernel has first class support for WireGuard. For  │
+│   information on installing the kernel module,       │
+│   please visit:                                      │
+│         https://www.wireguard.com/install/           │
+│                                                      │
+└──────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│                                                      │
+│   Running wireguard-go is not required because this  │
+│   kernel has first class support for WireGuard. For  │
+│   information on installing the kernel module,       │
+│   please visit:                                      │
+│         https://www.wireguard.com/install/           │
+│                                                      │
+└──────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│                                                      │
+│   Running wireguard-go is not required because this  │
+│   kernel has first class support for WireGuard. For  │
+│   information on installing the kernel module,       │
+│   please visit:                                      │
+│         https://www.wireguard.com/install/           │
+│                                                      │
+└──────────────────────────────────────────────────────┘
+WireGuard templates written to /tmp/conductor-wg-fixture.34tIeo/plan; add each private key on its owning node before activation.
+PASS native-client-api-origin https://10.88.0.1:8443
+PASS health status=200
+PASS native-client-api-origin https://10.88.0.1:8443
+PASS health status=200
+PASS native-client-api-origin https://10.88.0.1:8443
+PASS trusted-ca-health status=200
+PASS untrusted-ca-refused TLS-unknown-authority
+PASS native-client-api-origin https://10.88.0.1:8443
+PASS underlay-application-unavailable ECONNREFUSED
+PASS: both worker clients use overlay HTTPS with validated local CA; reachable underlay has no application listener
+PASS native-client-api-origin https://10.88.0.1:8443
+PASS invite-member status=201
+PASS native-client-api-origin https://10.88.0.1:8443
+PASS claimant-identity status=200
+PASS create-task status=201
+PASS claim-task status=200
+PASS: actual native conductor CLI task list exits 0 for both independent worker identities over overlay TLS
+PASS native-client-api-origin https://10.88.0.1:8443
+PASS conflicting-claim status=409
+PASS contributor-cannot-invite status=403
+PASS native-client-api-origin https://10.88.0.1:8443
+PASS outsider-whoami status=200
+PASS outsider-side-project status=200
+PASS outsider-main-read status=404
+PASS outsider-main-claim status=404
+PASS native-client-api-origin https://10.88.0.1:8443
+PASS missing-token-main-read status=401
+PASS missing-token-main-claim status=401
+PASS native-client-api-origin https://10.88.0.1:8443
+PASS owner-task-read status=200
+PASS owner-reservations-read status=200
+PASS owner-and-fence-unchanged
+PASS native-client-api-origin https://10.88.0.1:8443
+PASS create-disposable-token status=201
+PASS disposable-token-works status=200
+PASS revoke-disposable-token status=204
+PASS revoked-token-refused status=401
+PASS original-token-still-works status=200
+PING 10.88.0.1 (10.88.0.1) 56(84) bytes of data.
+64 bytes from 10.88.0.1: icmp_seq=1 ttl=64 time=0.496 ms
+64 bytes from 10.88.0.1: icmp_seq=2 ttl=64 time=4.23 ms
+64 bytes from 10.88.0.1: icmp_seq=3 ttl=64 time=0.430 ms
+64 bytes from 10.88.0.1: icmp_seq=4 ttl=64 time=0.374 ms
+
+--- 10.88.0.1 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3046ms
+rtt min/avg/max/mdev = 0.374/1.381/4.225/1.642 ms
+PASS native-client-api-origin https://10.88.0.1:8443
+PASS health status=200
+PASS: application token revocation is enforced while both WireGuard peers and the original member token remain usable
+PASS native-client-api-origin https://10.88.0.1:8443
+PASS grant-side-membership status=201
+PASS native-client-api-origin https://10.88.0.1:8443
+PASS remove-main-membership status=204
+PASS native-client-api-origin https://10.88.0.1:8443
+PASS after-remove-main-whoami status=200
+PASS after-remove-main-side-project status=200
+PASS after-remove-main-main-read status=404
+PASS after-remove-main-main-claim status=404
+PASS native-client-api-origin https://10.88.0.1:8443
+PASS remove-final-membership status=204
+PASS native-client-api-origin https://10.88.0.1:8443
+PASS final-removal-invalidates-token status=401
+PASS final-removal-refuses-project status=401
+PING 10.88.0.1 (10.88.0.1) 56(84) bytes of data.
+64 bytes from 10.88.0.1: icmp_seq=1 ttl=64 time=0.353 ms
+64 bytes from 10.88.0.1: icmp_seq=2 ttl=64 time=0.442 ms
+64 bytes from 10.88.0.1: icmp_seq=3 ttl=64 time=0.473 ms
+64 bytes from 10.88.0.1: icmp_seq=4 ttl=64 time=0.378 ms
+
+--- 10.88.0.1 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3056ms
+rtt min/avg/max/mdev = 0.353/0.411/0.473/0.048 ms
+PASS native-client-api-origin https://10.88.0.1:8443
+PASS owner-task-read status=200
+PASS owner-reservations-read status=200
+PASS owner-and-fence-unchanged
+PASS: membership-only removal preserves authentication to the side project; last-membership removal revokes credentials; WireGuard connectivity is unchanged
+PASS native-client-api-origin https://10.88.0.1:8443
+PASS health status=200
+PING 10.88.0.1 (10.88.0.1) 56(84) bytes of data.
+64 bytes from 10.88.0.1: icmp_seq=1 ttl=64 time=0.560 ms
+64 bytes from 10.88.0.1: icmp_seq=2 ttl=64 time=0.612 ms
+64 bytes from 10.88.0.1: icmp_seq=3 ttl=64 time=0.522 ms
+64 bytes from 10.88.0.1: icmp_seq=4 ttl=64 time=0.472 ms
+
+--- 10.88.0.1 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3057ms
+rtt min/avg/max/mdev = 0.472/0.541/0.612/0.051 ms
+PASS: explicit WireGuard peer withdrawal separately blocks packets; remaining worker still reaches the native service
+PING 10.88.0.1 (10.88.0.1) 56(84) bytes of data.
+64 bytes from 10.88.0.1: icmp_seq=1 ttl=64 time=0.494 ms
+64 bytes from 10.88.0.1: icmp_seq=2 ttl=64 time=0.393 ms
+64 bytes from 10.88.0.1: icmp_seq=3 ttl=64 time=0.539 ms
+64 bytes from 10.88.0.1: icmp_seq=4 ttl=64 time=0.517 ms
+
+--- 10.88.0.1 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3056ms
+rtt min/avg/max/mdev = 0.393/0.485/0.539/0.055 ms
+PASS: native SIGTERM closes the application listener while the remaining WireGuard peer remains reachable
+WIREGUARD_NATIVE_TEAM_PASS: real service/database, two worker identities, overlay TLS, CLI smoke, claim/conflict, nonmember/missing-token refusals, token/member revocation, selective network withdrawal and shutdown
+PASS: all owned containers, network and private fixture files removed

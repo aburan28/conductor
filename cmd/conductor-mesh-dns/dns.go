@@ -92,6 +92,12 @@ func (s *dnsServer) answer(query []byte) []byte {
 	if len(query) < 12 {
 		return nil
 	}
+	// Only a standard query (QR clear, opcode 0) gets an answer. Replying to a response would
+	// let a spoofed packet bounce two DNS servers off each other indefinitely, and NOTIFY or
+	// UPDATE are not something to answer as if they were questions.
+	if query[2]&0x80 != 0 || (query[2]>>3)&0x0F != 0 {
+		return nil
+	}
 	id := query[0:2]
 	qdcount := int(binary.BigEndian.Uint16(query[4:6]))
 	off := 12

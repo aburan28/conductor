@@ -46,6 +46,24 @@ func testCatalog() Catalog {
 	}
 }
 
+func TestUnknownTokenPriceDoesNotRankAsFree(t *testing.T) {
+	cat := testCatalog()
+	cat.Profiles = append(cat.Profiles, domain.ModelProfile{
+		ID: "unpriced", Alias: "worker.general", Harness: "opencode",
+		Model: "unpriced-model", Capabilities: []string{"code_edit", "tests", "multi_file"},
+		Tier: domain.TierT2, Billing: "tokens", Enabled: true,
+	})
+	p, err := cat.Resolve("worker.general", domain.TierT2, Request{
+		AvailableHarnesses: []string{"claude", "opencode"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Model != "mid-model" {
+		t.Fatalf("resolved %q; unknown token price must not outrank a priced model", p.Model)
+	}
+}
+
 func TestTrivialWorkRoutesCheap(t *testing.T) {
 	d, err := Route(testCatalog(), Request{
 		Role:     domain.RoleImplementer,
@@ -372,5 +390,43 @@ func TestDelphiProfilesAreNotRouted(t *testing.T) {
 	p, err := c.Resolve("worker.fast", domain.TierT1, Request{})
 	if err != nil || p.ID != "p1" {
 		t.Fatalf("resolved %+v, %v", p, err)
+	}
+}
+
+// The frontier tier is the top of the derived ladder: an alias with no usable profile falls
+// back up through the core planner to the T4 reasoner, and a frontier profile running at max
+// effort keeps max on a retry instead of being "escalated" down to high.
+func TestFrontierTierTopsTheLadder(t *testing.T) {
+	aliases := map[string]AliasPolicy{
+		"worker.fast":         {Tier: domain.TierT1},
+		"executor.mechanical": {Tier: domain.TierT1},
+		"director":            {Tier: domain.TierT2},
+		"planner.frontier":    {Tier: domain.TierT3},
+		"reasoner.frontier":   {DefaultEffort: domain.EffortMax, Tier: domain.TierT4},
+	}
+	got := LadderFor(aliases)
+	if want := []string{"worker.fast", "planner.frontier", "reasoner.frontier"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("LadderFor = %v, want %v", got, want)
+	}
+
+	cat := Catalog{
+		Aliases: aliases, Ladder: got, DefaultAlias: "worker.fast",
+		Profiles: []domain.ModelProfile{
+			{ID: "f1", Alias: "reasoner.frontier", Harness: "claude", Model: "claude-fable-5-1",
+				Tier: domain.TierT4, ReasoningEffort: domain.EffortMax, Enabled: true},
+		},
+	}
+	p, err := cat.Resolve("planner.frontier", domain.TierT3, Request{})
+	if err != nil || p.ID != "f1" {
+		t.Fatalf("planner with no profile should fall back to the frontier reasoner: %+v, %v", p, err)
+	}
+
+	d, err := Route(cat, Request{RequestedAlias: "reasoner.frontier", PriorFailures: 1,
+		Features: domain.TaskFeatures{EstimatedFiles: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Model != "claude-fable-5-1" || d.Effort != domain.EffortMax {
+		t.Errorf("frontier retry: model %s effort %s, want claude-fable-5-1 at max", d.Model, d.Effort)
 	}
 }

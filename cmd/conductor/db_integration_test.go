@@ -96,8 +96,10 @@ func TestDatabaseArchiveRestoreEndToEnd(t *testing.T) {
 	}
 	chownPG(work)
 
+	// LC_ALL/LANG: PostgreSQL 18 refuses to start without a valid locale
+	// ("postmaster became multithreaded during startup" on macOS).
 	env := []string{"CONDUCTOR_STATE_DIR=" + state, "CONDUCTOR_CHECKPOINT_KEY=e2e passphrase",
-		"PATH=" + bin + ":/usr/bin:/bin", "HOME=" + work}
+		"PATH=" + bin + ":/usr/bin:/bin", "HOME=" + work, "LC_ALL=C", "LANG=C"}
 	var failNote func() string
 	run := func(args ...string) string {
 		t.Helper()

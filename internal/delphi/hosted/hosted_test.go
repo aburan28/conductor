@@ -270,3 +270,62 @@ func TestMissingKeyIsActionable(t *testing.T) {
 		t.Fatalf("missing key: %v", err)
 	}
 }
+
+func TestFederationReadyRequiresRotatingFileWithoutKeyOverride(t *testing.T) {
+	for name, value := range map[string]string{
+		"ANTHROPIC_FEDERATION_RULE_ID": "fdrl_test", "ANTHROPIC_ORGANIZATION_ID": "org-test",
+		"ANTHROPIC_SERVICE_ACCOUNT_ID": "svac_test", "ANTHROPIC_IDENTITY_TOKEN_FILE": "/tmp/token",
+		"ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": "", "ANTHROPIC_PROFILE": "",
+		"ANTHROPIC_CUSTOM_HEADERS": "", "ANTHROPIC_BASE_URL": "",
+		"ANTHROPIC_IDENTITY_TOKEN": "",
+	} {
+		t.Setenv(name, value)
+	}
+	if !federationReady() {
+		t.Fatal("complete federation environment rejected")
+	}
+	for _, name := range []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE", "ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_BASE_URL", "ANTHROPIC_IDENTITY_TOKEN"} {
+		t.Setenv(name, "override")
+		if federationReady() {
+			t.Fatalf("%s override accepted", name)
+		}
+		t.Setenv(name, "")
+	}
+	t.Setenv("ANTHROPIC_IDENTITY_TOKEN_FILE", "")
+	if federationReady() {
+		t.Fatal("missing rotating token file accepted")
+	}
+}
+
+func TestProviderUsesFederationOnlyForSelectedProject(t *testing.T) {
+	f := newFixture(t)
+	for name, value := range map[string]string{
+		"ANTHROPIC_FEDERATION_RULE_ID": "fdrl_test", "ANTHROPIC_ORGANIZATION_ID": "org-test",
+		"ANTHROPIC_SERVICE_ACCOUNT_ID": "svac_test", "ANTHROPIC_IDENTITY_TOKEN_FILE": "/tmp/token",
+		"ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": "", "ANTHROPIC_PROFILE": "",
+		"ANTHROPIC_CUSTOM_HEADERS": "", "ANTHROPIC_BASE_URL": "",
+		"ANTHROPIC_IDENTITY_TOKEN": "",
+	} {
+		t.Setenv(name, value)
+	}
+	f.svc.WIFProjectID = f.project.ID
+	f.svc.NewProvider = func(kind, key string) (delphi.Provider, error) {
+		if kind != "anthropic" || key != "" {
+			t.Fatalf("federation passed a key or wrong provider: %q %q", kind, key)
+		}
+		return f.prov, nil
+	}
+	if _, err := f.svc.provider(f.ctx, f.project, "anthropic"); err != nil || len(f.opened) != 0 {
+		t.Fatalf("federated provider: %v, vault opens %v", err, f.opened)
+	}
+	f.svc.WIFProjectID = "another-project"
+	f.svc.NewProvider = func(kind, key string) (delphi.Provider, error) {
+		if kind != "anthropic" || key != "sk-test" {
+			t.Fatalf("other project did not use its vault: %q %q", kind, key)
+		}
+		return f.prov, nil
+	}
+	if _, err := f.svc.provider(f.ctx, f.project, "anthropic"); err != nil || len(f.opened) != 1 {
+		t.Fatalf("project isolation: %v, vault opens %v", err, f.opened)
+	}
+}

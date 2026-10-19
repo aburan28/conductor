@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -36,6 +37,52 @@ func testRDSCA(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// TestRDSLiveConnection is an opt-in read-only smoke against an existing RDS endpoint.
+// The file form keeps credentials out of shell history and process arguments. It does
+// not apply migrations or read tenant rows; use a disposable database for write,
+// migration, failover, and restore testing.
+func TestRDSLiveConnection(t *testing.T) {
+	file := os.Getenv("CI_RDS_DATABASE_URL_FILE")
+	dsn := os.Getenv("CI_RDS_DATABASE_URL")
+	if file != "" && dsn != "" {
+		t.Fatal("set only one RDS test DSN source")
+	}
+	if file != "" {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read RDS test DSN file: %v", err)
+		}
+		dsn = strings.TrimSpace(string(data))
+	}
+	if dsn == "" {
+		t.Skip("CI_RDS_DATABASE_URL_FILE or CI_RDS_DATABASE_URL is required for live RDS smoke")
+	}
+	if err := ValidateDSN("rds", dsn); err != nil {
+		t.Fatalf("RDS TLS configuration: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	store, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("RDS connection failed (%T; connection details omitted)", err)
+	}
+	defer store.Close()
+	var ssl bool
+	var tlsVersion, serverVersion string
+	err = store.Pool().QueryRow(ctx, `SELECT ssl, COALESCE(version, '')
+		FROM pg_stat_ssl WHERE pid = pg_backend_pid()`).Scan(&ssl, &tlsVersion)
+	if err != nil {
+		t.Fatalf("read own TLS session (%T; connection details omitted)", err)
+	}
+	if !ssl || tlsVersion == "" {
+		t.Fatal("RDS session did not negotiate TLS")
+	}
+	if err := store.Pool().QueryRow(ctx, `SHOW server_version`).Scan(&serverVersion); err != nil {
+		t.Fatalf("read server version (%T; connection details omitted)", err)
+	}
+	t.Logf("RDS read-only smoke passed: PostgreSQL %s, %s", serverVersion, tlsVersion)
 }
 
 func TestRDSRequiresVerifiedTLSOnEveryHost(t *testing.T) {

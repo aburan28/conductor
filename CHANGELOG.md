@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.1.6](https://github.com/aburan28/conductor/compare/v0.1.5...v0.1.6) (2026-10-18)
+
+
+### Features
+
+* **delphi:** launch project batches from dashboard with scoped WIF ([#98](https://github.com/aburan28/conductor/issues/98)) ([e6d99fb](https://github.com/aburan28/conductor/commit/e6d99fb5afb23fc873c63ec63bb6ac6b7e4f690f))
+
+
+### Bug Fixes
+
+* **test:** give the throwaway PostgreSQL a locale so PostgreSQL 18 starts on macOS ([#94](https://github.com/aburan28/conductor/issues/94)) ([d99a2bb](https://github.com/aburan28/conductor/commit/d99a2bbb23d5e59862d7614886e414c95c3dfe13))
+
+## [0.1.5](https://github.com/aburan28/conductor/compare/v0.1.4...v0.1.5) (2026-10-17)
+
+
+### Features
+
+* add advisory quality.lint for public task envelopes ([#87](https://github.com/aburan28/conductor/issues/87)) ([0d829c8](https://github.com/aburan28/conductor/commit/0d829c82b89b45a46534e567bf9017f9b837a7f8))
+
+
+### Bug Fixes
+
+* **setup:** scaffold the four-tier topology; Opus is core, Fable is frontier ([d4a71dd](https://github.com/aburan28/conductor/commit/d4a71dd71d966f562a5687c0f0422c290be9c045))
+* **setup:** scaffold the four-tier topology; Opus is core, Fable is frontier ([b04cb86](https://github.com/aburan28/conductor/commit/b04cb86bad3f09ac253b42f8d0f279ef6af4613a))
+
+## [0.1.4](https://github.com/aburan28/conductor/compare/v0.1.3...v0.1.4) (2026-10-17)
+
+
+### Bug Fixes
+
+* **release:** dispatch the release build so release-please releases get assets ([#84](https://github.com/aburan28/conductor/issues/84)) ([a0f2217](https://github.com/aburan28/conductor/commit/a0f2217413cae53a2d0d3fa028a2929b24564b06))
+
+## [0.1.3](https://github.com/aburan28/conductor/compare/v0.1.2...v0.1.3) (2026-10-17)
+
+
+### Features
+
+* **network:** add private WireGuard plans and offline discovery ([#78](https://github.com/aburan28/conductor/issues/78)) ([8b9e99a](https://github.com/aburan28/conductor/commit/8b9e99a68229aa4d5b3d42b45237dcfed72869de))
+
 ## [0.1.2](https://github.com/aburan28/conductor/compare/v0.1.1...v0.1.2) (2026-10-17)
 
 

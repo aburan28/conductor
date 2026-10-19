@@ -153,30 +153,51 @@ func (s *Store) ListValidation(ctx context.Context, taskID domain.ID) ([]domain.
 
 // RequiredChecksPassed reports whether every required check has a passing result on the
 // attempt. Verification consults this before allowing done (DESIGN.md §15.2).
+//
+// Only a runner's observation counts (§25.5). Rows with no runner id are the agent's own
+// report (coord_publish_result) and stay visible in ListValidation, but "tests passed" from
+// the model is a claim, not evidence. And it is the latest runner result for a command that
+// counts: a pass followed by a failure is a failure. Rows from one submission share a
+// timestamp; if they disagree, the failure wins.
 func (s *Store) RequiredChecksPassed(ctx context.Context, attemptID domain.ID, required []string) (bool, []string, error) {
 	if len(required) == 0 {
 		return true, nil, nil
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT command, exit_code FROM validation_results WHERE attempt_id = $1::uuid`, attemptID)
+		SELECT command, exit_code, created_at FROM validation_results
+		 WHERE attempt_id = $1::uuid AND runner_id IS NOT NULL
+		 ORDER BY created_at`, attemptID)
 	if err != nil {
 		return false, nil, err
 	}
 	defer rows.Close()
 
-	passed := map[string]bool{}
+	type latest struct {
+		at     time.Time
+		passed bool
+	}
+	seen := map[string]latest{}
 	for rows.Next() {
 		var cmd string
 		var code int
-		if err := rows.Scan(&cmd, &code); err != nil {
+		var at time.Time
+		if err := rows.Scan(&cmd, &code, &at); err != nil {
 			return false, nil, err
 		}
-		if code == 0 {
-			passed[cmd] = true
+		prev, ok := seen[cmd]
+		switch {
+		case !ok || at.After(prev.at):
+			seen[cmd] = latest{at, code == 0}
+		case at.Equal(prev.at):
+			seen[cmd] = latest{at, prev.passed && code == 0}
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return false, nil, err
+	}
+	passed := map[string]bool{}
+	for cmd, l := range seen {
+		passed[cmd] = l.passed
 	}
 
 	var missing []string

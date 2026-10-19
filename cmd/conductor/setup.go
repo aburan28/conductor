@@ -382,7 +382,11 @@ const scaffoldModels = `models:
       capability_floor: [code_review, architecture]
       default_effort: high
       tier: T3
-  ladder: [worker.fast, worker.general, planner.frontier]
+    reasoner.frontier:
+      capability_floor: [architecture, long_context, code_review]
+      default_effort: max
+      tier: T4
+  ladder: [worker.fast, worker.general, planner.frontier, reasoner.frontier]
 
 # Fill in the models your installation actually has. Profiles with an empty model are
 # ignored rather than treated as broken.
@@ -390,26 +394,33 @@ profiles:
   - alias: worker.fast
     harness: claude
     provider: anthropic
-    model: claude-haiku-4-5-20251001
+    model: claude-haiku-5-5
     capabilities: [code_edit, tests, read_diff]
     tier: T1
   - alias: worker.general
     harness: claude
     provider: anthropic
-    model: claude-sonnet-5
+    model: claude-sonnet-5-5
     capabilities: [code_edit, tests, multi_file, read_diff]
     tier: T2
   - alias: planner.frontier
     harness: claude
     provider: anthropic
-    model: claude-opus-5
+    model: claude-opus-5-5
     capabilities: [architecture, long_context, code_edit, strong_tool_use]
-    tier: T4
+    tier: T3
   - alias: reviewer.strong
     harness: claude
     provider: anthropic
-    model: claude-opus-5
+    model: claude-opus-5-5
     capabilities: [code_review, architecture, long_context]
+    tier: T3
+  # The frontier tier: the security floor in policies.yaml requires T4.
+  - alias: reasoner.frontier
+    harness: claude
+    provider: anthropic
+    model: claude-fable-5-1
+    capabilities: [architecture, long_context, code_edit, strong_tool_use, code_review]
     tier: T4
 `
 

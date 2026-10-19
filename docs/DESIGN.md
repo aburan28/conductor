@@ -990,6 +990,12 @@ cost_budget
 | T3 | Ambiguous, cross-module, architecture-sensitive work | Frontier planner and strong implementer/reviewer as needed |
 | T4 | Cryptography, auth, permissions, data migration, public protocols, production infrastructure | Frontier planning plus independent review and often human approval |
 
+The repository's own catalog (`.conductor/models.yaml`, README "Model tiers") maps these onto
+model classes: T4 is the frontier class (`reasoner.frontier`: Claude Fable 5.1, Mythos 5 and
+GPT-6 Sol once verified), T3 the core class (Opus 5.5, GPT-5.6 Sol, GLM 5.3), T2 the director
+and general worker (Sonnet 5.5), and T1 the mechanical class (`executor.mechanical`: Haiku 5.5,
+GPT-5.6 Luna, Qwen 3.8 27B), which runs fully specified work at low effort.
+
 ### 13.5 Hard routing rules
 
 Examples:

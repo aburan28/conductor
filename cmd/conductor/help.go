@@ -287,6 +287,27 @@ cloud product's own secret store.
 
 Run ` + "`conductor secrets <subcommand> -h`" + ` for its flags.
 `},
+	{name: "quality", group: "Coordinate", subs: []string{"lint"},
+		summary: "advisory quality.lint on a public task envelope (never a merge gate)",
+		topic: `conductor quality — advisory lint for public task envelopes
+
+Runs heuristic checks on summary, objective, acceptance criteria, scopes, and labels.
+Findings are always advisory:true and never block merge. When CONDUCTOR_QUALITY_LINT_URL
+points at a local or OpenAI-compatible endpoint, a cheap T1 model (verifier.cheap) may
+add more findings. Chats and secrets are out of scope; private tasks are redacted.
+
+Usage:
+  conductor quality lint [--summary S] [--objective O] [--criterion TEXT]…
+                         [--scope path:FILE|dir:DIR]… [--label L]… [--task T-42]
+                         [--project SLUG] [--json]
+
+Example:
+  conductor quality lint --summary "Add retry-aware routing" \
+    --criterion "go test ./internal/router/... passes" \
+    --scope dir:internal/router --label backend
+
+See docs/QUALITY_LINT.md.
+`},
 	{name: "delphi", group: "Coordinate",
 		subs:    []string{"ask", "show", "answer", "list", "profiles", "cancel", "reconcile"},
 		summary: "delegate a prompt to a frontier model through a batch API (half price, answered later)",
@@ -471,8 +492,8 @@ Example:
 
 Run ` + "`conductor systemd <subcommand> -h`" + ` for its flags.
 `},
-	{name: "accounts", group: "Sessions and machines", subs: []string{"add", "list", "switch", "exhaust", "ok"},
-		summary: "harness login profiles: switch accounts when usage runs out",
+	{name: "accounts", group: "Sessions and machines", subs: []string{"add", "list", "switch", "exhaust", "ok", "login", "use", "unbind", "alias", "unalias"},
+		summary: "harness login profiles: switch accounts, or give a project its own",
 		topic: `conductor accounts — harness login profiles resume-all can switch between
 
 Usage:
@@ -481,13 +502,25 @@ Usage:
   conductor accounts switch <harness> <name>       make <name> the harness's live account
   conductor accounts exhaust <harness> <name>      mark an account out of usage
   conductor accounts ok <harness> <name>           mark an account usable again
+  conductor accounts login <harness> <name>        an isolated account: its own state directory
+  conductor accounts use <harness> <name>          wrap this project's <harness> under that account
+  conductor accounts unbind <harness>              back to the default login in this project
+  conductor accounts alias <harness> <alias> <account|dir>   another name for an account
+  conductor accounts unalias <harness> <alias>     forget an alias
 
 Harnesses: claude, codex, opencode. An account is added by logging in with the harness
 itself, then snapshotting; a quota marker makes resume-all prefer another account when
 waking sessions after a restart.
 
+Isolated accounts (claude, codex, cursor, opencode) never touch the live login: wrap points
+the harness at the account's directory (CLAUDE_CONFIG_DIR, CODEX_HOME, XDG_DATA_HOME, or
+Cursor's --user-data-dir), so two projects can run under two accounts at once. An alias
+works wherever a name does, and a project bound to an alias follows it when it is re-pointed.
+
 Example:
   conductor accounts add claude main
+  conductor accounts login claude work --use
+  conductor accounts alias claude acme work
 
 Run ` + "`conductor accounts <subcommand> -h`" + ` for its flags.`},
 	{name: "sessions", group: "Sessions and machines", subs: []string{"save", "list", "export", "install-hook"},

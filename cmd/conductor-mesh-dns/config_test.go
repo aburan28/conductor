@@ -73,3 +73,39 @@ func TestInvalidDirectoryIdentityFailsBeforeDetection(t *testing.T) {
 		}
 	}
 }
+
+func TestDirectoryHostnameWireLimits(t *testing.T) {
+	// Four labels occupy the maximum 255-byte wire name, including their
+	// length bytes and the root terminator.
+	maximum := strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + "." + strings.Repeat("d", 61)
+	for _, input := range []string{maximum, strings.ToUpper(maximum) + ".", "localhost", "worker-1.internal."} {
+		name, err := directoryHostname(input)
+		if err != nil {
+			t.Fatalf("valid hostname %q: %v", input, err)
+		}
+		if len(encodeName(name)) > 255 || !strings.HasSuffix(name, ".") || name != strings.ToLower(name) {
+			t.Fatalf("hostname not normalized or wire encodable: %q", name)
+		}
+	}
+	for _, input := range []string{"", ".", maximum + "d", "worker_.internal", "worker-.internal", "worker.internal..", "wörker.internal", " worker.internal", "::1"} {
+		if _, err := directoryHostname(input); err == nil {
+			t.Errorf("invalid hostname %q accepted", input)
+		}
+	}
+}
+
+func TestExplicitHostnameWithoutAddressSkipsDetection(t *testing.T) {
+	identity, err := resolveDirectoryIdentity("Leader.INTERNAL.", "", "peer.internal", func() (string, net.IP, error) {
+		t.Fatal("explicit hostname attempted automatic detection")
+		return "", nil, nil
+	})
+	if err != nil || identity.hostname != "leader.internal." || identity.meshTarget != "peer.internal." || identity.ip != nil || identity.detectionError != nil {
+		t.Fatalf("hostname-only identity = %+v, %v", identity, err)
+	}
+	server := newDNSServer(identity.hostname, identity.ip, builtinServices)
+	for _, qtype := range []uint16{1, 28} {
+		if rcode, count := parseHeader(t, server.answer(buildQuery(1, identity.hostname, qtype))); rcode != 0 || count != 0 {
+			t.Fatalf("hostname-only type %d = %d/%d, want NOERROR without address data", qtype, rcode, count)
+		}
+	}
+}

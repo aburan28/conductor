@@ -23,18 +23,57 @@ lanes:
       #   tags: [local, cheap]
       #   when: task.estimated_files <= 3 && !task.security_sensitive
       #   max_concurrent: 1
-      - model: claude-sonnet-5
-        harness: claude
-        effort: medium
-      - model: claude-opus-5
-        harness: claude
-        effort: high
+      # Verified with an isolated OpenCode file-tool probe on 2026-10-17.
+      # The label confirms this task contains only material approved for a
+      # third-party free tier. Tier and capability floors still apply.
+      - model: openrouter/poolside/laguna-xs-2.1:free
+        harness: opencode
+        tags: [free, public]
+        when: task.labels has "public-free-ok" && task.estimated_files <= 3 && !task.security_sensitive && !task.cryptography_sensitive
+        max_concurrent: 1
+      - alias: worker.fast
+        when: task.estimated_files <= 2 && task.acceptance_ambiguity < 0.2 && task.cross_module_edges == 0 && !task.security_sensitive && !task.cryptography_sensitive
+      # Resolve through the catalog so endpoint discovery can advance these
+      # aliases without leaving this ladder pinned to a retired model ID.
+      - alias: worker.general
+      - alias: planner.frontier
 
   review:
     role: reviewer
     review: required
     candidates:
       - alias: reviewer.strong
+
+  # The frontier tier (T4): breakthrough-grade work -- a claimed break, an architecture the
+  # project cannot back out of, a review whose verdict is final. Selected by the `frontier-work`
+  # rule below, which also requires T4, so nothing cheaper can serve it. A T4 decision always
+  # carries a required review.
+  frontier:
+    role: implementer
+    candidates:
+      - model: claude-fable-5-1
+        harness: claude
+        effort: max
+      # Unverified on this installation; enable alongside its models.yaml profile.
+      # - model: claude-mythos-5
+      #   harness: claude
+      #   effort: max
+      # - model: gpt-6.1-sol
+      #   harness: codex
+      #   effort: max
+
+  # Fully specified execution: a runbook or a task whose every step, value and stop condition
+  # is already written down. The mechanical tier (T1, effort low) runs it and reasons about
+  # nothing; on failure the work escalates one step, to the director (T2), whose job is to
+  # rewrite the instructions or assess what went wrong -- never past it, because a spec that
+  # needs core-tier reasoning was not fully specified and goes back to whoever wrote it.
+  mechanical:
+    role: implementer
+    candidates:
+      - alias: executor.mechanical
+        effort: low
+      - alias: director
+        effort: high
 
   # Candidate search against a cairn objective. See docs/cairn-integration.md.
   #
@@ -58,14 +97,27 @@ lanes:
         tags: [local, cheap]
         # One GPU, one attempt. Without this the lane will happily start four.
         max_concurrent: 1
-      - model: claude-sonnet-5
+      - model: claude-sonnet-5-5
         harness: cairn
         effort: medium
-      - model: claude-opus-5
+      - model: claude-opus-5-5
         harness: cairn
         effort: high
 
 rules:
+  # Fully specified work goes to the mechanical lane. Never security, cryptography or schema
+  # work: those keep their floors on the default lanes.
+  - id: mechanical-execution
+    when: (task.labels has "mechanical" || task.labels has "runbook") && !task.security_sensitive && !task.schema_or_migration
+    lane: mechanical
+
+  # Breakthrough-grade work needs the frontier tier. Listed after the mechanical rule so a task
+  # carrying both labels lands on the frontier lane, and the T4 floor holds either way.
+  - id: frontier-work
+    when: task.labels has "breakthrough" || task.labels has "frontier"
+    lane: frontier
+    require: { tier: T4 }
+
   # Documentation and comment-only work can go to the cheapest local candidate.
   - id: docs-local
     when: task.labels has "docs"

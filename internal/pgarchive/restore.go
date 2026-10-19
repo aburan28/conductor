@@ -63,6 +63,14 @@ func (a *Archiver) Restore(ctx context.Context, opts RestoreOptions) (Manifest, 
 		}
 	}
 
+	// A manifest is as writable as everything else in the bucket, and its "sealed": false is
+	// a request to skip authentication (variants).
+	if a.cfg.Seal && !m.Sealed {
+		return Manifest{}, fmt.Errorf("backup %s is not sealed, and this archive is configured to seal; "+
+			"refusing to restore an object anyone with write access to the bucket could have written "+
+			"(turn sealing off to restore a backup taken before it was on)", m.ID)
+	}
+
 	// The key first: a wrong passphrase should fail before a multi-gigabyte download starts.
 	var key *DataKey
 	if m.Sealed {

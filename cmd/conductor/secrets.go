@@ -279,7 +279,22 @@ func fetchSecretEnv(ctx context.Context, project string) (map[string]string, err
 	if out.Env == nil {
 		out.Env = map[string]string{}
 	}
-	return out.Env, nil
+	return dropReservedSecrets(out.Env, os.Stderr), nil
+}
+
+// dropReservedSecrets removes every secret whose name is reserved (secrets.ReservedName).
+// Every caller of fetchSecretEnv puts the result into an environment — a shell, wrap's
+// child, Claude's settings.json — so a name like PATH, LD_PRELOAD or GIT_CONFIG_COUNT is
+// dropped here whatever the server sent: an older server, or a row stored before the vault
+// refused them.
+func dropReservedSecrets(env map[string]string, warn io.Writer) map[string]string {
+	for _, name := range sortedMapKeys(env) {
+		if secrets.ReservedName(name) {
+			fmt.Fprintf(warn, "warning: skipping secret %q; it names an environment variable that controls how programs run\n", name)
+			delete(env, name)
+		}
+	}
+	return env
 }
 
 func secretsInject(ctx context.Context, args []string) error {

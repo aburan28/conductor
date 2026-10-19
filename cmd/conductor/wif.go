@@ -13,10 +13,11 @@ import (
 	"github.com/aburan28/conductor/internal/wif"
 )
 
-// cmdWIF runs a supported Anthropic client with a renewable workload identity token.
+// cmdWIF runs a supported Anthropic client or project-scoped Delphi server with a
+// renewable workload identity token.
 func cmdWIF(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: conductor wif local init|jwks or conductor wif exec [OPTIONS] -- claude|delphi [ARGS...]")
+		return errors.New("usage: conductor wif local init|jwks or conductor wif exec [OPTIONS] -- claude|delphi|conductord [ARGS...]")
 	}
 	switch args[0] {
 	case "local":
@@ -24,7 +25,7 @@ func cmdWIF(ctx context.Context, args []string) error {
 	case "exec":
 		return cmdWIFExec(ctx, args[1:])
 	default:
-		return errors.New("usage: conductor wif local init|jwks or conductor wif exec [OPTIONS] -- claude|delphi [ARGS...]")
+		return errors.New("usage: conductor wif local init|jwks or conductor wif exec [OPTIONS] -- claude|delphi|conductord [ARGS...]")
 	}
 }
 
@@ -84,11 +85,15 @@ func cmdWIFExec(ctx context.Context, args []string) error {
 	}
 	argv := fs.Args()
 	if *providerName == "" || *rule == "" || *org == "" || *service == "" || len(argv) == 0 {
-		return errors.New("usage: conductor wif exec --provider gcp|aws|file|local --rule-id fdrl_... --organization-id UUID --service-account-id svac_... [--workspace-id wrkspc_...] [PROVIDER OPTIONS] -- claude|delphi [ARGS...]")
+		return errors.New("usage: conductor wif exec --provider gcp|aws|file|local --rule-id fdrl_... --organization-id UUID --service-account-id svac_... [--workspace-id wrkspc_...] [PROVIDER OPTIONS] -- claude|delphi|conductord [ARGS...]")
+	}
+	if argv[0] == "conductord" && os.Getenv("CONDUCTOR_DELPHI_WIF_PROJECT_ID") == "" {
+		return errors.New("wif exec conductord requires CONDUCTOR_DELPHI_WIF_PROJECT_ID to scope Anthropic federation to one project")
 	}
 	if argv[0] != "claude" && argv[0] != "delphi" &&
+		argv[0] != "conductord" &&
 		!(argv[0] == "conductor" && len(argv) >= 3 && argv[1] == "wrap" && argv[2] == "claude") {
-		return errors.New("wif exec accepts only claude, delphi, or conductor wrap claude")
+		return errors.New("wif exec accepts only claude, delphi, project-scoped conductord, or conductor wrap claude")
 	}
 	var provider wif.Provider
 	var identityPath string
@@ -157,6 +162,7 @@ func wifChildEnv(parent []string, add map[string]string) []string {
 	remove := map[string]bool{
 		"ANTHROPIC_API_KEY": true, "ANTHROPIC_AUTH_TOKEN": true,
 		"ANTHROPIC_PROFILE": true, "ANTHROPIC_IDENTITY_TOKEN": true,
+		"ANTHROPIC_CUSTOM_HEADERS":      true,
 		"ANTHROPIC_IDENTITY_TOKEN_FILE": true,
 		"ANTHROPIC_FEDERATION_RULE_ID":  true,
 		"ANTHROPIC_ORGANIZATION_ID":     true,

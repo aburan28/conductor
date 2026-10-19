@@ -7,31 +7,65 @@
 models:
   defaultAlias: worker.general
 
+  # Four tiers (owner topology, 2026-10-17; README.md, "Model tiers"):
+  #   T4 frontier   -- decisions the project cannot recover from, breakthrough-grade review and
+  #                    architecture. Claude Fable 5.1 (Mythos 5 once verified), GPT-6 Sol.
+  #   T3 core       -- planning, coordination, adversarial review. Claude Opus 5.5, GPT-5.6
+  #                    Sol/Terra, GLM 5.3, Qwen 3.8 (large).
+  #   T2 director   -- writes precise instructions for the mechanical tier and assesses what it
+  #                    returns; also the general worker. Claude Sonnet 5.5.
+  #   T1 mechanical -- executes fully specified work with no reasoning of its own, at the lowest
+  #                    effort. Claude Haiku 5.5, GPT-5.6 Luna, Qwen 3.8 27B (local).
+  # A tier is a capability class, not a price: a T1 model at max effort is still a T1 model.
+  # `planner.frontier` and `reviewer.strong` keep their names (WORKFLOW.md, policies and stored
+  # tasks reference them) but are the core tier; the frontier tier is `reasoner.frontier`.
   aliases:
+    reasoner.frontier:
+      capability_floor: [architecture, long_context, strong_tool_use, code_review, breakthrough_review]
+      default_effort: max
+      tier: T4
     planner.frontier:
       capability_floor: [architecture, long_context, strong_tool_use]
       default_effort: high
       tier: T3
-    worker.fast:
-      capability_floor: [code_edit, tests]
-      default_effort: low
-      tier: T1
-    worker.general:
-      capability_floor: [code_edit, tests, multi_file]
-      default_effort: medium
-      tier: T2
-    verifier.cheap:
-      capability_floor: [read_diff, test_analysis]
-      default_effort: low
-      tier: T1
     reviewer.strong:
       capability_floor: [code_review, architecture]
       default_effort: high
       tier: T3
+    # Medium by default so a session that declares `claude-sonnet-5-5` with no effort still
+    # inherits medium (the catalog lists aliases alphabetically and `director` now matches that
+    # model first); the `mechanical` dispatch lane runs the director at high.
+    director:
+      capability_floor: [write_spec, assess_output, read_diff]
+      default_effort: medium
+      tier: T2
+    worker.general:
+      capability_floor: [code_edit, tests, multi_file]
+      default_effort: medium
+      tier: T2
+    worker.fast:
+      capability_floor: [code_edit, tests]
+      default_effort: low
+      tier: T1
+    worker.public-free:
+      capability_floor: [code_edit, tests]
+      default_effort: low
+      tier: T1
+    executor.mechanical:
+      capability_floor: [follow_spec]
+      default_effort: low
+      tier: T1
+    verifier.cheap:
+      capability_floor: [read_diff, test_analysis]
+      default_effort: low
+      tier: T1
 
   # Ordered cheapest -> most capable. Escalation walks up this ladder; de-escalation walks
   # down it. A task's capability or security floor is never crossed by either direction.
-  ladder: [worker.fast, worker.general, planner.frontier]
+  # internal/router.DefaultLadder mirrors it for catalogs built from stored profiles.
+  # `executor.mechanical` -> `director` is a separate two-step path, expressed as the
+  # `mechanical` lane in dispatch.yaml: fully specified work is not escalated into reasoning.
+  ladder: [worker.fast, worker.general, planner.frontier, reasoner.frontier]
 
 # Concrete profiles. Cost figures are USD per million tokens and should be refreshed from a
 # model catalog rather than trusted indefinitely. Subscription-based harnesses expose
@@ -48,28 +82,128 @@ models:
 #     exclude: ["*-preview"]       # optional
 #     prefix: "vllm/"              # optional: prepended, for harnesses that namespace models
 profiles:
+  # ---- T4 frontier ------------------------------------------------------------------------
+  - alias: reasoner.frontier
+    harness: claude
+    provider: anthropic
+    model: claude-fable-5-1
+    select: {endpoint: anthropic, match: ["claude-fable-*"]}
+    reasoning_effort: max
+    capabilities: [architecture, long_context, strong_tool_use, code_edit, code_review, breakthrough_review]
+    billing: tokens
+
+  # Claude Mythos 5 is unverified on this installation: nobody has run it through the claude
+  # harness here yet. Enable once `claude --model claude-mythos-5` has run against the account.
+  - alias: reasoner.frontier
+    harness: claude
+    provider: anthropic
+    model: claude-mythos-5
+    reasoning_effort: max
+    capabilities: [architecture, long_context, strong_tool_use, code_edit, code_review, breakthrough_review]
+    billing: tokens
+    enabled: false
+
+  # GPT-6 Sol / GPT-6.1 Sol through Codex: unverified, disabled like the gpt-5.3-codex profile.
+  - alias: reasoner.frontier
+    harness: codex
+    provider: openai
+    model: gpt-6.1-sol
+    reasoning_effort: max
+    capabilities: [architecture, long_context, strong_tool_use, code_edit, code_review, breakthrough_review]
+    enabled: false
+
+  - alias: reasoner.frontier
+    harness: codex
+    provider: openai
+    model: gpt-6-sol
+    reasoning_effort: max
+    capabilities: [architecture, long_context, strong_tool_use, code_edit, code_review, breakthrough_review]
+    enabled: false
+
+  # ---- T3 core ----------------------------------------------------------------------------
   - alias: planner.frontier
     harness: claude
     provider: anthropic
-    model: claude-opus-5
+    model: claude-opus-5-5
     select: {endpoint: anthropic, match: ["claude-opus-*"]}
     reasoning_effort: high
     capabilities: [architecture, long_context, strong_tool_use, code_edit, code_review]
     billing: tokens
 
+  - alias: reviewer.strong
+    harness: claude
+    provider: anthropic
+    model: claude-opus-5-5
+    select: {endpoint: anthropic, match: ["claude-opus-*"]}
+    reasoning_effort: high
+    capabilities: [code_review, architecture, long_context]
+    billing: tokens
+
+  - alias: planner.frontier
+    harness: codex
+    provider: openai
+    model: gpt-5.6-sol
+    reasoning_effort: high
+    capabilities: [architecture, long_context, strong_tool_use, code_edit, code_review]
+    enabled: false
+
+  # ---- T2 director and general worker -----------------------------------------------------
+  # Carries every capability worker.general has, so a session matched to it by model keeps
+  # meeting the worker floors.
+  - alias: director
+    harness: claude
+    provider: anthropic
+    model: claude-sonnet-5-5
+    select: {endpoint: anthropic, match: ["claude-sonnet-*"]}
+    reasoning_effort: medium
+    capabilities: [write_spec, assess_output, read_diff, test_analysis, code_edit, tests, multi_file]
+    billing: tokens
+
   - alias: worker.general
     harness: claude
     provider: anthropic
-    model: claude-sonnet-5
+    model: claude-sonnet-5-5
     select: {endpoint: anthropic, match: ["claude-sonnet-*"]}
     reasoning_effort: medium
     capabilities: [code_edit, tests, multi_file, read_diff]
     billing: tokens
 
+  - alias: director
+    harness: codex
+    provider: openai
+    model: gpt-5.6-terra
+    reasoning_effort: medium
+    capabilities: [write_spec, assess_output, read_diff, test_analysis, code_edit, tests, multi_file]
+    enabled: false
+
+  # Delphi's director tier: batch delegations of the director's compile and assess steps
+  # (docs/DELPHI.md, "Task cards"). A `harness: delphi` profile wins over the agent profile
+  # under the same alias for delphi only, so the agent router keeps the medium default above
+  # while delegated director work runs at the high effort its contract asks for.
+  - alias: director
+    harness: delphi
+    provider: anthropic
+    model: claude-sonnet-5-5
+    select: {endpoint: anthropic, match: ["claude-sonnet-*"]}
+    reasoning_effort: high
+    capabilities: [write_spec, assess_output, read_diff]
+    billing: tokens
+
+  # ---- T1 mechanical ----------------------------------------------------------------------
+  # A superset of worker.fast's and verifier.cheap's capabilities, for the same reason.
+  - alias: executor.mechanical
+    harness: claude
+    provider: anthropic
+    model: claude-haiku-5-5
+    select: {endpoint: anthropic, match: ["claude-haiku-*"]}
+    reasoning_effort: low
+    capabilities: [follow_spec, code_edit, tests, read_diff, test_analysis]
+    billing: tokens
+
   - alias: worker.fast
     harness: claude
     provider: anthropic
-    model: claude-haiku-4-5-20251001
+    model: claude-haiku-5-5
     select: {endpoint: anthropic, match: ["claude-haiku-*"]}
     reasoning_effort: low
     capabilities: [code_edit, tests, read_diff]
@@ -78,25 +212,24 @@ profiles:
   - alias: verifier.cheap
     harness: claude
     provider: anthropic
-    model: claude-haiku-4-5-20251001
+    model: claude-haiku-5-5
     select: {endpoint: anthropic, match: ["claude-haiku-*"]}
     reasoning_effort: low
     capabilities: [read_diff, test_analysis]
     billing: tokens
 
-  - alias: reviewer.strong
-    harness: claude
-    provider: anthropic
-    model: claude-opus-5
-    select: {endpoint: anthropic, match: ["claude-opus-*"]}
-    reasoning_effort: high
-    capabilities: [code_review, architecture, long_context]
-    billing: tokens
+  - alias: executor.mechanical
+    harness: codex
+    provider: openai
+    model: gpt-5.6-luna
+    reasoning_effort: low
+    capabilities: [follow_spec, code_edit, tests, read_diff]
+    enabled: false
 
   # gpt-5.3-codex is OpenAI's current Codex-tuned model id (developers.openai.com/api/docs/
   # models/gpt-5.3-codex, checked 2026-10-05). The profile stays disabled until someone on
-  # this installation has run `codex exec -m gpt-5.3-codex` against their account.
-  # OpenCode talks to local vLLM (`conductor serve`). Model ids match --served-model-name.
+  # this installation has run `codex exec -m gpt-5.3-codex` against their account. The same
+  # holds for every other codex profile above.
   - alias: worker.general
     harness: codex
     provider: openai
@@ -105,12 +238,39 @@ profiles:
     capabilities: [code_edit, tests, multi_file]
     enabled: false
 
+  # Isolated OpenCode probe on 2026-10-17 returned text and wrote a file through
+  # a tool call. This alias is outside the default ladder: only the dispatch
+  # rule with public-free-ok selects it automatically. Free-tier availability
+  # and rate limits can change; re-probe before relying on it.
+  - alias: worker.public-free
+    harness: opencode
+    provider: openrouter
+    model: openrouter/poolside/laguna-xs-2.1:free
+    reasoning_effort: low
+    capabilities: [code_edit, tests, read_diff]
+    tier: T1
+    billing: tokens
+    input_cost_per_mtok: 0
+    output_cost_per_mtok: 0
+
+  # ---- Local (OpenCode -> vLLM via `conductor serve`) -------------------------------------
+  # Model ids match --served-model-name.
   - alias: worker.fast
     harness: opencode
     provider: vllm
     model: vllm/qwen3.8-27b
     reasoning_effort: low
     capabilities: [code_edit, tests, read_diff, strong_tool_use]
+    tier: T1
+    context_window: 32768
+    billing: capacity
+
+  - alias: executor.mechanical
+    harness: opencode
+    provider: vllm
+    model: vllm/qwen3.8-27b
+    reasoning_effort: low
+    capabilities: [follow_spec, code_edit, tests, read_diff, strong_tool_use]
     tier: T1
     context_window: 32768
     billing: capacity
@@ -134,3 +294,27 @@ profiles:
     tier: T3
     context_window: 32768
     billing: capacity
+
+  # GLM 5.3 can also direct (write the mechanical tier's instructions); unverified in that role.
+  - alias: director
+    harness: opencode
+    provider: vllm
+    model: vllm/glm-5.3
+    reasoning_effort: medium
+    capabilities: [write_spec, assess_output, read_diff, test_analysis]
+    tier: T2
+    context_window: 32768
+    billing: capacity
+    enabled: false
+
+  # Qwen 3.8 (large) is core-class, but no served-model-name for it is verified here yet.
+  - alias: planner.frontier
+    harness: opencode
+    provider: vllm
+    model: vllm/qwen3.8
+    reasoning_effort: high
+    capabilities: [architecture, long_context, strong_tool_use, code_edit, code_review]
+    tier: T3
+    context_window: 32768
+    billing: capacity
+    enabled: false

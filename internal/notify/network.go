@@ -78,9 +78,25 @@ var nonPublic = []netip.Prefix{
 	netip.MustParsePrefix("203.0.113.0/24"),  // documentation
 }
 
+// Prefixes whose addresses carry an IPv4 address inside them: a gateway delivers to that
+// address, so it is the one judged.
+var (
+	nat64     = netip.MustParsePrefix("64:ff9b::/96") // well-known NAT64; IPv4 in the last 4 bytes
+	sixToFour = netip.MustParsePrefix("2002::/16")    // 6to4; IPv4 in bytes 2 to 5
+)
+
 // publicAddress reports whether ip is ordinary public unicast space.
 func publicAddress(ip netip.Addr) bool {
 	ip = ip.Unmap()
+	if ip.Is6() {
+		b := ip.As16()
+		switch {
+		case nat64.Contains(ip):
+			return publicAddress(netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]}))
+		case sixToFour.Contains(ip):
+			return publicAddress(netip.AddrFrom4([4]byte{b[2], b[3], b[4], b[5]}))
+		}
+	}
 	if !ip.IsValid() || ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
 		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsInterfaceLocalMulticast() ||
 		ip.IsMulticast() {

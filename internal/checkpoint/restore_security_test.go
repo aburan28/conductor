@@ -69,7 +69,11 @@ func TestRestoreRefusesToWriteThroughASymlinkThePatchCreated(t *testing.T) {
 // A file under .git is code execution the next time anyone runs git in that checkout.
 func TestRestoreRefusesToWriteIntoGitMetadata(t *testing.T) {
 	_, work := newRepoPair(t)
-	for _, rel := range []string{".git/hooks/post-checkout", ".GIT/config"} {
+	for _, rel := range []string{".git/hooks/post-checkout", ".GIT/config",
+		// A nested repository's config is as live as the top one (core.fsmonitor), and every
+		// spelling a filesystem folds onto .git counts.
+		"sub/.git/config", "sub/.Git./config", "sub/.git /config", "git~1/config",
+		".git::$INDEX_ALLOCATION/config", "sub/.g\u200cit/config"} {
 		bundle := craftedBundle(t, nil, map[string]string{rel: "#!/bin/sh\necho owned\n"})
 		if _, err := RestoreWorkspace(context.Background(), bundle,
 			RestoreOptions{Dir: work, SkipCheckout: true, Force: true}); err == nil {
@@ -78,6 +82,22 @@ func TestRestoreRefusesToWriteIntoGitMetadata(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(work, ".git", "hooks", "post-checkout")); !os.IsNotExist(err) {
 		t.Error("a hook was planted in .git")
+	}
+	if _, err := os.Stat(filepath.Join(work, "sub", ".git", "config")); !os.IsNotExist(err) {
+		t.Error("a nested .git/config was planted")
+	}
+}
+
+func TestIsGitDirName(t *testing.T) {
+	for _, name := range []string{".git", ".GIT", ".git.", ".git . ", "GIT~1", ".git::$DATA", ".\u200dgi\ufefft"} {
+		if !IsGitDirName(name) {
+			t.Errorf("IsGitDirName(%q) = false", name)
+		}
+	}
+	for _, name := range []string{"git", ".github", ".gitignore", "x.git", ".git~1", "git~2", "..."} {
+		if IsGitDirName(name) {
+			t.Errorf("IsGitDirName(%q) = true", name)
+		}
 	}
 }
 
@@ -96,6 +116,10 @@ func TestManifestRejectsUnsafeIdentifiers(t *testing.T) {
 		"harness separator":    func(m *Manifest) { m.Harness = "claude/../../x" },
 		"absolute native path": func(m *Manifest) { m.Transcript.NativeRelPath = "/etc/passwd" },
 		"native traversal":     func(m *Manifest) { m.Transcript.NativeRelPath = "sessions/../../x" },
+		"subdir traversal":     func(m *Manifest) { m.Repo.Subdir = "../.." },
+		"subdir absolute":      func(m *Manifest) { m.Repo.Subdir = "/etc" },
+		"subdir inner climb":   func(m *Manifest) { m.Repo.Subdir = "a/../../b" },
+		"subdir into .git":     func(m *Manifest) { m.Repo.Subdir = "a/.git/hooks" },
 	} {
 		m := ok
 		mutate(&m)
@@ -124,5 +148,53 @@ func TestOpenRefusesOversizedMembers(t *testing.T) {
 	_ = gz.Close()
 	if _, err := Open(bytes.NewReader(buf.Bytes())); err == nil || !strings.Contains(err.Error(), "limit") {
 		t.Errorf("oversized member = %v, want a size refusal", err)
+	}
+}
+
+// The continuation is written into the checkout the bundle just restored, so a link the patch
+// planted there must not carry it anywhere else.
+func TestWriteContinuationRefusesSymlinks(t *testing.T) {
+	_, work := newRepoPair(t)
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(work, ".conductor")); err != nil {
+		t.Fatal(err)
+	}
+	var b Builder
+	if err := b.Add(ContinuationPath, []byte("# continue\n")); err != nil {
+		t.Fatal(err)
+	}
+	m := Manifest{Schema: Schema, ID: "ck-evil", CreatedAt: time.Now().UTC(), Harness: "claude", SessionID: "s"}
+	var buf bytes.Buffer
+	if err := b.Seal(&m, &buf); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := Open(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WriteContinuation(bundle, work); err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Errorf("WriteContinuation through a link = %v, want a refusal naming the link", err)
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Fatalf("the continuation was written outside the checkout: %v", entries)
+	}
+
+	// Without the link it lands where it always did.
+	if err := os.Remove(filepath.Join(work, ".conductor")); err != nil {
+		t.Fatal(err)
+	}
+	p, err := WriteContinuation(bundle, work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(".conductor", "generated", "continuations", "ck-evil.md"); !strings.HasSuffix(p, want) {
+		t.Errorf("continuation at %s, want it under the checkout's %s", p, want)
+	} else if _, err := os.Stat(filepath.Join(work, want)); err != nil {
+		t.Errorf("continuation not in the checkout: %v", err)
+	}
+
+	bundle.Manifest.ID = "../../x"
+	if _, err := WriteContinuation(bundle, work); err == nil {
+		t.Error("an unsafe id named the continuation file")
 	}
 }

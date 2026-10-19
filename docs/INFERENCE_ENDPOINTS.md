@@ -70,7 +70,7 @@ profiles:
   - alias: worker.general
     harness: claude
     provider: anthropic
-    model: claude-sonnet-5            # fallback until the first listing, or if nothing matches
+    model: claude-sonnet-5-5          # fallback until the first listing, or if nothing matches
     select:
       endpoint: anthropic             # a name from `conductor models endpoints`
       match: ["claude-sonnet-*"]      # globs; * crosses "/" so "vendor/model" ids work

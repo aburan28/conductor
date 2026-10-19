@@ -104,6 +104,10 @@ func (s *Server) inviteMember(w http.ResponseWriter, r *http.Request, p domain.P
 	principal, err := s.store.GetPrincipalByHandle(r.Context(), project.OrganizationID, body.Handle)
 	created := false
 	if errors.Is(err, domain.ErrNotFound) {
+		if err := s.emailUnclaimed(r, body.Email, ""); err != nil {
+			s.fail(w, r, err)
+			return
+		}
 		principal, err = s.store.CreatePrincipal(r.Context(), project.OrganizationID,
 			kind, body.Handle, body.DisplayName, body.Email)
 		created = true
@@ -175,6 +179,27 @@ func (s *Server) inviteMember(w http.ResponseWriter, r *http.Request, p domain.P
 			"kind": string(principal.Kind), "state": accountState})
 
 	s.ok(w, r, http.StatusCreated, result)
+}
+
+// emailUnclaimed refuses an address already registered on a person other than except, in
+// any organization. A first single sign-on links by registered address (ssoFirstSignIn), so
+// a project_admin who could register someone else's address on an account of their own —
+// in their own organization, where nobody else administers it — could take that person's
+// first sign-in, or make their address ambiguous so they cannot sign in at all.
+func (s *Server) emailUnclaimed(r *http.Request, email string, except domain.ID) error {
+	if strings.TrimSpace(email) == "" {
+		return nil
+	}
+	holders, err := s.store.HumansByEmail(r.Context(), strings.TrimSpace(email))
+	if err != nil {
+		return err
+	}
+	for _, h := range holders {
+		if h.ID != except {
+			return fmt.Errorf("%w: %s is already registered on another account", domain.ErrDuplicate, email)
+		}
+	}
+	return nil
 }
 
 // validateRole rejects anything that is not a project role.
