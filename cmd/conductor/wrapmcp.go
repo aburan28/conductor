@@ -17,10 +17,10 @@ var lookPath = exec.LookPath
 // launched through `conductor wrap`, so the agent can claim, check, and report from within
 // its own conversation without anyone configuring anything.
 //
-// It stays out of the way when the user already handled it: an explicit MCP flag on the
-// command line, or a project or user configuration that `conductor integrate` wrote, wins.
+// It stays out of the way when the user supplied an explicit MCP flag on the command line.
 // The session id travels in the server's environment so "work offered to this session" is
-// answerable from inside the harness.
+// answerable from inside the harness. Codex's global MCP entry still needs process-local
+// project overrides because it can be pinned to a different repository.
 func wrapMCPArgs(tool string, toolArgs []string, sessionID, project, endpoint string) (extra []string, cleanup func()) {
 	noop := func() {}
 	mcpPath, err := lookPath("conductor-mcp")
@@ -28,8 +28,6 @@ func wrapMCPArgs(tool string, toolArgs []string, sessionID, project, endpoint st
 		return nil, noop
 	}
 	root, _ := config.FindRoot(".")
-	home, _ := os.UserHomeDir()
-	opts := integrations.Options{Root: root, Home: home, Getenv: os.Getenv}
 
 	switch tool {
 	case "claude":
@@ -78,16 +76,18 @@ func wrapMCPArgs(tool string, toolArgs []string, sessionID, project, endpoint st
 				return nil, noop
 			}
 		}
-		if integrations.CodexConfigured(opts) {
-			return nil, noop
+		// Codex's global config has one static project, but a wrapped session may be
+		// starting in another repository. Process-local -c overrides route this session
+		// correctly and leave the user's global config alone. The session id reaches
+		// conductor-mcp through the inherited environment, which conductor wrap sets.
+		args := []string{"--project", project}
+		if endpoint != "" {
+			args = append(args, "--endpoint", endpoint)
 		}
-		// Codex's -c override takes a dotted key and a value parsed as JSON, falling back to
-		// a bare string. The session id reaches conductor-mcp through the inherited
-		// environment, which `conductor wrap` already sets.
-		args, _ := json.Marshal([]string{"--project", project})
+		encodedArgs, _ := json.Marshal(args)
 		return []string{
 			"-c", "mcp_servers." + integrations.ServerName + ".command=" + mcpPath,
-			"-c", "mcp_servers." + integrations.ServerName + ".args=" + string(args),
+			"-c", "mcp_servers." + integrations.ServerName + ".args=" + string(encodedArgs),
 		}, noop
 	}
 	return nil, noop
