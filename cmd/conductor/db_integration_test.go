@@ -42,10 +42,14 @@ func TestDatabaseArchiveRestoreEndToEnd(t *testing.T) {
 	}
 
 	// A workspace the server's user can reach (t.TempDir may sit under a private directory).
-	// Under /tmp when it exists: the server's Unix socket lives here, and macOS caps socket
-	// paths at 104 bytes, which its per-user temporary directory nearly fills on its own.
+	// Prefer a short caller-supplied TMPDIR so the data and restored copies can live on a
+	// volume with enough space. macOS caps Unix socket paths at 104 bytes. When running as
+	// root, the server drops to postgres, which may not traverse the caller's TMPDIR.
 	base := ""
-	if info, err := os.Stat("/tmp"); err == nil && info.IsDir() {
+	tmp := os.TempDir()
+	if !asRoot && len(filepath.Join(tmp, "cdb-0123456789", ".s.PGSQL.65535")) < 100 {
+		base = tmp
+	} else if info, err := os.Stat("/tmp"); err == nil && info.IsDir() {
 		base = "/tmp"
 	}
 	work, err := os.MkdirTemp(base, "cdb-")

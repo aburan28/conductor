@@ -21,11 +21,12 @@ failed validation, and genuine judgment uncertainty separately. Put a per-task
 spend ceiling on paid routes, and report when the ceiling prevents a route.
 
 The implemented Conductor `implement` lane now tries an approved OpenRouter
-free model for public low-tier tasks, then `worker.fast` (currently Haiku in
-the catalog) for small unambiguous tasks, then the catalog's Sonnet and Opus
-aliases. A router floor can skip a cheaper candidate. This does not implement
-automatic question classification or the research harness's experiment route;
-those are delivery gates below.
+free model for public low-tier tasks, then the `worker.fast`, `worker.general`,
+and `planner.frontier` aliases. The merged catalog has both local vLLM and
+Anthropic profiles under these aliases; an alias does not guarantee a specific
+provider or a live local endpoint. A router floor can skip a cheaper candidate.
+This does not implement automatic question classification or the research
+harness's experiment route; those are delivery gates below.
 
 ## Provider paths and readiness
 
