@@ -87,17 +87,31 @@ func (s *Service) Presence(ctx context.Context, c Caller, projectID domain.ID) (
 // It is deliberately small. Returning every historical task to a model's context is both
 // expensive and useless; what an agent needs is what is in flight and what is contested.
 type StatusSummary struct {
-	Project     string                 `json:"project"`
-	Counts      map[string]int         `json:"counts"`
-	Active      []privacy.TaskView     `json:"active"`
-	Ready       []privacy.TaskView     `json:"ready"`
-	Conflicts   []privacy.ConflictView `json:"conflicts"`
-	Presence    []domain.PresenceEntry `json:"presence"`
-	WorkflowSHA string                 `json:"workflow_sha,omitempty"`
+	Project            string                 `json:"project"`
+	Counts             map[string]int         `json:"counts"`
+	Active             []privacy.TaskView     `json:"active"`
+	Ready              []privacy.TaskView     `json:"ready"`
+	Conflicts          []privacy.ConflictView `json:"conflicts"`
+	ConflictCount      int                    `json:"conflict_count"`
+	ConflictsTruncated bool                   `json:"conflicts_truncated"`
+	Presence           []domain.PresenceEntry `json:"presence"`
+	WorkflowSHA        string                 `json:"workflow_sha,omitempty"`
 }
 
 // StatusLimit bounds how many tasks the compact status returns per bucket.
 const StatusLimit = 25
+
+// StatusConflictLimit keeps a large conflict graph from flooding status views. Conflicts
+// arrive severity-first, so the most actionable ones remain visible.
+const StatusConflictLimit = 25
+
+func boundStatusConflicts(conflicts []privacy.ConflictView) ([]privacy.ConflictView, int, bool) {
+	total := len(conflicts)
+	if total <= StatusConflictLimit {
+		return conflicts, total, false
+	}
+	return conflicts[:StatusConflictLimit], total, true
+}
 
 // ProjectStatus builds the compact status view.
 func (s *Service) ProjectStatus(ctx context.Context, c Caller, projectID domain.ID) (StatusSummary, error) {
@@ -148,18 +162,21 @@ func (s *Service) ProjectStatus(ctx context.Context, c Caller, projectID domain.
 	if err != nil {
 		return StatusSummary{}, err
 	}
+	conflicts, conflictCount, conflictsTruncated := boundStatusConflicts(conflicts)
 	presence, err := s.Presence(ctx, c, projectID)
 	if err != nil {
 		return StatusSummary{}, err
 	}
 
 	return StatusSummary{
-		Project:     project_.Slug,
-		Counts:      counts,
-		Active:      active,
-		Ready:       ready,
-		Conflicts:   conflicts,
-		Presence:    presence,
-		WorkflowSHA: project_.WorkflowSHA,
+		Project:            project_.Slug,
+		Counts:             counts,
+		Active:             active,
+		Ready:              ready,
+		Conflicts:          conflicts,
+		ConflictCount:      conflictCount,
+		ConflictsTruncated: conflictsTruncated,
+		Presence:           presence,
+		WorkflowSHA:        project_.WorkflowSHA,
 	}, nil
 }
