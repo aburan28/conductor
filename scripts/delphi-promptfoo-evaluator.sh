@@ -31,7 +31,7 @@ hash="$(jq -r '.draft_sha256' "$work/input.json")"
 cp "$work/results.jsonl" "promptfoo-r${round}-${hash:0:12}.jsonl"
 jq -s '
   if length == 0 then error("promptfoo returned no result rows")
-  elif any(.[]; (.success | type) != "boolean" or .error != null or .response.error != null) then
+  elif any(.[]; (.success | type) != "boolean" or (.success == false and .gradingResult == null) or .response.error != null) then
     error("promptfoo returned an error or an ungraded row")
   else
     {passed: all(.[]; .success == true),
