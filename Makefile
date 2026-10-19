@@ -5,7 +5,7 @@ DATABASE_URL ?= postgres://conductor:conductor@localhost:55432/conductor?sslmode
 ENDPOINT ?= http://localhost:8080
 INSTALL_PREFIX ?= $(HOME)/.local
 INSTALL_BIN := $(INSTALL_PREFIX)/bin
-CONDUCTOR_BINS := conductord conductor conductor-mcp conductor-mesh-dns
+CONDUCTOR_BINS := conductord conductor conductor-mcp conductor-mesh-dns delphi
 TOKEN_FILE := .conductor/.bootstrap-token
 
 # Upstream holding the GitHub releases `make install` downloads. Derived from
@@ -38,7 +38,8 @@ build:
 	$(GO) build -ldflags "$(LDFLAGS)" -o $(BIN)/conductor ./cmd/conductor
 	$(GO) build -ldflags "$(LDFLAGS)" -o $(BIN)/conductor-mcp ./cmd/conductor-mcp
 	$(GO) build -ldflags "$(LDFLAGS)" -o $(BIN)/conductor-mesh-dns ./cmd/conductor-mesh-dns
-	@echo "built: $(BIN)/conductord $(BIN)/conductor $(BIN)/conductor-mcp $(BIN)/conductor-mesh-dns"
+	$(GO) build -ldflags "$(LDFLAGS)" -o $(BIN)/delphi ./cmd/delphi
+	@echo "built: $(CONDUCTOR_BINS:%=$(BIN)/%)"
 
 vet:
 	$(GO) vet ./...

@@ -69,8 +69,8 @@ grep " ${asset}\$" "$tmp/SHA256SUMS" | sha_check || {
 
 tar -xzf "$tmp/$asset" -C "$tmp"
 mkdir -p "$dest"
-for bin in conductord conductor conductor-mcp; do
+for bin in conductord conductor conductor-mcp conductor-mesh-dns delphi; do
   install -m 0755 "$tmp/conductor_${version}_${goos}_${goarch}/$bin" "$dest/$bin"
 done
-echo "installed conductord, conductor, conductor-mcp from ${version} into ${dest}"
+echo "installed conductord, conductor, conductor-mcp, conductor-mesh-dns, delphi from ${version} into ${dest}"
 echo "to verify where the archive was built: gh attestation verify ${asset} --repo ${repo}"
