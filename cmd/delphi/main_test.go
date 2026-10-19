@@ -10,10 +10,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/aburan28/conductor/internal/delphi"
 )
 
 // ---- fake Anthropic Message Batches API ----------------------------------
@@ -276,6 +280,162 @@ func TestRunMixedProvidersEndToEnd(t *testing.T) {
 	if code, _, se := cli(t, "", "run", "-in", in, "-out", out); code != exitUsage || !strings.Contains(se, "different request") {
 		t.Fatalf("conflict: %d %s", code, se)
 	}
+}
+
+func TestGoalLoopRevisesAndResumesWithoutDuplicateBatches(t *testing.T) {
+	fa, _ := servers(t)
+	fa.mu.Lock()
+	fa.outcome = func(id string) string {
+		switch id {
+		case "goal-r1-plan", "goal-r2-plan":
+			return claudeMsg("plan for "+id, "end_turn", "")
+		case "goal-r1-draft", "goal-r2-draft":
+			return claudeMsg("answer from "+id, "end_turn", "")
+		case "goal-r1-review":
+			return claudeMsg(`{"verdict":"revise","feedback":"add the missing check"}`, "end_turn", "")
+		case "goal-r2-review":
+			return claudeMsg(`{"verdict":"accept","feedback":"criteria addressed"}`, "end_turn", "")
+		}
+		return ""
+	}
+	fa.mu.Unlock()
+	out := filepath.Join(t.TempDir(), "goal")
+	if code, _, se := cli(t, "", "goal", "init", "-out", out, "-goal", "Assess an option", "-rounds", "2"); code != 0 {
+		t.Fatalf("init: %d %s", code, se)
+	}
+	if code, _, se := cli(t, "", "goal", "run", "-out", out, "-every", "1ms"); code != 0 {
+		t.Fatalf("run: %d %s", code, se)
+	}
+	s, err := loadGoal(out)
+	if err != nil || s.Status != "self_reviewed" || s.Round != 2 || len(s.History) != 2 || s.History[0].Verdict != "revise" {
+		t.Fatalf("state: %+v, %v", s, err)
+	}
+	b, err := os.ReadFile(filepath.Join(out, "answer.md"))
+	if err != nil || string(b) != "answer from goal-r2-draft\n" {
+		t.Fatalf("answer: %q %v", b, err)
+	}
+	if len(fa.bodies) != 6 {
+		t.Fatalf("submitted %d requests, want six", len(fa.bodies))
+	}
+	if code, _, se := cli(t, "", "goal", "run", "-out", out, "-every", "1ms"); code != 0 || len(fa.bodies) != 6 {
+		t.Fatalf("resume duplicated work: %d, %d requests, %s", code, len(fa.bodies), se)
+	}
+}
+
+func TestGoalRoundLimitKeepsUnacceptedDraft(t *testing.T) {
+	s := goalState{Stage: "review", Round: 1, MaxRounds: 1, Plan: "plan", Draft: "draft"}
+	r := delphi.Result{Status: delphi.Succeeded, Text: `{"verdict":"revise","feedback":"still incomplete"}`}
+	if err := nextGoal(&s, r); err != nil || s.Status != "needs_review" || s.Stage != "done" || len(s.History) != 1 {
+		t.Fatalf("limit state: %+v, %v", s, err)
+	}
+}
+
+func TestGoalEvaluatorFeedsNextRoundAndSkipsReviewOnFailure(t *testing.T) {
+	fa, _ := servers(t)
+	fa.mu.Lock()
+	fa.outcome = func(id string) string {
+		switch id {
+		case "goal-r1-draft":
+			return claudeMsg("missing evidence", "end_turn", "")
+		case "goal-r2-draft":
+			return claudeMsg("evidence included", "end_turn", "")
+		case "goal-r2-review":
+			return claudeMsg(`{"verdict":"accept","feedback":"checked"}`, "end_turn", "")
+		default:
+			return claudeMsg("plan for "+id, "end_turn", "")
+		}
+	}
+	fa.mu.Unlock()
+	tool := filepath.Join(t.TempDir(), "grade.sh")
+	script := "#!/bin/sh\ninput=$(cat)\ncase \"$input\" in\n  *'missing evidence'*) printf '{\"passed\":false,\"feedback\":\"include evidence\",\"score\":0.2}\\n' ;;\n  *) printf '{\"passed\":true,\"feedback\":\"evidence found\",\"score\":0.9}\\n' ;;\nesac\n"
+	if err := os.WriteFile(tool, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "goal")
+	if code, _, se := cli(t, "", "goal", "init", "-out", out, "-goal", "Give evidence", "-rounds", "2", "-evaluator", tool); code != 0 {
+		t.Fatalf("init: %d %s", code, se)
+	}
+	if code, _, se := cli(t, "", "goal", "run", "-out", out, "-every", "1ms"); code != 0 {
+		t.Fatalf("run: %d %s", code, se)
+	}
+	s, err := loadGoal(out)
+	if err != nil || s.Status != "tool_checked" || len(s.History) != 2 || s.History[0].Feedback != "include evidence" || s.History[1].Evaluation == nil || !s.History[1].Evaluation.Passed {
+		t.Fatalf("state: %+v, %v", s, err)
+	}
+	fa.mu.Lock()
+	count := len(fa.bodies)
+	fa.mu.Unlock()
+	if count != 5 {
+		t.Fatalf("submitted %d model requests, want five", count)
+	}
+	if code, _, se := cli(t, "", "goal", "run", "-out", out, "-every", "1ms"); code != 0 {
+		t.Fatalf("resume: %d %s", code, se)
+	}
+}
+
+func TestGoalEvaluatorRejectsInvalidFeedback(t *testing.T) {
+	tool := filepath.Join(t.TempDir(), "grade.sh")
+	if err := os.WriteFile(tool, []byte("#!/bin/sh\nprintf '{\"passed\":false}'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := runGoalEvaluator(context.Background(), t.TempDir(), goalState{Evaluator: tool, EvalTimeoutSecs: 10, Draft: "answer"})
+	if err == nil || !strings.Contains(err.Error(), "feedback") {
+		t.Fatalf("invalid evaluator feedback accepted: %v", err)
+	}
+}
+
+func TestGoalEvaluatorTimeoutStopsChildWithOpenOutputPipes(t *testing.T) {
+	tool := filepath.Join(t.TempDir(), "grade.sh")
+	if err := os.WriteFile(tool, []byte("#!/bin/sh\nsleep 10 &\nwait\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	_, err := runGoalEvaluator(context.Background(), t.TempDir(), goalState{Evaluator: tool, EvalTimeoutSecs: 1, Draft: "answer"})
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("expected evaluator timeout, got %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Fatalf("evaluator descendants held output open for %s", elapsed)
+	}
+}
+
+func TestGoalStartRunsDetachedBinary(t *testing.T) {
+	fa, _ := servers(t)
+	fa.mu.Lock()
+	fa.outcome = func(id string) string {
+		if strings.HasSuffix(id, "-review") {
+			return claudeMsg(`{"verdict":"accept","feedback":"checked"}`, "end_turn", "")
+		}
+		return claudeMsg("work from "+id, "end_turn", "")
+	}
+	fa.mu.Unlock()
+	bin := filepath.Join(t.TempDir(), "delphi")
+	build := exec.Command("go", "build", "-o", bin, ".")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build detached CLI: %v\n%s", err, output)
+	}
+	out := filepath.Join(t.TempDir(), "goal")
+	cmd := exec.Command(bin, "goal", "start", "-out", out, "-goal", "Produce an answer", "-rounds", "1", "-every", "10ms")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("start detached CLI: %v\n%s", err, output)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		s, err := loadGoal(out)
+		if err == nil && s.Stage == "done" {
+			fa.mu.Lock()
+			count := len(fa.bodies)
+			fa.mu.Unlock()
+			if s.Status != "self_reviewed" || count != 3 {
+				t.Fatalf("detached state: %+v, requests %d", s, count)
+			}
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	_, _ = exec.Command(bin, "goal", "stop", "-out", out).CombinedOutput()
+	log, _ := os.ReadFile(filepath.Join(out, "runner.log"))
+	t.Fatalf("detached runner did not finish; log:\n%s", log)
 }
 
 func TestRunAnthropicWithWorkloadFederation(t *testing.T) {

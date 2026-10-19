@@ -116,6 +116,100 @@ that one.
 
 ## Use
 
+### Detached goal loop
+
+The standalone `delphi` binary can pursue one written goal through bounded
+plan, draft, and review rounds. Each stage is a provider batch request. A
+reviewer's `revise` verdict feeds specific gaps into the next plan; `accept`
+ends the loop. The result is labeled `self_reviewed`, since model review is
+not independent verification. At the round limit an unaccepted draft is
+labeled `needs_review`. Delphi does not alter its own code or expand the
+configured limits. Anthropic Haiku 5.5 handles planning and drafting by
+default, with Sonnet 5.5 reviewing; choose other provider/model IDs with the
+flags shown below when a goal calls for them.
+
+An optional evaluator can run a local test or evaluation tool after every
+draft. Delphi sends one JSON object on its stdin with `goal`, `round`, `plan`,
+`draft`, and `draft_sha256`. The executable must return exactly one JSON
+object on stdout:
+
+```json
+{"passed":false,"score":0.4,"feedback":"The second criterion is missing"}
+```
+
+`passed` is required; `score` is optional and must be between 0 and 1.
+A failed check advances to the next plan with its feedback and skips model
+review for that round. A passing check still needs reviewer acceptance.
+Tool errors, timeouts, invalid JSON, and ungraded results block the run;
+they never count as a pass. Delphi records each check and its draft hash in
+`goal.json`. The command runs from the private goal directory, receives the
+runner's environment, and must be a trusted executable. Set a finite
+`-eval-timeout` (default 2 minutes, maximum 10 minutes). A completed run
+with both checks passing is labeled `tool_checked`; that label describes
+the configured check rather than independent verification of every claim.
+
+For [Promptfoo](https://www.promptfoo.dev/docs/providers/echo/), install its
+CLI and `jq`, then save assertions in an absolute-path JSON file, for example:
+
+```json
+[{"type":"contains","value":"required evidence"}]
+```
+
+Its echo provider grades Delphi's existing draft without another generation
+call. The adapter stores each round's Promptfoo JSONL results beside the goal
+state. Assertions that use a model grader may still incur provider charges.
+
+```sh
+export DELPHI_PROMPTFOO_ASSERTIONS="$PWD/assertions.json"
+delphi goal start -goal-file ./goal.txt -out ./my-goal \
+  -evaluator "$PWD/scripts/delphi-promptfoo-evaluator.sh" \
+  -eval-timeout 5m -rounds 3
+```
+
+The evaluator protocol also accepts a harness or other local test executable
+that emits the same JSON result. Keep deterministic checks and their inputs
+fixed across rounds when comparing scores; a score alone is not a verified
+improvement. The goal runner updates plans and outputs, not source code.
+
+```sh
+delphi goal start -goal-file ./goal.txt -out ./my-goal \
+  -provider anthropic -model claude-haiku-5-5 \
+  -reviewer-provider anthropic -reviewer-model claude-sonnet-5-5 \
+  -rounds 3 -max-tokens 8192
+delphi goal status -out ./my-goal
+delphi goal stop -out ./my-goal
+delphi goal run -out ./my-goal       # resume a stopped or interrupted run
+```
+
+`goal start` launches a background `delphi goal run` process through `nohup`
+on Unix and writes its
+progress to `goal.json`, individual provider requests and results to the run
+directory, and operational messages to `runner.log`. `answer.md` contains the
+last draft when the loop ends. Reusing the directory resumes stable request
+IDs, so a completed stage is not submitted twice. Keep this directory private:
+it contains the goal, plans, drafts, reviews, and provider answers.
+
+For Anthropic workload identity, keep the WIF rotator alive with the runner.
+Initialize the goal, then detach the **wrapper process** using your normal
+service manager or `nohup`:
+
+```sh
+delphi goal init -goal-file ./goal.txt -out ./my-goal -rounds 3
+nohup conductor wif exec --provider local \
+  --issuer https://oidc.YOUR-DOMAIN.example/conductor \
+  --subject conductor:laptop:YOUR-LAPTOP \
+  --rule-id fdrl_YOUR_RULE --organization-id YOUR_ORGANIZATION_UUID \
+  --service-account-id svac_YOUR_SERVICE_ACCOUNT \
+  --workspace-id wrkspc_YOUR_WORKSPACE \
+  -- delphi goal run -out ./my-goal \
+  > ./my-goal/wif.log 2>&1 < /dev/null &
+```
+
+The wrapper refreshes the assertion for the whole run. `goal start` refuses
+to detach when it detects an assertion file from a parent WIF wrapper, since
+the parent would otherwise exit and stop refreshing that file. Provider
+entitlement and workspace access still determine whether a model call succeeds.
+
 ```sh
 ref=$(conductor delphi ask --task T-42 --effort high "Is this reduction sound? ...")
 conductor delphi show "$ref"               # state, tokens, cost
