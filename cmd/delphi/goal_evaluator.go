@@ -10,8 +10,10 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -64,6 +66,17 @@ func runGoalEvaluator(ctx context.Context, dir string, s goalState) (goalEvaluat
 	callCtx, cancel := context.WithTimeout(ctx, time.Duration(s.EvalTimeoutSecs)*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(callCtx, s.Evaluator)
+	// Evaluators often launch a test runner. Cancel the whole process group so
+	// descendants cannot keep running or hold the output pipes open past timeout.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
+	cmd.WaitDelay = time.Second
 	cmd.Dir = dir
 	cmd.Stdin = bytes.NewReader(append(input, '\n'))
 	stdout := &boundedOutput{max: 1 << 20}

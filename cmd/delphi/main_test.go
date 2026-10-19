@@ -378,9 +378,24 @@ func TestGoalEvaluatorRejectsInvalidFeedback(t *testing.T) {
 	if err := os.WriteFile(tool, []byte("#!/bin/sh\nprintf '{\"passed\":false}'\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	_, err := runGoalEvaluator(context.Background(), t.TempDir(), goalState{Evaluator: tool, EvalTimeoutSecs: 1, Draft: "answer"})
+	_, err := runGoalEvaluator(context.Background(), t.TempDir(), goalState{Evaluator: tool, EvalTimeoutSecs: 10, Draft: "answer"})
 	if err == nil || !strings.Contains(err.Error(), "feedback") {
 		t.Fatalf("invalid evaluator feedback accepted: %v", err)
+	}
+}
+
+func TestGoalEvaluatorTimeoutStopsChildWithOpenOutputPipes(t *testing.T) {
+	tool := filepath.Join(t.TempDir(), "grade.sh")
+	if err := os.WriteFile(tool, []byte("#!/bin/sh\nsleep 10 &\nwait\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	_, err := runGoalEvaluator(context.Background(), t.TempDir(), goalState{Evaluator: tool, EvalTimeoutSecs: 1, Draft: "answer"})
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("expected evaluator timeout, got %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Fatalf("evaluator descendants held output open for %s", elapsed)
 	}
 }
 

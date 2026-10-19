@@ -69,8 +69,13 @@ grep " ${asset}\$" "$tmp/SHA256SUMS" | sha_check || {
 
 tar -xzf "$tmp/$asset" -C "$tmp"
 mkdir -p "$dest"
-for bin in conductord conductor conductor-mcp conductor-mesh-dns delphi; do
+bins=(conductord conductor conductor-mcp conductor-mesh-dns)
+# Pinned releases from before the standalone Delphi binary remain installable.
+if [[ -f "$tmp/conductor_${version}_${goos}_${goarch}/delphi" ]]; then
+  bins+=(delphi)
+fi
+for bin in "${bins[@]}"; do
   install -m 0755 "$tmp/conductor_${version}_${goos}_${goarch}/$bin" "$dest/$bin"
 done
-echo "installed conductord, conductor, conductor-mcp, conductor-mesh-dns, delphi from ${version} into ${dest}"
+echo "installed ${bins[*]} from ${version} into ${dest}"
 echo "to verify where the archive was built: gh attestation verify ${asset} --repo ${repo}"
