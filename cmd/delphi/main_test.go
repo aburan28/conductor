@@ -330,6 +330,60 @@ func TestGoalRoundLimitKeepsUnacceptedDraft(t *testing.T) {
 	}
 }
 
+func TestGoalEvaluatorFeedsNextRoundAndSkipsReviewOnFailure(t *testing.T) {
+	fa, _ := servers(t)
+	fa.mu.Lock()
+	fa.outcome = func(id string) string {
+		switch id {
+		case "goal-r1-draft":
+			return claudeMsg("missing evidence", "end_turn", "")
+		case "goal-r2-draft":
+			return claudeMsg("evidence included", "end_turn", "")
+		case "goal-r2-review":
+			return claudeMsg(`{"verdict":"accept","feedback":"checked"}`, "end_turn", "")
+		default:
+			return claudeMsg("plan for "+id, "end_turn", "")
+		}
+	}
+	fa.mu.Unlock()
+	tool := filepath.Join(t.TempDir(), "grade.sh")
+	script := "#!/bin/sh\ninput=$(cat)\ncase \"$input\" in\n  *'missing evidence'*) printf '{\"passed\":false,\"feedback\":\"include evidence\",\"score\":0.2}\\n' ;;\n  *) printf '{\"passed\":true,\"feedback\":\"evidence found\",\"score\":0.9}\\n' ;;\nesac\n"
+	if err := os.WriteFile(tool, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "goal")
+	if code, _, se := cli(t, "", "goal", "init", "-out", out, "-goal", "Give evidence", "-rounds", "2", "-evaluator", tool); code != 0 {
+		t.Fatalf("init: %d %s", code, se)
+	}
+	if code, _, se := cli(t, "", "goal", "run", "-out", out, "-every", "1ms"); code != 0 {
+		t.Fatalf("run: %d %s", code, se)
+	}
+	s, err := loadGoal(out)
+	if err != nil || s.Status != "tool_checked" || len(s.History) != 2 || s.History[0].Feedback != "include evidence" || s.History[1].Evaluation == nil || !s.History[1].Evaluation.Passed {
+		t.Fatalf("state: %+v, %v", s, err)
+	}
+	fa.mu.Lock()
+	count := len(fa.bodies)
+	fa.mu.Unlock()
+	if count != 5 {
+		t.Fatalf("submitted %d model requests, want five", count)
+	}
+	if code, _, se := cli(t, "", "goal", "run", "-out", out, "-every", "1ms"); code != 0 {
+		t.Fatalf("resume: %d %s", code, se)
+	}
+}
+
+func TestGoalEvaluatorRejectsInvalidFeedback(t *testing.T) {
+	tool := filepath.Join(t.TempDir(), "grade.sh")
+	if err := os.WriteFile(tool, []byte("#!/bin/sh\nprintf '{\"passed\":false}'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := runGoalEvaluator(context.Background(), t.TempDir(), goalState{Evaluator: tool, EvalTimeoutSecs: 1, Draft: "answer"})
+	if err == nil || !strings.Contains(err.Error(), "feedback") {
+		t.Fatalf("invalid evaluator feedback accepted: %v", err)
+	}
+}
+
 func TestGoalStartRunsDetachedBinary(t *testing.T) {
 	fa, _ := servers(t)
 	fa.mu.Lock()

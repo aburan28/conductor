@@ -128,6 +128,49 @@ configured limits. Anthropic Haiku 5.5 handles planning and drafting by
 default, with Sonnet 5.5 reviewing; choose other provider/model IDs with the
 flags shown below when a goal calls for them.
 
+An optional evaluator can run a local test or evaluation tool after every
+draft. Delphi sends one JSON object on its stdin with `goal`, `round`, `plan`,
+`draft`, and `draft_sha256`. The executable must return exactly one JSON
+object on stdout:
+
+```json
+{"passed":false,"score":0.4,"feedback":"The second criterion is missing"}
+```
+
+`passed` is required; `score` is optional and must be between 0 and 1.
+A failed check advances to the next plan with its feedback and skips model
+review for that round. A passing check still needs reviewer acceptance.
+Tool errors, timeouts, invalid JSON, and ungraded results block the run;
+they never count as a pass. Delphi records each check and its draft hash in
+`goal.json`. The command runs from the private goal directory, receives the
+runner's environment, and must be a trusted executable. Set a finite
+`-eval-timeout` (default 2 minutes, maximum 10 minutes). A completed run
+with both checks passing is labeled `tool_checked`; that label describes
+the configured check rather than independent verification of every claim.
+
+For [Promptfoo](https://www.promptfoo.dev/docs/providers/echo/), install its
+CLI and `jq`, then save assertions in an absolute-path JSON file, for example:
+
+```json
+[{"type":"contains","value":"required evidence"}]
+```
+
+Its echo provider grades Delphi's existing draft without another generation
+call. The adapter stores each round's Promptfoo JSONL results beside the goal
+state. Assertions that use a model grader may still incur provider charges.
+
+```sh
+export DELPHI_PROMPTFOO_ASSERTIONS="$PWD/assertions.json"
+delphi goal start -goal-file ./goal.txt -out ./my-goal \
+  -evaluator "$PWD/scripts/delphi-promptfoo-evaluator.sh" \
+  -eval-timeout 5m -rounds 3
+```
+
+The evaluator protocol also accepts a harness or other local test executable
+that emits the same JSON result. Keep deterministic checks and their inputs
+fixed across rounds when comparing scores; a score alone is not a verified
+improvement. The goal runner updates plans and outputs, not source code.
+
 ```sh
 delphi goal start -goal-file ./goal.txt -out ./my-goal \
   -provider anthropic -model claude-haiku-5-5 \
