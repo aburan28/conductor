@@ -135,10 +135,11 @@ jobs:
         run: |
           set -euo pipefail
           ls -l
-          [ "$(ls conductor_*.tar.gz | wc -l)" -eq 4 ] || { echo "expected 4 archives" >&2; exit 1; }
+          archives=(conductor_*.tar.gz)
+          [ "${#archives[@]}" -eq 4 ] || { echo "expected 4 archives" >&2; exit 1; }
           dmg="Conductor-${TAG#v}-macos-universal.dmg"
           test -s "$dmg"
-          sha256sum conductor_*.tar.gz "$dmg" > SHA256SUMS
+          sha256sum "${archives[@]}" "$dmg" > SHA256SUMS
           cat SHA256SUMS
 
       # Provenance binds each archive and DMG digest to this workflow, commit, and tag. Verify with:
@@ -157,9 +158,11 @@ jobs:
           set -euo pipefail
           dmg="Conductor-${TAG#v}-macos-universal.dmg"
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            # A release created by hand or by release-please before this job may be filled in,
-            # but a published asset is never replaced: someone may already have installed and
-            # verified it. gh release upload without --clobber fails on a name that already exists.
+            # Publish only a draft whose complete assets have passed validation. Never
+            # replace assets someone may already have installed and verified.
+            [ "$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft')" = true ] || {
+              echo "refusing to modify an already published release" >&2; exit 1;
+            }
             existing="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
             if [ -n "$existing" ]; then
               echo "release $TAG already has assets:" >&2
@@ -170,9 +173,16 @@ jobs:
             gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" conductor_*.tar.gz "$dmg" SHA256SUMS
           else
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --draft \
               --verify-tag \
               --title "$TAG" \
               --notes "$(git log -1 --format=%B)" \
               conductor_*.tar.gz "$dmg" SHA256SUMS
           fi
+          # Verify the uploaded bytes before making the release visible to installers.
+          mkdir verified-upload
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir verified-upload
+          cmp SHA256SUMS verified-upload/SHA256SUMS
+          (cd verified-upload && sha256sum -c SHA256SUMS)
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
 

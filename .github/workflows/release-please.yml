@@ -1,7 +1,7 @@
 name: release-please
 
 # On every push to main, open or update a Release PR from conventional commits since the
-# last tagged version. Merging that PR tags vX.Y.Z and publishes a GitHub Release, and the
+# last tagged version. Merging that PR prepares a draft GitHub Release, and the
 # start-release job below dispatches the `release` workflow at that tag to build and attach
 # the platform archives and the Mac DMG.
 #
@@ -30,6 +30,7 @@ jobs:
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
+      sha: ${{ steps.release.outputs.sha }}
     steps:
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: release
@@ -45,6 +46,7 @@ jobs:
     # The only job holding `actions: write`, and it runs no third-party code.
     permissions:
       actions: write
+      contents: write # create the draft release's immutable tag before dispatch
     steps:
       # Dispatching at the tag makes github.ref the tag, so release.yml runs exactly as for a
       # tag push, from the tag's own reviewed copy of the workflow.
@@ -52,11 +54,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.release-please.outputs.tag_name }}
+          RELEASE_SHA: ${{ needs.release-please.outputs.sha }}
         run: |
           set -euo pipefail
           if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "release-please reported tag '$TAG', which is not vX.Y.Z; not dispatching" >&2
             exit 1
+          fi
+          # Draft releases do not create their tag until publication. Pin the build to
+          # release-please's commit now; never move an existing tag on a rerun.
+          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "invalid release commit" >&2; exit 1; }
+          existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq '.object.sha' 2>/dev/null || true)"
+          if [ -n "$existing" ]; then
+            [ "$existing" = "$RELEASE_SHA" ] || { echo "release tag already points elsewhere" >&2; exit 1; }
+          else
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" --method POST \
+              -f "ref=refs/tags/$TAG" -f "sha=$RELEASE_SHA" >/dev/null
           fi
           gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"
           echo "dispatched release.yml at $TAG"
