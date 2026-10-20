@@ -113,7 +113,15 @@ jobs:
           path: macos/build/postgres
           key: postgres-${{ hashFiles('macos/fetch-postgres.sh') }}
 
-      - name: Build Conductor.app (universal, unsigned)
+      # Local/PR artifacts may be unsigned. The release caller always supplies version;
+      # refuse its unsigned fallback before any artifact can reach public publication.
+      - name: Require signing for public releases
+        if: inputs.version != ''
+        run: |
+          . macos/packaging/signing.sh
+          require_release_signing
+
+      - name: Build Conductor.app (universal)
         run: macos/build.sh --version "$APP_VERSION"
 
       - name: Check the bundle
@@ -140,7 +148,7 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
-      - name: Build and verify the DMG (universal, unsigned)
+      - name: Build and verify the DMG (universal)
         run: |
           set -euo pipefail
           macos/packaging/build-dmg.sh --app macos/build/Conductor.app --version "$APP_VERSION" --out dist

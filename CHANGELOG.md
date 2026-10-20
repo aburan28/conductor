@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.7](https://github.com/aburan28/conductor/compare/v0.1.6...v0.1.7) (2026-10-19)
+
+
+### Features
+
+* **delphi:** add detached goal runner with evaluator feedback ([2de85ee](https://github.com/aburan28/conductor/commit/2de85eec54c104a0b0de632b8da4f3b53b03b9ca))
+* **github:** pull requests as first-class objects (collaboration phase A) ([ba6f95f](https://github.com/aburan28/conductor/commit/ba6f95f4186131eab5c76c320eac45e7e5cc40c2))
+
+
+### Bug Fixes
+
+* land post-merge archive restore corrections ([c54d359](https://github.com/aburan28/conductor/commit/c54d359d737f8f125081bcc80d2002fc56e7e475))
+* route wrapped Codex MCP and bound status conflicts ([78d4240](https://github.com/aburan28/conductor/commit/78d4240c8f9c4ce0598148081bee84081cf7ed30))
+
 ## [0.1.6](https://github.com/aburan28/conductor/compare/v0.1.5...v0.1.6) (2026-10-18)
 
 

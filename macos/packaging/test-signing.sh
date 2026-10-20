@@ -40,6 +40,11 @@ expect "a partial API key is refused" 1 "missing: NOTARY_ISSUER" \
 expect "a profile and a key at once are refused" 1 "not both" \
     DEVELOPER_ID_APPLICATION=a DEVELOPER_ID_INSTALLER=i NOTARY_PROFILE=p NOTARY_KEY=/k NOTARY_KEY_ID=id NOTARY_ISSUER=iss
 
+SNIPPET='require_release_signing && echo signed'
+expect "public release refuses unsigned fallback" 1 "public releases require Developer ID"
+expect "public release refuses partial signing" 1 "missing: DEVELOPER_ID_INSTALLER" DEVELOPER_ID_APPLICATION=a
+expect "public release accepts complete signing" 0 "signed" DEVELOPER_ID_APPLICATION=a DEVELOPER_ID_INSTALLER=i NOTARY_PROFILE=p
+
 SNIPPET='notary_mode'
 expect "notary: none" 0 "none"
 expect "notary: profile" 0 "profile" NOTARY_PROFILE=p
