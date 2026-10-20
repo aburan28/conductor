@@ -37,6 +37,15 @@ jobs:
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+          skip-github-pull-request: true
+      # A draft has no tag until start-release pins it. Do not search for the
+      # next release before that pin exists, which would repeat old changes.
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        if: steps.release.outputs.release_created != 'true'
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          skip-github-release: true
 
   start-release:
     needs: release-please
@@ -64,12 +73,19 @@ jobs:
           # Draft releases do not create their tag until publication. Pin the build to
           # release-please's commit now; never move an existing tag on a rerun.
           [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "invalid release commit" >&2; exit 1; }
-          existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq '.object.sha' 2>/dev/null || true)"
-          if [ -n "$existing" ]; then
+          lookup_error="$(mktemp)"
+          trap 'rm -f "$lookup_error"' EXIT
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" >/dev/null 2>"$lookup_error"; then
+            # The commits endpoint peels annotated tags as well as lightweight refs.
+            existing="$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$TAG" --jq '.sha')"
             [ "$existing" = "$RELEASE_SHA" ] || { echo "release tag already points elsewhere" >&2; exit 1; }
-          else
+          elif grep -q '(HTTP 404)' "$lookup_error"; then
             gh api "repos/$GITHUB_REPOSITORY/git/refs" --method POST \
               -f "ref=refs/tags/$TAG" -f "sha=$RELEASE_SHA" >/dev/null
+          else
+            cat "$lookup_error" >&2
+            echo "cannot verify release tag; not creating or dispatching" >&2
+            exit 1
           fi
           gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"
           echo "dispatched release.yml at $TAG"
