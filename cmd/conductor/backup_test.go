@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -47,9 +48,22 @@ func (m *inMemoryS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// Backup tests use their own passphrase settings and never read the host Keychain.
+// Keychain-specific cases replace this environment with their explicit stub.
+func isolateBackupSeal(t *testing.T) {
+	t.Helper()
+	t.Setenv("CONDUCTOR_CHECKPOINT_KEY", "")
+	old := sealEnv
+	t.Cleanup(func() { sealEnv = old })
+	sealEnv = func() awscreds.Env {
+		return awscreds.Env{GOOS: "linux", Getenv: os.Getenv}
+	}
+}
+
 // The CLI push→pull round trip: records saved on one machine reappear on a fresh one, as
 // saved records ready for `conductor resume`.
 func TestBackupPushPullRoundTrip(t *testing.T) {
+	isolateBackupSeal(t)
 	srv := httptest.NewServer(&inMemoryS3{})
 	defer srv.Close()
 	u, _ := url.Parse(srv.URL)
@@ -111,6 +125,7 @@ func TestBackupPushPullRoundTrip(t *testing.T) {
 
 func memoryBackup(t *testing.T) (*backup.Store, *inMemoryS3) {
 	t.Helper()
+	isolateBackupSeal(t)
 	mem := &inMemoryS3{}
 	srv := httptest.NewServer(mem)
 	t.Cleanup(srv.Close)

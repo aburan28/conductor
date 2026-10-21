@@ -136,6 +136,7 @@ func TestStorageShowJSONContract(t *testing.T) {
 
 func TestStorageSetTestThenBackupPushUsesTheBucket(t *testing.T) {
 	isolateStorage(t)
+	isolateBackupSeal(t)
 	t.Setenv("CONDUCTOR_MACHINE_ID", "laptop")
 	fake := s3fake.New("team")
 	defer fake.Close()
