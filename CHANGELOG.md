@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.8](https://github.com/aburan28/conductor/compare/v0.1.7...v0.1.8) (2026-10-20)
+
+
+### Maintenance
+
+* Handle missing release tags without treating GitHub error bodies as commit IDs;
+  resolve annotated tags to their commit before checking the immutable release pin.
+
 ## [0.1.7](https://github.com/aburan28/conductor/compare/v0.1.6...v0.1.7) (2026-10-19)
 
 
