@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.9](https://github.com/aburan28/conductor/compare/9e8bda286ffb3e743c76eea6bdb076b47c124229...v0.1.9) (2026-10-21)
+
+### Bug Fixes
+
+* Require Go 1.26.10 to include the crypto/x509 certificate-validation fix for GO-2026-6809.
+* Isolate backup tests from the host Keychain so unattended macOS tests cannot wait for a credential prompt.
+
+### Release maintenance
+
+* Correct the release notes to describe changes since the prepared 0.1.8 revision, without repeating earlier features and fixes.
+* Preserve the release-please PR description format so the merged release can be recognized and its draft prepared.
+
 ## [0.1.8](https://github.com/aburan28/conductor/compare/v0.1.7...v0.1.8) (2026-10-20)
 
 
