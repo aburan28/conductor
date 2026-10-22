@@ -132,7 +132,7 @@ const view = defineView({
       chosen.error_detail ? h('div', { class: 'notice warn' }, chosen.error_detail) : null,
       state.answer && state.answer.delegation?.ref === chosen.ref
         ? (state.answer.text ? h('pre', { class: 'delphi-answer', tabindex: '0' }, state.answer.text)
-          : h('div', { class: 'notice' }, state.answer.unavailable || state.answer.refusal?.category || 'No answer text is available.')) : null)) : null;
+          : h('div', { class: 'notice' }, state.answer.unavailable || state.answer.refusal?.category || 'No answer text is available.')) : null) }) : null;
 
     return h('div', { class: 'stack' }, form, history, detail);
   },
