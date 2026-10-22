@@ -277,17 +277,19 @@ conductor delphi ask --profile frontier --effort max "..."   # flags override th
 The owner's research repositories (crypto-autoresearcher, crypto, cryptanalysis) split an
 experiment between a director (Sonnet) that writes a frozen task card and a mechanical
 executor that runs it. Delphi carries the director's two model calls at batch price;
-`tools/task_card.py` in those repositories does the rest:
+`tools/task_card.py` in those repositories does the rest, end to end in one command:
 
 ```sh
-python3 tools/task_card.py request compile --design spec.md --bind tools/x.py --out card.yaml > compile.md
-conductor delphi ask --profile director --task T-42 --wait --file compile.md > reply.md
-python3 tools/task_card.py ingest reply.md --expect card --out card.yaml      # only if it lints
-python3 tools/task_card.py run card.yaml                                      # no model
-python3 tools/task_card.py request assess card.yaml > assess.md
-conductor delphi ask --profile director --task T-42 --wait --file assess.md > reply.md
-python3 tools/task_card.py ingest reply.md --expect assessment --card card.yaml --out assessment.yaml
+python3 tools/task_card.py lane --via conductor --task T-42 \
+    --design spec.md --bind tools/x.py --card card.yaml --assessment assessment.yaml
 ```
+
+It sends the compile prompt with `conductor delphi ask --profile director --task T-42 --wait
+--file …`, ingests the reply as the card (only if it lints), runs the card with no model,
+sends the assess prompt the same way and ingests the assessment. `--via auto` uses Conductor
+when `conductor delphi profiles` lists `director` and standalone `delphi` otherwise; the
+step-by-step commands (`request`, `ingest`, `run`) are in the research repositories'
+`docs/model-tiers.md`.
 
 - A delegation is one turn with no tools, so `request` writes every fact into the prompt
   (commit, file digests, the contract, the receipt) and `ingest` refuses a reply that does
