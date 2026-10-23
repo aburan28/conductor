@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Private Conductor HA service on on-demand Fargate with Multi-AZ PostgreSQL.
+Description: Conductor HA service with private-by-default or explicit public HTTPS, on Fargate and Multi-AZ PostgreSQL.
 
 Parameters:
   VpcId:
@@ -10,6 +10,21 @@ Parameters:
   PrivateSubnetB:
     Type: AWS::EC2::Subnet::Id
     Description: Private subnet in a DIFFERENT AZ, with independent outbound connectivity.
+  LoadBalancerScheme:
+    Type: String
+    Default: internal
+    AllowedValues: [internal, internet-facing]
+    Description: Explicitly select internet-facing to expose HTTPS publicly; tasks and database remain private.
+  PublicSubnetA:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^subnet-([a-f0-9]{8}|[a-f0-9]{17})$'
+    Description: Public ALB subnet in the first AZ; required only for internet-facing mode.
+  PublicSubnetB:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^subnet-([a-f0-9]{8}|[a-f0-9]{17})$'
+    Description: Public ALB subnet in a different AZ; required only for internet-facing mode.
   ImageUri:
     Type: String
     AllowedPattern: '^.+@sha256:[a-f0-9]{64}$'
@@ -24,7 +39,7 @@ Parameters:
   ClientCidr:
     Type: String
     AllowedPattern: '^(?:[0-9]{1,3}\.){3}[0-9]{1,3}/(?:[0-9]|[12][0-9]|3[0-2])$'
-    Description: Trusted private network or VPN CIDR allowed to connect to HTTPS.
+    Description: HTTPS client CIDR; 0.0.0.0/0 is permitted only in explicit internet-facing mode.
   SealingKeySecretArn:
     Type: String
     AllowedPattern: '^arn:[^:]+:secretsmanager:[^:]+:[0-9]{12}:secret:.+$'
@@ -58,14 +73,40 @@ Rules:
       - Assert: !Not [!Equals [!Ref PrivateSubnetA, !Ref PrivateSubnetB]]
         AssertDescription: Supply two different subnets in different Availability Zones.
 
+  PublicSubnetsRequired:
+    RuleCondition: !Equals [!Ref LoadBalancerScheme, internet-facing]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref PublicSubnetA, '']]
+        AssertDescription: PublicSubnetA is required for internet-facing HTTPS.
+      - Assert: !Not [!Equals [!Ref PublicSubnetB, '']]
+        AssertDescription: PublicSubnetB is required for internet-facing HTTPS.
+      - Assert: !Not [!Equals [!Ref PublicSubnetA, !Ref PublicSubnetB]]
+        AssertDescription: Public ALB subnets must be distinct and in different AZs.
+      - Assert: !And
+          - !Not [!Equals [!Ref PublicSubnetA, !Ref PrivateSubnetA]]
+          - !Not [!Equals [!Ref PublicSubnetA, !Ref PrivateSubnetB]]
+          - !Not [!Equals [!Ref PublicSubnetB, !Ref PrivateSubnetA]]
+          - !Not [!Equals [!Ref PublicSubnetB, !Ref PrivateSubnetB]]
+        AssertDescription: Public ALB subnets must be separate from private task and database subnets.
+  PrivateModeInputs:
+    RuleCondition: !Equals [!Ref LoadBalancerScheme, internal]
+    Assertions:
+      - Assert: !And
+          - !Equals [!Ref PublicSubnetA, '']
+          - !Equals [!Ref PublicSubnetB, '']
+        AssertDescription: Leave PublicSubnetA and PublicSubnetB empty for internal mode.
+      - Assert: !Not [!Equals [!Ref ClientCidr, 0.0.0.0/0]]
+        AssertDescription: Internal mode requires a bounded client CIDR.
+
 Conditions:
+  IsPublic: !Equals [!Ref LoadBalancerScheme, internet-facing]
   HasSealingKmsKey: !Not [!Equals [!Ref SealingKeyKmsArn, '']]
 
 Resources:
   LoadBalancerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: HTTPS from the trusted private network
+      GroupDescription: HTTPS from the explicitly configured client CIDR
       VpcId: !Ref VpcId
       SecurityGroupIngress:
         - IpProtocol: tcp
@@ -300,10 +341,19 @@ Resources:
               max-buffer-size: 4m
   LoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Metadata:
+      # Optional public subnet strings are empty only on the unselected internal path.
+      # Rules above require valid, nonempty IDs when IsPublic selects these values.
+      cfn-lint:
+        config:
+          ignore_checks: [W1030]
     Properties:
       Type: application
-      Scheme: internal
-      Subnets: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+      Scheme: !Ref LoadBalancerScheme
+      Subnets: !If
+        - IsPublic
+        - [!Ref PublicSubnetA, !Ref PublicSubnetB]
+        - [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
       SecurityGroups: [!Ref LoadBalancerSecurityGroup]
       LoadBalancerAttributes:
         - Key: idle_timeout.timeout_seconds
@@ -339,6 +389,11 @@ Resources:
       Port: 443
       Protocol: HTTPS
       SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      ListenerAttributes: !If
+        - IsPublic
+        - - Key: routing.http.response.strict_transport_security.header_value
+            Value: max-age=31536000
+        - !Ref AWS::NoValue
       Certificates:
         - CertificateArn: !Ref CertificateArn
       DefaultActions:

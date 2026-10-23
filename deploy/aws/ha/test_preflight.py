@@ -35,10 +35,12 @@ class FakeAWS:
         self.routes = [self.route('subnet-aaa', 'rtb-aaa', 'nat-aaa'), self.route('subnet-bbb', 'rtb-bbb', 'nat-bbb')]
         self.fail = None
         self.endpoints = []
+        self.igw_state = 'available'
+        self.igw_vpc = 'vpc-abc'
 
     @staticmethod
     def subnet(identifier, az):
-        return {'SubnetId': identifier, 'VpcId': 'vpc-abc', 'AvailabilityZone': az, 'MapPublicIpOnLaunch': False}
+        return {'SubnetId': identifier, 'VpcId': 'vpc-abc', 'AvailabilityZone': az, 'MapPublicIpOnLaunch': False, 'State': 'available'}
 
     @staticmethod
     def route(subnet, table, nat):
@@ -49,7 +51,7 @@ class FakeAWS:
         return SimpleNamespace(**{name: self.function(service, name) for name in (
             'describe_certificate', 'describe_secret', 'describe_images', 'get_topic_attributes',
             'describe_vpcs', 'describe_subnets', 'describe_route_tables', 'describe_vpc_endpoints',
-            'describe_nat_gateways', 'describe_db_engine_versions', 'describe_orderable_db_instance_options')})
+            'describe_nat_gateways', 'describe_internet_gateways', 'describe_db_engine_versions', 'describe_orderable_db_instance_options')})
 
     def function(self, service, name):
         def response(**kwargs):
@@ -80,6 +82,9 @@ class FakeAWS:
             if name == 'describe_nat_gateways':
                 nat = kwargs['NatGatewayIds'][0]
                 return {'NatGateways': [{'State': 'available', 'SubnetId': 'subnet-111' if nat == 'nat-aaa' else 'subnet-222'}]}
+            if name == 'describe_internet_gateways':
+                return {'InternetGateways': [{'InternetGatewayId': 'igw-aaa',
+                         'Attachments': [{'State': self.igw_state, 'VpcId': self.igw_vpc}]}]}
             if name == 'describe_db_engine_versions':
                 return {'DBEngineVersions': [{'EngineVersion': '17.11'}]}
             if name == 'describe_orderable_db_instance_options':
@@ -182,6 +187,116 @@ class PreflightTests(unittest.TestCase):
         result = self.run_check()
         self.assertEqual(result['status'], 'PASS', result)
         self.assertTrue(any('external GitHub/model-provider' in w for w in result['warnings']))
+
+    def public_mode(self):
+        self.params.update(LoadBalancerScheme='internet-facing', PublicSubnetA='subnet-111',
+                           PublicSubnetB='subnet-222', ClientCidr='0.0.0.0/0')
+        for identifier in ('subnet-111', 'subnet-222'):
+            self.aws.routes.append({'RouteTableId': 'rtb-' + identifier,
+                                    'Associations': [{'SubnetId': identifier}],
+                                    'Routes': [{'DestinationCidrBlock': '0.0.0.0/0',
+                                                'GatewayId': 'igw-aaa', 'State': 'active'}]})
+
+    def test_explicit_public_mode_passes_with_private_backends(self):
+        self.public_mode()
+        result = self.run_check()
+        self.assertEqual(result['status'], 'PASS', result)
+        self.assertEqual(sum(name == 'describe_internet_gateways' for _, name, _ in self.aws.calls), 1)
+        self.assertIn('subnet-aaa: no direct internet-gateway route', result['checks_passed'])
+        self.assertTrue(all(name.startswith('describe_') or name == 'get_topic_attributes' for _, name, _ in self.aws.calls))
+
+    def test_world_cidr_rejected_without_explicit_public_mode(self):
+        self.params['ClientCidr'] = '0.0.0.0/0'
+        self.assertEqual(self.run_check()['status'], 'BLOCKED')
+        self.params['LoadBalancerScheme'] = 'internal'
+        self.assertEqual(self.run_check()['status'], 'BLOCKED')
+
+    def test_invalid_scheme_fails_before_aws_calls(self):
+        for mode in ('public', '', 'INTERNAL', 'internet-facing ', 'true'):
+            with self.subTest(mode=mode):
+                self.params['LoadBalancerScheme'] = mode
+                self.assertEqual(self.run_check()['status'], 'BLOCKED')
+                self.assertEqual(self.aws.calls, [])
+
+    def test_public_requires_two_separate_subnets(self):
+        self.public_mode()
+        for replacement in ('', 'bogus', 'subnet-111', 'subnet-aaa'):
+            with self.subTest(replacement=replacement):
+                self.params['PublicSubnetB'] = replacement
+                self.assertEqual(self.run_check()['status'], 'BLOCKED')
+                self.assertEqual(self.aws.calls, [])
+
+    def test_internal_rejects_unused_public_subnet_parameters(self):
+        self.params['PublicSubnetA'] = 'subnet-111'
+        self.assertEqual(self.run_check()['status'], 'BLOCKED')
+        self.assertEqual(self.aws.calls, [])
+
+    def test_public_mode_still_rejects_invalid_or_ipv6_client_cidr(self):
+        self.public_mode()
+        for cidr in ('::/0', 'invalid', '10.0.0.1/24', '0.0.0.0/33'):
+            with self.subTest(cidr=cidr):
+                self.params['ClientCidr'] = cidr
+                self.assertEqual(self.run_check()['status'], 'BLOCKED')
+
+    def test_public_parameters_are_accepted_by_file_parser(self):
+        self.public_mode()
+        rows = [{'ParameterKey': k, 'ParameterValue': v} for k, v in self.params.items()]
+        self.assertEqual(parameters(rows), self.params)
+
+    def test_public_subnet_vpc_az_and_state_checked(self):
+        for field, value in (('VpcId', 'vpc-def'), ('AvailabilityZone', 'us-west-2a'),
+                             ('AvailabilityZone', 'us-west-2c'), ('State', 'pending')):
+            with self.subTest(field=field, value=value):
+                self.setUp()
+                self.public_mode()
+                self.aws.subnets['subnet-222'][field] = value
+                self.assertEqual(self.run_check()['status'], 'BLOCKED')
+
+    def test_missing_public_subnet_blocks(self):
+        self.public_mode()
+        del self.aws.subnets['subnet-222']
+        self.assertIn('Both public ALB subnets exist', self.run_check()['blockers'])
+
+    def test_public_requires_active_default_igw_route(self):
+        for route in ({'GatewayId': 'igw-aaa', 'State': 'blackhole', 'DestinationCidrBlock': '0.0.0.0/0'},
+                      {'GatewayId': 'igw-aaa', 'State': 'active', 'DestinationCidrBlock': '10.0.0.0/8'},
+                      {'NatGatewayId': 'nat-bbb', 'State': 'active', 'DestinationCidrBlock': '0.0.0.0/0'}):
+            with self.subTest(route=route):
+                self.setUp()
+                self.public_mode()
+                self.aws.routes[-1]['Routes'] = [route]
+                self.assertIn('subnet-222: active default route targets an internet gateway', self.run_check()['blockers'])
+
+    def test_public_igw_must_be_attached_to_same_vpc(self):
+        self.public_mode()
+        for state in ('attaching', 'detached', 'detaching'):
+            with self.subTest(state=state):
+                self.aws.igw_state = state
+                self.assertEqual(self.run_check()['status'], 'BLOCKED')
+        self.aws.igw_state = 'attached'
+        self.assertEqual(self.run_check()['status'], 'PASS')
+        self.aws.igw_state = 'available'
+        self.aws.igw_vpc = 'vpc-def'
+        self.assertEqual(self.run_check()['status'], 'BLOCKED')
+
+    def test_public_gateway_query_failure_blocks_without_secret_details(self):
+        self.public_mode()
+        self.aws.fail = 'describe_internet_gateways'
+        result = self.run_check()
+        self.assertEqual(result['status'], 'BLOCKED')
+        self.assertNotIn('SECRET-DO-NOT-PRINT', json.dumps(result))
+
+    def test_public_route_main_table_fallback(self):
+        self.public_mode()
+        self.aws.routes = self.aws.routes[:2] + [{'RouteTableId': 'rtb-main',
+            'Associations': [{'Main': True}], 'Routes': [{'DestinationCidrBlock': '0.0.0.0/0',
+            'GatewayId': 'igw-aaa', 'State': 'active'}]}]
+        self.assertEqual(self.run_check()['status'], 'PASS')
+
+    def test_public_mode_does_not_relax_private_subnet_requirement(self):
+        self.public_mode()
+        self.aws.routes[0]['Routes'] = [{'GatewayId': 'igw-aaa', 'State': 'active', 'DestinationCidrBlock': '0.0.0.0/0'}]
+        self.assertIn('subnet-aaa: no direct internet-gateway route', self.run_check()['blockers'])
 
     def test_malformed_url_is_a_reported_blocker(self):
         self.params['PublicUrl'] = 'https://[invalid'

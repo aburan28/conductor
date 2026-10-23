@@ -9,7 +9,8 @@ from urllib.parse import urlsplit
 
 REQUIRED = {"VpcId", "PrivateSubnetA", "PrivateSubnetB", "ImageUri", "CertificateArn",
             "PublicUrl", "ClientCidr", "SealingKeySecretArn", "AlarmTopicArn"}
-OPTIONAL = {"SealingKeyKmsArn", "DesiredCount", "DatabaseClass", "DatabaseEngineVersion"}
+OPTIONAL = {"SealingKeyKmsArn", "DesiredCount", "DatabaseClass", "DatabaseEngineVersion",
+            "LoadBalancerScheme", "PublicSubnetA", "PublicSubnetB"}
 
 
 def parameters(rows):
@@ -56,6 +57,22 @@ def check(params, region, client):
             blockers.append(f'{service}.{operation}: {code}')
             return {}
 
+    scheme = params.get('LoadBalancerScheme', 'internal')
+    public = scheme == 'internet-facing'
+    require(scheme in ('internal', 'internet-facing'), 'LoadBalancerScheme is internal or internet-facing')
+    public_ids = [params.get('PublicSubnetA', ''), params.get('PublicSubnetB', '')]
+    if public:
+        require(all(re.fullmatch(r'subnet-[a-f0-9]+', s) for s in public_ids),
+                'Public mode requires both public ALB subnet identifiers')
+        require(public_ids[0] != public_ids[1], 'Public ALB subnets are distinct')
+        require(not set(public_ids) & {params['PrivateSubnetA'], params['PrivateSubnetB']},
+                'Public ALB subnets are separate from private subnets')
+    else:
+        require(not any(public_ids), 'Internal mode requires empty public ALB subnet parameters')
+    if blockers:
+        return {'status': 'BLOCKED', 'region': region, 'checks_passed': passed,
+                'blockers': blockers, 'warnings': warnings}
+
     try:
         count = int(params.get('DesiredCount', '2'))
     except ValueError:
@@ -63,10 +80,10 @@ def check(params, region, client):
     require(2 <= count <= 10, 'DesiredCount is between 2 and 10')
     try:
         cidr = ipaddress.ip_network(params['ClientCidr'], strict=True)
-        valid_cidr = cidr.version == 4 and cidr.prefixlen > 0
+        valid_cidr = cidr.version == 4 and (cidr.prefixlen > 0 or public)
     except ValueError:
         valid_cidr = False
-    require(valid_cidr, 'ClientCidr is a bounded IPv4 network, not all IPv4 addresses')
+    require(valid_cidr, 'ClientCidr is IPv4 and allows all addresses only in explicit public mode')
     valid_url = bool(re.fullmatch(r'https://[A-Za-z0-9.-]+', params['PublicUrl']))
     url = urlsplit(params['PublicUrl']) if valid_url else urlsplit('')
     require(valid_url, 'PublicUrl is an HTTPS origin without a path or credentials')
@@ -117,7 +134,7 @@ def check(params, region, client):
     require(any(v.get('VpcId') == vpc and v.get('State') == 'available' for v in vpcs), 'VPC exists and is available')
     ids = [params['PrivateSubnetA'], params['PrivateSubnetB']]
     require(ids[0] != ids[1], 'Private subnets are distinct')
-    subnets = call('ec2', 'describe_subnets', SubnetIds=sorted(set(ids))).get('Subnets', [])
+    subnets = call('ec2', 'describe_subnets', SubnetIds=sorted(set(ids + (public_ids if public else [])))).get('Subnets', [])
     by_id = {s['SubnetId']: s for s in subnets}
     require(all(s in by_id for s in ids), 'Both private subnets exist')
     require(all(by_id.get(s, {}).get('VpcId') == vpc for s in ids), 'Private subnets belong to VpcId')
@@ -127,14 +144,49 @@ def check(params, region, client):
             'Private subnets do not assign public IP addresses by default')
     tables = call('ec2', 'describe_route_tables', Filters=[{'Name': 'vpc-id', 'Values': [vpc]}]).get('RouteTables', [])
     endpoints = call('ec2', 'describe_vpc_endpoints', Filters=[{'Name': 'vpc-id', 'Values': [vpc]}]).get('VpcEndpoints', [])
+    def route_table(subnet_id):
+        explicit = [t for t in tables if any(a.get('SubnetId') == subnet_id for a in t.get('Associations', []))]
+        selected = explicit or [t for t in tables if any(a.get('Main') for a in t.get('Associations', []))]
+        if require(len(selected) == 1, f'{subnet_id}: exactly one effective route table found'):
+            return selected[0]
+        return None
+
+    if public:
+        require(all(s in by_id for s in public_ids), 'Both public ALB subnets exist')
+        require(all(by_id.get(s, {}).get('VpcId') == vpc for s in public_ids),
+                'Public ALB subnets belong to VpcId')
+        require(all(by_id.get(s, {}).get('State') == 'available' for s in public_ids),
+                'Public ALB subnets are available')
+        require(len({by_id.get(s, {}).get('AvailabilityZone') for s in public_ids} - {None}) == 2,
+                'Public ALB subnets span two availability zones')
+        require({by_id.get(s, {}).get('AvailabilityZone') for s in public_ids} ==
+                {by_id.get(s, {}).get('AvailabilityZone') for s in ids},
+                'Public ALB and private subnets use the same availability zones')
+        gateways = {}
+        for subnet_id in public_ids:
+            table = route_table(subnet_id)
+            if table is None:
+                continue
+            gateway_id = next((r.get('GatewayId', '') for r in table.get('Routes', [])
+                               if r.get('DestinationCidrBlock') == '0.0.0.0/0'
+                               and r.get('State') == 'active'), '')
+            if not require(gateway_id.startswith('igw-'),
+                           f'{subnet_id}: active default route targets an internet gateway'):
+                continue
+            if gateway_id not in gateways:
+                gateways[gateway_id] = call('ec2', 'describe_internet_gateways',
+                                            InternetGatewayIds=[gateway_id]).get('InternetGateways', [])
+            require(any(g.get('InternetGatewayId') == gateway_id and
+                        any(a.get('VpcId') == vpc and a.get('State') in ('available', 'attached')
+                            for a in g.get('Attachments', [])) for g in gateways[gateway_id]),
+                    f'{subnet_id}: internet gateway is attached to VpcId')
+
     nat_ids = set()
     for subnet_id in ids:
         subnet = by_id.get(subnet_id, {})
-        explicit = [t for t in tables if any(a.get('SubnetId') == subnet_id for a in t.get('Associations', []))]
-        selected = explicit or [t for t in tables if any(a.get('Main') for a in t.get('Associations', []))]
-        if not require(len(selected) == 1, f'{subnet_id}: exactly one effective route table found'):
+        table = route_table(subnet_id)
+        if table is None:
             continue
-        table = selected[0]
         routes = [r for r in table.get('Routes', []) if r.get('State') == 'active']
         require(not any(r.get('GatewayId', '').startswith('igw-') for r in routes),
                 f'{subnet_id}: no direct internet-gateway route')
@@ -159,7 +211,7 @@ def check(params, region, client):
             warnings.append(f'{subnet_id}: endpoint-only networking does not establish external GitHub/model-provider access.')
     if len(nat_ids) == 1 and len(ids) == 2:
         warnings.append('Only one NAT gateway was found; inspect both subnet paths and endpoint coverage for AZ independence.')
-    warnings.append('Route inspection does not test DNS, security-group/NACL reachability, NAT public routes, client VPN access, or account provisioning restrictions.')
+    warnings.append('Route inspection does not test DNS, security-group/NACL reachability, NAT public routes, client access, or account provisioning restrictions.')
     engine_version = params.get('DatabaseEngineVersion', '17.11')
     engines = call('rds', 'describe_db_engine_versions', Engine='postgres', EngineVersion=engine_version).get('DBEngineVersions', [])
     require(bool(re.fullmatch(r'17\.[0-9]+', engine_version)) and any(e.get('EngineVersion') == engine_version for e in engines), 'Selected PostgreSQL 17 version is available in deployment region')
