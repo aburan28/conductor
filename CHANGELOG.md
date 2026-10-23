@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.10](https://github.com/aburan28/conductor/compare/v0.1.9...v0.1.10) (2026-10-22)
+
+
+### Bug Fixes
+
+* **web:** close the Delphi request card's options object (delphi.js syntax error) ([b6165c4](https://github.com/aburan28/conductor/commit/b6165c46a1b06e8967b87e55c901d006bfe3fcfe))
+* **web:** close the Delphi request card's options object (delphi.js syntax error) ([3502fef](https://github.com/aburan28/conductor/commit/3502fef00089d4149cf343154fe675992a50c1e8))
+* **web:** close the Delphi request card's options object (delphi.js syntax error) ([b372c76](https://github.com/aburan28/conductor/commit/b372c76243bbe0a583aafa3ca2abf6981ac26e98))
+
 ## [0.1.9](https://github.com/aburan28/conductor/compare/9e8bda286ffb3e743c76eea6bdb076b47c124229...v0.1.9) (2026-10-21)
 
 ### Bug Fixes
