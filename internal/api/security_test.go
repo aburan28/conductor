@@ -631,6 +631,8 @@ func assertRoutesCovered(t *testing.T, walked []string) {
 	exempt := map[string]bool{
 		"/":                 true, // the dashboard's static files
 		"/v1/health":        true, // unauthenticated, no project data
+		"/v1/live":          true, // process-only probe, no project data
+		"/v1/readyz":        true, // sanitized load-balancer probe, no project data
 		"/v1/local/status":  true, // unauthenticated, no project data
 		"/v1/peer/info":     true, // mesh-certificate authenticated, no project data
 		"/github/setup":     true, // GitHub App installation pages
