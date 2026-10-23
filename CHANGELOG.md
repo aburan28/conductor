@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.11](https://github.com/aburan28/conductor/compare/v0.1.10...v0.1.11) (2026-10-23)
+
+
+### Features
+
+* add AWS high availability and database failover protection ([#111](https://github.com/aburan28/conductor/issues/111)) ([05d70eb](https://github.com/aburan28/conductor/commit/05d70ebae85fc9fb0f2c12cbac5ae9eb71783147))
+
 ## [0.1.10](https://github.com/aburan28/conductor/compare/v0.1.9...v0.1.10) (2026-10-22)
 
 
