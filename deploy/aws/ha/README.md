@@ -208,6 +208,20 @@ RDS failover events, missing healthy replicas, ALB/backend 5xx and low database 
 alert the supplied SNS topic. Dependency-only failures without traffic need a private
 readiness monitor; the 5xx alarms cannot detect an idle outage by themselves.
 
+## Runtime image
+
+The runtime uses `scratch` with two statically linked Go binaries and public CA bundles.
+It contains no shell, package manager, curl, or curl's native compression libraries.
+The ECS health command is `/usr/local/bin/conductor-healthcheck`, which probes the local
+liveness endpoint with a four-second timeout, without proxies or redirects. The deployment
+smoke test exercises this exact binary before and during database loss.
+
+Build tools and certificate-download dependencies remain in build stages. Go builds use the
+build host architecture and cross-compile to the requested target, including Linux/amd64
+from an ARM Mac. Both static binaries still require the normal Go dependency vulnerability
+checks; an OS-package scanner that cannot scan `scratch` is not a clean vulnerability scan.
+Use the image manifest and runtime file inventory to verify that excluded libraries are absent.
+
 ## Sessions, upgrades and secrets
 
 REST state is in PostgreSQL. MCP HTTP session state remains local to each daemon. ALB cookie

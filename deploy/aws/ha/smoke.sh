@@ -47,12 +47,18 @@ await_status() {
 }
 await_status "$url_a/v1/readyz" 200
 await_status "$url_b/v1/readyz" 200
+for replica in "$replica_a" "$replica_b"; do
+  docker exec "$replica" /usr/local/bin/conductor-healthcheck
+done
 echo 'PASS: both replicas started against one database'
 
 docker stop --time 10 "$database" >/dev/null
 for url in "$url_a" "$url_b"; do
   await_status "$url/v1/readyz" 503
   [[ $(status "$url/v1/live") == 200 ]]
+done
+for replica in "$replica_a" "$replica_b"; do
+  docker exec "$replica" /usr/local/bin/conductor-healthcheck
 done
 docker start "$database" >/dev/null
 await_status "$url_a/v1/readyz" 200

@@ -285,7 +285,7 @@ Resources:
             - Name: CONDUCTOR_SECRET_KEY
               ValueFrom: !Ref SealingKeySecretArn
           HealthCheck:
-            Command: [CMD, curl, --fail, --silent, --max-time, '4', 'http://127.0.0.1:8080/v1/live']
+            Command: [CMD, /usr/local/bin/conductor-healthcheck]
             Interval: 15
             Timeout: 5
             Retries: 3
