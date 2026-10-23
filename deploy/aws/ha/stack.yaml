@@ -1,0 +1,474 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Private Conductor HA service on on-demand Fargate with Multi-AZ PostgreSQL.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet::Id
+    Description: Private subnet with NAT or required endpoints, in the first AZ.
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet::Id
+    Description: Private subnet in a DIFFERENT AZ, with independent outbound connectivity.
+  ImageUri:
+    Type: String
+    AllowedPattern: '^.+@sha256:[a-f0-9]{64}$'
+    Description: Immutable linux/amd64 image built from deploy/aws/ha/Dockerfile.
+  CertificateArn:
+    Type: String
+    AllowedPattern: '^arn:[^:]+:acm:[^:]+:[0-9]{12}:certificate/.+$'
+  PublicUrl:
+    Type: String
+    AllowedPattern: '^https://[A-Za-z0-9.-]+$'
+    Description: HTTPS DNS origin matching the certificate; no path or trailing slash.
+  ClientCidr:
+    Type: String
+    AllowedPattern: '^(?:[0-9]{1,3}\.){3}[0-9]{1,3}/(?:[0-9]|[12][0-9]|3[0-2])$'
+    Description: Trusted private network or VPN CIDR allowed to connect to HTTPS.
+  SealingKeySecretArn:
+    Type: String
+    AllowedPattern: '^arn:[^:]+:secretsmanager:[^:]+:[0-9]{12}:secret:.+$'
+    Description: Existing secret containing only the base64 32-byte Conductor sealing key.
+  SealingKeyKmsArn:
+    Type: String
+    Default: ''
+    Description: Customer-managed KMS key ARN for sealing-key secret, or empty for AWS-managed key.
+  AlarmTopicArn:
+    Type: String
+    AllowedPattern: '^arn:[^:]+:sns:[^:]+:[0-9]{12}:.+$'
+    Description: Existing SNS topic with confirmed operator subscriptions.
+  DesiredCount:
+    Type: Number
+    Default: 2
+    MinValue: 2
+    MaxValue: 10
+  DatabaseEngineVersion:
+    Type: String
+    Default: '17.11'
+    AllowedPattern: '^17\.[0-9]+$'
+    Description: Supported PostgreSQL 17 minor version, verified in the target region.
+  DatabaseClass:
+    Type: String
+    Default: db.t4g.medium
+    AllowedValues: [db.t4g.medium, db.t4g.large, db.m7g.large, db.m7g.xlarge]
+
+Rules:
+  DistinctSubnets:
+    Assertions:
+      - Assert: !Not [!Equals [!Ref PrivateSubnetA, !Ref PrivateSubnetB]]
+        AssertDescription: Supply two different subnets in different Availability Zones.
+
+Conditions:
+  HasSealingKmsKey: !Not [!Equals [!Ref SealingKeyKmsArn, '']]
+
+Resources:
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: HTTPS from the trusted private network
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref ClientCidr
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          DestinationSecurityGroupId: !Ref TaskSecurityGroup
+  TaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Conductor tasks; HTTPS egress and PostgreSQL only
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          DestinationSecurityGroupId: !Ref DatabaseSecurityGroup
+  TaskIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref TaskSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+  LoadBalancerTaskIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref LoadBalancerSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref TaskSecurityGroup
+      Description: Authenticated daemon self-calls through the shared public URL
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: PostgreSQL reachable only from Conductor tasks
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 1
+          ToPort: 1
+          CidrIp: 127.0.0.1/32
+  DatabaseIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref DatabaseSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref TaskSecurityGroup
+  DatabaseSubnets:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Conductor database subnets across two AZs
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+  DatabaseParameters:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: Require TLS for every PostgreSQL connection
+      Family: postgres17
+      Parameters:
+        rds.force_ssl: '1'
+  DatabaseSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Conductor database credentials; coordinated rotation required
+      GenerateSecretString:
+        SecretStringTemplate: '{"username":"conductor"}'
+        GenerateStringKey: password
+        PasswordLength: 40
+        ExcludePunctuation: true
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      Engine: postgres
+      EngineVersion: !Ref DatabaseEngineVersion
+      DBInstanceClass: !Ref DatabaseClass
+      DBName: conductor
+      MasterUsername: !Sub '{{resolve:secretsmanager:${DatabaseSecret}:SecretString:username}}'
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${DatabaseSecret}:SecretString:password}}'
+      DBSubnetGroupName: !Ref DatabaseSubnets
+      DBParameterGroupName: !Ref DatabaseParameters
+      VPCSecurityGroups: [!Ref DatabaseSecurityGroup]
+      MultiAZ: true
+      PubliclyAccessible: false
+      StorageEncrypted: true
+      StorageType: gp3
+      AllocatedStorage: '50'
+      MaxAllocatedStorage: 500
+      BackupRetentionPeriod: 14
+      DeleteAutomatedBackups: false
+      CopyTagsToSnapshot: true
+      DeletionProtection: true
+      AutoMinorVersionUpgrade: true
+      EnableCloudwatchLogsExports: [postgresql, upgrade]
+  DatabaseSecretAttachment:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties:
+      SecretId: !Ref DatabaseSecret
+      TargetId: !Ref Database
+      TargetType: AWS::RDS::DBInstance
+  Logs:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RetentionInDays: 30
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ecs-tasks.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+      Policies:
+        - PolicyName: ReadDeploymentSecrets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: [!Ref DatabaseSecret, !Ref SealingKeySecretArn]
+              - !If
+                - HasSealingKmsKey
+                - Effect: Allow
+                  Action: kms:Decrypt
+                  Resource: !Ref SealingKeyKmsArn
+                  Condition:
+                    StringEquals:
+                      kms:ViaService: !Sub 'secretsmanager.${AWS::Region}.${AWS::URLSuffix}'
+                - !Ref AWS::NoValue
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ecs-tasks.amazonaws.com}
+            Action: sts:AssumeRole
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Cpu: '512'
+      Memory: '1024'
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: conductor
+          Image: !Ref ImageUri
+          Essential: true
+          ReadonlyRootFilesystem: true
+          StopTimeout: 60
+          LinuxParameters:
+            InitProcessEnabled: true
+          Command:
+            - --addr
+            - 0.0.0.0:8080
+            - --insecure
+            - --behind-proxy
+            - --security-mode
+            - enhanced
+            - --database
+            - rds
+          PortMappings:
+            - ContainerPort: 8080
+              Protocol: tcp
+          Environment:
+            - Name: DATABASE_URL
+              Value: connect_timeout=5
+            - Name: PGHOST
+              Value: !GetAtt Database.Endpoint.Address
+            - Name: PGPORT
+              Value: !GetAtt Database.Endpoint.Port
+            - Name: PGDATABASE
+              Value: conductor
+            - Name: PGSSLMODE
+              Value: verify-full
+            - Name: PGSSLROOTCERT
+              Value: /etc/ssl/certs/rds-global-bundle.pem
+            - Name: CONDUCTOR_PUBLIC_URL
+              Value: !Ref PublicUrl
+          Secrets:
+            - Name: PGUSER
+              ValueFrom: !Sub '${DatabaseSecret}:username::'
+            - Name: PGPASSWORD
+              ValueFrom: !Sub '${DatabaseSecret}:password::'
+            - Name: CONDUCTOR_SECRET_KEY
+              ValueFrom: !Ref SealingKeySecretArn
+          HealthCheck:
+            Command: [CMD, curl, --fail, --silent, --max-time, '4', 'http://127.0.0.1:8080/v1/live']
+            Interval: 15
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 120
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref Logs
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: conductor
+              mode: non-blocking
+              max-buffer-size: 4m
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: application
+      Scheme: internal
+      Subnets: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+      SecurityGroups: [!Ref LoadBalancerSecurityGroup]
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '120'
+        - Key: routing.http.drop_invalid_header_fields.enabled
+          Value: 'true'
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      TargetType: ip
+      Port: 8080
+      Protocol: HTTP
+      HealthCheckPath: /v1/live
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher: {HttpCode: '200'}
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '30'
+        - Key: stickiness.enabled
+          Value: 'true'
+        - Key: stickiness.type
+          Value: lb_cookie
+        - Key: stickiness.lb_cookie.duration_seconds
+          Value: '86400'
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn: [Listener, TaskIngress, LoadBalancerTaskIngress, DatabaseIngress, DatabaseSecretAttachment]
+    Properties:
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref TaskDefinition
+      LaunchType: FARGATE
+      PlatformVersion: '1.4.0'
+      DesiredCount: !Ref DesiredCount
+      AvailabilityZoneRebalancing: ENABLED
+      HealthCheckGracePeriodSeconds: 180
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+          SecurityGroups: [!Ref TaskSecurityGroup]
+      LoadBalancers:
+        - ContainerName: conductor
+          ContainerPort: 8080
+          TargetGroupArn: !Ref TargetGroup
+  HealthyTargetsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Conductor has fewer healthy replicas than requested
+      Namespace: AWS/ApplicationELB
+      MetricName: HealthyHostCount
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt LoadBalancer.LoadBalancerFullName
+        - Name: TargetGroup
+          Value: !GetAtt TargetGroup.TargetGroupFullName
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: !Ref DesiredCount
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref AlarmTopicArn]
+      OKActions: [!Ref AlarmTopicArn]
+  TargetErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Conductor backend failures, including database unavailability
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_Target_5XX_Count
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt LoadBalancer.LoadBalancerFullName
+        - Name: TargetGroup
+          Value: !GetAtt TargetGroup.TargetGroupFullName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopicArn]
+      OKActions: [!Ref AlarmTopicArn]
+  LoadBalancerErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Load balancer cannot serve requests
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_ELB_5XX_Count
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt LoadBalancer.LoadBalancerFullName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopicArn]
+      OKActions: [!Ref AlarmTopicArn]
+  DatabaseStorageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: PostgreSQL has less than 10 GiB storage available
+      Namespace: AWS/RDS
+      MetricName: FreeStorageSpace
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref Database
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: 5
+      Threshold: 10737418240
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref AlarmTopicArn]
+      OKActions: [!Ref AlarmTopicArn]
+  DatabaseEvents:
+    Type: AWS::RDS::EventSubscription
+    Properties:
+      Enabled: true
+      SnsTopicArn: !Ref AlarmTopicArn
+      SourceType: db-instance
+      SourceIds: [!Ref Database]
+      EventCategories: [availability, failure, failover, maintenance, notification]
+
+Outputs:
+  Endpoint:
+    Value: !Ref PublicUrl
+  LoadBalancerDnsName:
+    Value: !GetAtt LoadBalancer.DNSName
+  LoadBalancerHostedZoneId:
+    Value: !GetAtt LoadBalancer.CanonicalHostedZoneID
+  ClusterName:
+    Value: !Ref Cluster
+  ServiceName:
+    Value: !GetAtt Service.Name
+  DatabaseIdentifier:
+    Value: !Ref Database
+  DatabaseEndpoint:
+    Value: !GetAtt Database.Endpoint.Address
+  DatabaseSecretArn:
+    Value: !Ref DatabaseSecret
+  TaskSecurityGroupId:
+    Value: !Ref TaskSecurityGroup
+  LogGroup:
+    Value: !Ref Logs

@@ -7,7 +7,9 @@ back after a bad day. DESIGN.md §26–§28 has the reasoning; this page has the
 
 | Endpoint | Auth | Use it for |
 |---|---|---|
-| `GET /v1/health` | none | Liveness. 200 when the database answers a ping, 503 otherwise. It names the failure (`"database": "unreachable"`) and never quotes the driver's error, which can carry hosts and credentials; the full error is in the log under the response's request id. |
+| `GET /v1/live` | none | Process liveness, independent of PostgreSQL. Returns 503 when shutdown begins. Use for ECS/container restart decisions. |
+| `GET /v1/readyz` | none | Bounded readiness: writable PostgreSQL primary, schema compatibility, and shutdown state. Returns only `ok` or `unavailable`, with no credentials or dependency details. |
+| `GET /v1/health` | none | Legacy database health. 200 when the database answers a ping, 503 otherwise. It names the failure (`"database": "unreachable"`) and never quotes the driver's error, which can carry hosts and credentials; the full error is in the log under the response's request id. |
 | `GET /v1/ready` | any token | Readiness and a summary for an operator: database, schema version against this binary, the shared scheduler heartbeat (`stale` past two minutes), and the GitHub poller (`ok` / `error` / `never_ran`). 503 when degraded. |
 | `GET /metrics` | see below | Prometheus text format. |
 
@@ -76,6 +78,36 @@ heartbeat measures the scheduler's availability, not the API's: a scheduler that
 while every API replica is down will reclaim leases that could not be renewed. Run the
 scheduler in the same processes that serve the API (the default) unless you have a reason
 not to.
+
+## Highly available AWS deployment
+
+[The HA deployment](../deploy/aws/ha/README.md) provides a separate CloudFormation
+stack with at least two Fargate tasks across availability zones, an internal HTTPS
+Application Load Balancer, and encrypted Multi-AZ RDS PostgreSQL. It does not upgrade
+or migrate the single-host stack in place. Keep the scheduler enabled in every replica,
+use the same sealing key, and pin one container image digest across the service.
+
+ECS replaces tasks when either their container health or their ALB target health fails.
+Both therefore use `/v1/live`: a PostgreSQL failover must not cause every healthy
+application process to be replaced. Monitor `/v1/readyz` for dependency readiness;
+requests can fail temporarily until the database is writable again. This deployment
+does not promise uninterrupted requests during RDS failover. The pgx pool reconnects
+to the stable RDS endpoint; clients should reconnect and retry reads with backoff.
+Retry mutations only when their API contract makes replay safe.
+
+MCP HTTP sessions remain in process memory. ALB cookie stickiness helps clients that
+retain cookies, but does not preserve sessions when a task dies, and does not pin
+clients that ignore cookies. Such clients must reinitialize after failover. Coordination
+records and leases persist in PostgreSQL. Validate the actual clients before cutover.
+
+Background work guarded by a PostgreSQL advisory lock cancels its callback context
+when the lock connection fails. Callbacks must honor cancellation. This is bounded
+failure detection, not fencing of remote side effects that were already issued;
+external writes still need their own idempotency guarantees.
+
+Use the runbook's failure drills before directing production clients to the new service:
+stop one task, force an RDS failover, and verify a backup restore into a separate database.
+Record observed recovery times and verify active coordination leases and stored data.
 
 ## Database
 

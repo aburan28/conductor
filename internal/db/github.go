@@ -126,7 +126,10 @@ func (s *Store) SaveGitHubCheckRun(ctx context.Context, repository, headSHA stri
 // TryExclusive runs fn only if no other process holds the named lock, and reports whether
 // it ran. The lock is a session-level advisory lock on a dedicated connection, released when
 // fn returns — or by Postgres, if this process dies holding it — so leadership needs no
-// lease bookkeeping and fails over on its own.
+// lease bookkeeping and fails over on its own. The connection is monitored while fn runs;
+// losing it cancels fn's context. Callers must honor that cancellation. This cannot fence
+// external side effects already issued before connection loss is detected: those still
+// require an idempotency key or fencing supported by the external service.
 func (s *Store) TryExclusive(ctx context.Context, name string, fn func(ctx context.Context) error) (bool, error) {
 	conn, err := s.pool.Acquire(ctx)
 	if err != nil {
@@ -141,12 +144,56 @@ func (s *Store) TryExclusive(ctx context.Context, name string, fn func(ctx conte
 		return false, nil
 	}
 	defer func() {
-		cleanup := context.WithoutCancel(ctx)
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), exclusiveCheckTimeout)
+		defer cancel()
 		if _, err := conn.Exec(cleanup, `SELECT pg_advisory_unlock(hashtextextended($1, 0))`, name); err != nil {
 			// A connection that may still hold the lock must not go back to the pool, where
 			// it would keep every other replica out for as long as it lived.
-			_ = conn.Conn().Close(cleanup)
+			closeCtx, closeCancel := context.WithTimeout(context.WithoutCancel(ctx), exclusiveCheckTimeout)
+			defer closeCancel()
+			_ = conn.Conn().Close(closeCtx)
 		}
 	}()
-	return true, fn(ctx)
+	workCtx, cancel := context.WithCancelCause(ctx)
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		ticker := time.NewTicker(exclusiveCheckInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-workCtx.Done():
+				return
+			case <-ticker.C:
+				checkCtx, stop := context.WithTimeout(workCtx, exclusiveCheckTimeout)
+				err := conn.Conn().Ping(checkCtx)
+				stop()
+				if err != nil {
+					if workCtx.Err() == nil {
+						cancel(ErrExclusiveLockLost)
+					}
+					return
+				}
+			}
+		}
+	}()
+	// Stop all use of the dedicated connection before unlocking/releasing it, also if fn
+	// panics. The callback never receives this connection and cannot race the monitor.
+	defer func() {
+		cancel(nil)
+		<-finished
+	}()
+	err = fn(workCtx)
+	if errors.Is(context.Cause(workCtx), ErrExclusiveLockLost) {
+		err = errors.Join(err, ErrExclusiveLockLost)
+	}
+	return true, err
 }
+
+// ErrExclusiveLockLost means a background worker's database lock connection failed.
+var ErrExclusiveLockLost = errors.New("exclusive lock connection lost")
+
+const (
+	exclusiveCheckInterval = time.Second
+	exclusiveCheckTimeout  = 2 * time.Second
+)

@@ -234,7 +234,10 @@ func newRequestID() string {
 }
 
 // quietRoutes are polled by probes and scrapers; logging each at Info would drown the rest.
-var quietRoutes = map[string]bool{"GET /v1/health": true, "GET /v1/ready": true, "GET /metrics": true}
+var quietRoutes = map[string]bool{
+	"GET /v1/health": true, "GET /v1/ready": true, "GET /metrics": true,
+	"GET /v1/live": true, "GET /v1/readyz": true,
+}
 
 // observe is the outermost middleware: request ID, body deadline, panic recovery, access
 // log and HTTP metrics.
@@ -388,6 +391,53 @@ func (b *deadlineBody) Read(p []byte) (int, error) {
 func (s *Server) opsRoutes(m *http.ServeMux) {
 	m.HandleFunc("GET /metrics", s.serveMetrics)
 	m.HandleFunc("GET /v1/ready", s.authenticate(s.ready))
+	m.HandleFunc("GET /v1/live", s.live)
+	m.HandleFunc("GET /v1/readyz", s.readyz)
+}
+
+// live checks only the process and its shutdown state. A database failover must not
+// cause the supervisor to restart every healthy process at once.
+func (s *Server) live(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if s.ops.baseCtx.Err() != nil {
+		s.ok(w, r, http.StatusServiceUnavailable, map[string]string{"status": "unavailable"})
+		return
+	}
+	s.ok(w, r, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+const readinessTimeout = 2 * time.Second
+
+// readyz is the load balancer probe. It deliberately requires no database-backed
+// authentication and returns no deployment or tenant details. Shared scheduler and
+// optional integration health belong to /v1/ready: an integration outage must not
+// withdraw every otherwise usable API replica from the load balancer.
+func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	unavailable := func() {
+		s.ok(w, r, http.StatusServiceUnavailable, map[string]string{"status": "unavailable"})
+	}
+	if s.ops.baseCtx.Err() != nil {
+		unavailable()
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), readinessTimeout)
+	defer cancel()
+	stop := context.AfterFunc(s.ops.baseCtx, cancel)
+	defer stop()
+	// A connection to a read-only standby can answer a ping but cannot serve claims.
+	var writable bool
+	if err := s.store.Pool().QueryRow(ctx,
+		`SELECT NOT pg_is_in_recovery() AND current_setting('transaction_read_only') = 'off'`).Scan(&writable); err != nil || !writable {
+		unavailable()
+		return
+	}
+	schema, err := s.store.SchemaStatus(ctx)
+	if err != nil || !schema.Current() || ctx.Err() != nil || s.ops.baseCtx.Err() != nil {
+		unavailable()
+		return
+	}
+	s.ok(w, r, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // ready is the deep check, for an operator or an orchestrator holding a token: the database,

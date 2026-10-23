@@ -1,0 +1,30 @@
+name: HA deployment
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate deployment and preflight
+        run: |
+          python3 -m venv /tmp/ha-tools
+          /tmp/ha-tools/bin/pip install cfn-lint==1.58.0
+          /tmp/ha-tools/bin/cfn-lint deploy/aws/ha/stack.yaml deploy/aws/ha/network.yaml
+          python3 -m unittest discover -s deploy/aws/ha -p 'test_*.py'
+          bash -n deploy/aws/ha/smoke.sh
+      - name: Build the deployment image
+        run: docker build --platform linux/amd64 -f deploy/aws/ha/Dockerfile -t conductor-ha:smoke .
+      - name: Exercise replica loss and PostgreSQL restart
+        run: bash deploy/aws/ha/smoke.sh conductor-ha:smoke

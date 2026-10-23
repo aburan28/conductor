@@ -1,0 +1,15 @@
+.git
+**/.git
+bin
+.DS_Store
+**/.DS_Store
+.env
+.env.*
+**/.env
+**/.env.*
+**/credentials.json
+**/secret.key
+**/*.dump
+**/*.log
+deploy/aws/ha/parameters*.json
+deploy/aws/ha/__pycache__
