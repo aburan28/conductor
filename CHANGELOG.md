@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.12](https://github.com/aburan28/conductor/compare/v0.1.11...v0.1.12) (2026-10-24)
+
+
+### Features
+
+* support public HTTPS HA with a minimal runtime ([#113](https://github.com/aburan28/conductor/issues/113)) ([98d5298](https://github.com/aburan28/conductor/commit/98d529803535455028240d5711fbcbc525401adb))
+
+
+### Bug Fixes
+
+* **release:** ship unsigned DMGs on purpose and make the integration hang diagnosable ([#114](https://github.com/aburan28/conductor/issues/114)) ([b1d46e9](https://github.com/aburan28/conductor/commit/b1d46e906d51a3bde86f99739e41eb1d30595c37))
+
 ## [0.1.11](https://github.com/aburan28/conductor/compare/v0.1.10...v0.1.11) (2026-10-23)
 
 
