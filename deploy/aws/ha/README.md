@@ -1,7 +1,8 @@
-# Private AWS high availability
+# AWS high availability
 
 This stack runs at least two on-demand Fargate tasks in separate Availability Zones behind
-an internal HTTPS Application Load Balancer. A private RDS PostgreSQL Multi-AZ instance
+an HTTPS Application Load Balancer, internal by default with an explicit public option.
+A private RDS PostgreSQL Multi-AZ instance
 provides automatic database failover, encrypted storage, 14-day point-in-time recovery,
 storage autoscaling and deletion protection. ECS replaces failed tasks and rolls back failed
 rolling deployments. Existing `deploy/aws/stack.yaml` remains the single-host deployment.
@@ -19,8 +20,9 @@ accepted migration until data, encryption, identity and the failure drills below
   VPC endpoints, provide ECR API, ECR Docker, Secrets Manager and CloudWatch Logs interface
   endpoints plus the S3 gateway endpoint, and separately provide outbound HTTPS for GitHub,
   model providers and other integrations. A shared NAT gateway remains a failure dependency.
-- Private/VPN connectivity from clients to the internal ALB, and a trusted `ClientCidr`.
-  No public IPs, public database or SSH port are created.
+- For default internal mode, private/VPN connectivity from clients to the ALB and a bounded
+  `ClientCidr`. For explicit public mode, two public ALB subnets with active internet-gateway
+  routes; see below. ECS tasks and RDS remain private in either mode. No SSH port is opened.
 - An issued ACM certificate in the same region covering `PublicUrl`, and control of its DNS.
   The stack outputs the ALB DNS name and hosted zone ID; DNS cutover is a separate action.
 - An immutable ECR `ImageUri` ending in `@sha256:<64 lowercase hex digits>`, built for
@@ -73,15 +75,60 @@ aws cloudformation describe-change-set --region us-west-2 \
 
 After review and explicit execution, wait for network completion. Copy its `VpcId`,
 `PrivateSubnetA` and `PrivateSubnetB` outputs into the service `parameters.json`, then run
-the service preflight. Do not reuse the public subnet outputs for the service.
+the service preflight. Use the private outputs for `PrivateSubnetA/B`. Use the public outputs only for the
+optional `PublicSubnetA/B` parameters, never for ECS or RDS.
 
-**Private client access is still required.** NAT provides outbound connectivity only;
+**Internal mode needs private client access.** NAT provides outbound connectivity only;
 it does not expose the internal ALB to this Mac or other clients. Connect the VPC using an
 existing private route, VPN, or a separately configured highly available client-access
 solution. Configure its routing, DNS and security rules, and use the actual client source
 CIDR as `ClientCidr`. This network stack does not create a VPN, client authorization rules,
 private DNS zone, ACM certificate or DNS record. Verify clients can reach both AZs before
 cutover; a single access gateway can remain a failure dependency outside this stack.
+
+## Public HTTPS with authenticated application access
+
+The default `LoadBalancerScheme=internal` remains private. To publish a service such as
+`https://conductor.engineering`, explicitly add these parameters to the service parameter
+array (keep `PrivateSubnetA/B` set to the private service subnets):
+
+```json
+{"ParameterKey":"LoadBalancerScheme","ParameterValue":"internet-facing"},
+{"ParameterKey":"PublicSubnetA","ParameterValue":"subnet-REPLACE-PUBLIC-A"},
+{"ParameterKey":"PublicSubnetB","ParameterValue":"subnet-REPLACE-PUBLIC-B"}
+```
+
+Set `PublicUrl` to the HTTPS origin matching the issued certificate and set `ClientCidr`
+to the intended IPv4 audience. `0.0.0.0/0` is accepted only with explicit `internet-facing`
+mode. Keep a narrower CIDR when only known client networks need access. The public subnets
+must belong to the same VPC, span the same two AZs as the private subnets, and each have an
+active default route to an internet gateway attached to this VPC. Use the network stack's
+public subnet outputs; an outbound NAT route is insufficient for a public ALB.
+
+Only the ALB becomes public. Its security group accepts TCP 443 from `ClientCidr`; no HTTP
+port 80 listener is created. ECS tasks still receive no public IP, accept application
+traffic only from the ALB security group, and connect to private RDS over verified TLS.
+Public HTTPS responses include `Strict-Transport-Security: max-age=31536000` at the ALB;
+the policy deliberately does not include subdomains or request browser preload enrollment.
+Switching an existing ALB's scheme requires replacement: inspect the change set and plan
+DNS cutover rather than treating this as an in-place networking change.
+
+Conductor runs with forced `--security-mode enhanced`: local passwordless sign-in is
+disabled, and project/task/session/secret APIs require Conductor authentication and their
+normal authorization checks. The ALB does not add a separate login layer or configure SSO.
+The dashboard's static/login pages and public protocol surfaces remain reachable without a
+bearer token: `/v1/live` and `/v1/readyz` return minimal status, while legacy `/v1/health`
+also exposes the service version and database status. Local/SSO login metadata and configured
+SSO/GitHub callbacks remain reachable and apply their own validation. Detailed `/v1/ready`
+requires authentication; `/metrics` is denied to remote callers by default with this proxy
+configuration unless a dedicated metrics token is configured.
+
+After deployment, point the domain's DNS alias at the ALB, verify the trusted certificate,
+and confirm that an unauthenticated request to `/v1/projects` returns 401 while an authorized
+client can access its project. Use a fresh private bootstrap credential; never embed a token
+in DNS, URLs, CloudFormation parameters, build logs or dashboard source. In internal mode,
+leave `PublicSubnetA/B` empty; the preflight rejects unused public subnet settings to prevent
+ambiguous deployment intent.
 
 ## Prepare and inspect
 
@@ -177,7 +224,8 @@ The ALB and ECS use **`/v1/live`**, which tests process availability and shutdow
 querying PostgreSQL. ECS also replaces tasks after ALB health failures; using a database
 probe there would restart every replica during a shared database failover. `/v1/readyz`
 checks database availability separately and returns a sanitized 503 when it is unavailable.
-Monitor it from the private network in addition to the authenticated detailed `/v1/ready`.
+Monitor it through the intended private or public HTTPS endpoint in addition to the
+authenticated detailed `/v1/ready`.
 
 A PostgreSQL failover interrupts in-flight transactions and can cause temporary API errors.
 This deployment provides automatic recovery, not uninterrupted transactions or a fixed RTO.
@@ -205,8 +253,22 @@ when all scheduler replicas have stopped making progress; measure that behavior 
   single-AZ VPN gateway or shared network appliance outside this template.
 
 RDS failover events, missing healthy replicas, ALB/backend 5xx and low database storage
-alert the supplied SNS topic. Dependency-only failures without traffic need a private
-readiness monitor; the 5xx alarms cannot detect an idle outage by themselves.
+alert the supplied SNS topic. Dependency-only failures without traffic need a
+readiness monitor on the selected endpoint; the 5xx alarms cannot detect an idle outage by themselves.
+
+## Runtime image
+
+The runtime uses `scratch` with two statically linked Go binaries and public CA bundles.
+It contains no shell, package manager, curl, or curl's native compression libraries.
+The ECS health command is `/usr/local/bin/conductor-healthcheck`, which probes the local
+liveness endpoint with a four-second timeout, without proxies or redirects. The deployment
+smoke test exercises this exact binary before and during database loss.
+
+Build tools and certificate-download dependencies remain in build stages. Go builds use the
+build host architecture and cross-compile to the requested target, including Linux/amd64
+from an ARM Mac. Both static binaries still require the normal Go dependency vulnerability
+checks; an OS-package scanner that cannot scan `scratch` is not a clean vulnerability scan.
+Use the image manifest and runtime file inventory to verify that excluded libraries are absent.
 
 ## Sessions, upgrades and secrets
 
