@@ -116,16 +116,28 @@ jobs:
       # Local/PR artifacts may be unsigned. The release caller always supplies version, and a
       # public release is unsigned only because this workflow says so: no Developer ID
       # certificate or notarization credentials are configured yet, so releases ship the
-      # unsigned DMG (its README says how to open it). Partial signing is still refused.
-      # Once the signing secrets are wired into the build, delete CONDUCTOR_ALLOW_UNSIGNED_RELEASE
-      # so an unsigned public release is refused again.
+      # unsigned DMG (its README says how to open it). Once the signing secrets are wired into
+      # the build, set CONDUCTOR_ALLOW_UNSIGNED_RELEASE to "0" so an unsigned public release is
+      # refused again.
+      #
+      # The policy lives here, not in the checked-out tag's signing.sh, so a release backfilled
+      # from main is judged by main's rule. It uses only release_signing_mode, which every
+      # tagged signing.sh has, and which refuses partial signing on its own.
       - name: Release signing policy
         if: inputs.version != ''
         env:
           CONDUCTOR_ALLOW_UNSIGNED_RELEASE: "1"
         run: |
           . macos/packaging/signing.sh
-          require_release_signing
+          mode="$(release_signing_mode)"
+          if [ "$mode" = developer-id ]; then
+            echo "signing: Developer ID signing and notarization configured"
+          elif [ "$CONDUCTOR_ALLOW_UNSIGNED_RELEASE" = 1 ]; then
+            echo "::warning::publishing an unsigned release: no Developer ID signing is configured (CONDUCTOR_ALLOW_UNSIGNED_RELEASE=1)"
+          else
+            echo "::error::public releases require Developer ID signing and notarization; leaving the release unpublished"
+            exit 1
+          fi
 
       - name: Build Conductor.app (universal)
         run: macos/build.sh --version "$APP_VERSION"
