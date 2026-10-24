@@ -21,10 +21,22 @@ import Glibc
 final class IntegrationTests: XCTestCase {
     var env: [String: String] { ProcessInfo.processInfo.environment }
 
-    /// Names each step on stderr as it starts. stderr is not buffered, so when a step hangs the
-    /// job log shows which one did: a hung run once showed no test output at all.
+    /// Names each step on stderr as it starts, and appends it to CONDUCTOR_IT_LOG when set.
+    /// stderr alone is not enough: `swift test` holds the test's output until the test process
+    /// exits, so a run killed by the step timeout printed nothing (v0.1.3, v0.1.5). The file is
+    /// written and closed per step, so it survives the kill and CI prints it on failure.
     func announce(_ step: String) {
-        FileHandle.standardError.write(Data("integration step: \(step)\n".utf8))
+        let line = "integration step: \(step)\n"
+        FileHandle.standardError.write(Data(line.utf8))
+        guard let path = env["CONDUCTOR_IT_LOG"], !path.isEmpty else { return }
+        if !FileManager.default.fileExists(atPath: path) {
+            _ = FileManager.default.createFile(atPath: path, contents: nil)
+        }
+        guard let log = FileHandle(forWritingAtPath: path) else { return }
+        defer { try? log.close() }
+        _ = try? log.seekToEnd()
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        try? log.write(contentsOf: Data("\(stamp) \(line)".utf8))
     }
 
     /// An async test can resume on a different thread from the one that launched a
@@ -60,6 +72,7 @@ final class IntegrationTests: XCTestCase {
         let home = root.appendingPathComponent("Ada Home", isDirectory: true)
         try fm.createDirectory(at: home, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: root) }
+        announce("started in \(root.path)")
         let runner = ProcessRunner()
 
         var runAsUID = UInt32(getuid())

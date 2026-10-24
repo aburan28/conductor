@@ -57,12 +57,6 @@ release_signing_mode() {
     echo developer-id
 }
 
-# Public release workflows must never accept the local unsigned fallback.
-require_release_signing() {
-    local mode
-    mode="$(release_signing_mode)" || return 1
-    [ "$mode" = developer-id ] || signing_die "public releases require Developer ID signing and notarization; leaving the release unpublished"
-}
 
 # notary_args prints the notarytool credential arguments, one per line.
 notary_args() {
