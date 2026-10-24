@@ -44,6 +44,11 @@ SNIPPET='require_release_signing && echo signed'
 expect "public release refuses unsigned fallback" 1 "public releases require Developer ID"
 expect "public release refuses partial signing" 1 "missing: DEVELOPER_ID_INSTALLER" DEVELOPER_ID_APPLICATION=a
 expect "public release accepts complete signing" 0 "signed" DEVELOPER_ID_APPLICATION=a DEVELOPER_ID_INSTALLER=i NOTARY_PROFILE=p
+expect "an explicit opt-in allows an unsigned release" 0 "signed" CONDUCTOR_ALLOW_UNSIGNED_RELEASE=1
+expect "the opt-in says the release is unsigned" 0 "publishing an unsigned release" CONDUCTOR_ALLOW_UNSIGNED_RELEASE=1
+expect "the opt-in must be exactly 1" 1 "public releases require Developer ID" CONDUCTOR_ALLOW_UNSIGNED_RELEASE=yes
+expect "the opt-in never excuses partial signing" 1 "missing: DEVELOPER_ID_INSTALLER" \
+    CONDUCTOR_ALLOW_UNSIGNED_RELEASE=1 DEVELOPER_ID_APPLICATION=a
 
 SNIPPET='notary_mode'
 expect "notary: none" 0 "none"

@@ -57,11 +57,18 @@ release_signing_mode() {
     echo developer-id
 }
 
-# Public release workflows must never accept the local unsigned fallback.
+# Public release workflows never fall back to unsigned by accident: an unsigned release needs
+# CONDUCTOR_ALLOW_UNSIGNED_RELEASE=1, set on purpose where the release is configured. Partial
+# signing is refused either way, and a complete configuration is always used.
 require_release_signing() {
     local mode
     mode="$(release_signing_mode)" || return 1
-    [ "$mode" = developer-id ] || signing_die "public releases require Developer ID signing and notarization; leaving the release unpublished"
+    [ "$mode" = developer-id ] && return 0
+    if [ "${CONDUCTOR_ALLOW_UNSIGNED_RELEASE:-}" = 1 ]; then
+        echo "signing: no signing configured; publishing an unsigned release (CONDUCTOR_ALLOW_UNSIGNED_RELEASE=1)" >&2
+        return 0
+    fi
+    signing_die "public releases require Developer ID signing and notarization (or CONDUCTOR_ALLOW_UNSIGNED_RELEASE=1); leaving the release unpublished"
 }
 
 # notary_args prints the notarytool credential arguments, one per line.
