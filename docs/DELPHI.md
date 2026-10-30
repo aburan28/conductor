@@ -286,6 +286,40 @@ text, counts as refused, so `--fallback` applies; `finish_reason: length` marks 
 truncated. HTTP 408, 409, 429 and 5xx and network failures are retryable; any other 4xx is
 final.
 
+## Free mode: nothing that costs money is called
+
+`DELPHI_FREE` makes standalone `delphi` call only models that cost nothing, for every
+command: `run`, `ask`, `enqueue`, `serve`, `goal`, and anything built on them (`task_card.py
+lane --via delphi` included).
+
+| `DELPHI_FREE` | Allowed | Privacy |
+|---|---|---|
+| `local` | endpoints you run yourself: `vllm`, `lmstudio`, and endpoints-file entries with no `key_env` (a notebook GPU you tunnel to counts) | prompts stay with you |
+| `public` | the above, plus third-party free tiers: OpenRouter `:free` models, endpoints marked `"free": true`, models listed in `"free_models"` | those providers may train on prompts: public or synthetic content only |
+
+The Anthropic and OpenAI batch APIs are never free. A request for a paid model is rewritten
+to its **free substitute** from `$DELPHI_FREE_MAP` or `~/.delphi/free.json`:
+
+```json
+{"substitutes": {
+  "anthropic:claude-sonnet-5-5": "vllm:glm-5.3",
+  "anthropic:*": "vllm:qwen3.8-27b",
+  "*": "openrouter:poolside/laguna-xs-2.1:free"
+}}
+```
+
+Keys are `provider:model`, `provider:*` or `*`, tried in that order; values are
+`provider:model[@effort]` or profile names. A substitute on another provider drops the
+request's `effort` and `params` (they are written for one API), and the answer carries the
+original target in `meta.free_substitute_for`. A paid request with no substitute is refused
+before anything is sent, fallback chains are substituted or dropped, and the engine itself
+refuses to submit anything paid (`free_mode_refused`), whatever path built the request. Free
+models are priced at $0, so summaries say so.
+
+What free mode does not do: make a model good at the job. A free substitute is still a
+different model; calibrate it (`delphi calibrate`) before trusting its answers where a paid
+model's were trusted.
+
 ## Tiers
 
 Different work can go to different models. A **profile** is a model-catalog alias

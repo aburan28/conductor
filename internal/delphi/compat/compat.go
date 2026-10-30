@@ -47,10 +47,20 @@ type Endpoint struct {
 	Concurrency  int                   `json:"concurrency,omitempty"`
 	MaxRequests  int                   `json:"max_requests,omitempty"`
 	Prices       map[string][2]float64 `json:"prices,omitempty"`
-	// Local endpoints need no key; Listed ones were named by the endpoints file.
+	// Free marks every model on a third-party endpoint as costing nothing; FreeModels marks
+	// some. FreeSuffix marks models by id suffix (OpenRouter's ":free"). Free mode
+	// ($DELPHI_FREE) sends only to free models; third-party ones may train on prompts.
+	Free       bool     `json:"free,omitempty"`
+	FreeModels []string `json:"free_models,omitempty"`
+	FreeSuffix string   `json:"-"`
+	// Local endpoints need no key and are yours, so they are free and private; Listed ones
+	// were named by the endpoints file.
 	Local  bool `json:"-"`
 	Listed bool `json:"-"`
 }
+
+// freeSuffix is the id suffix a preset gives its no-cost models.
+var freeSuffix = map[string]string{"openrouter": ":free"}
 
 // reserved names belong to the native batch providers.
 var reserved = map[string]bool{"anthropic": true, "openai": true}
@@ -61,7 +71,7 @@ func Endpoints(path string) (map[string]Endpoint, error) {
 	out := map[string]Endpoint{}
 	for _, p := range modelsrc.Presets {
 		if p.Kind == domain.InferenceOpenAICompatible && !reserved[p.Name] {
-			out[p.Name] = Endpoint{Name: p.Name, BaseURL: p.BaseURL, KeyEnv: p.KeyHint, Local: p.Local}
+			out[p.Name] = Endpoint{Name: p.Name, BaseURL: p.BaseURL, KeyEnv: p.KeyHint, Local: p.Local, FreeSuffix: freeSuffix[p.Name]}
 		}
 	}
 	data, err := os.ReadFile(path)
@@ -91,7 +101,7 @@ func Endpoints(path string) (map[string]Endpoint, error) {
 		if err := modelsrc.ValidateBaseURL(e.BaseURL); err != nil {
 			return nil, fmt.Errorf("%s: endpoint %q: %w", path, name, err)
 		}
-		e.Name, e.Listed, e.Local = name, true, preset.Local || e.KeyEnv == ""
+		e.Name, e.Listed, e.Local, e.FreeSuffix = name, true, preset.Local || e.KeyEnv == "", preset.FreeSuffix
 		out[name] = e
 	}
 	return out, nil
@@ -142,8 +152,28 @@ func (p *Provider) Limits() delphi.Limits {
 }
 
 func (p *Provider) Price(model string) (float64, float64, bool) {
+	if free, _ := p.Free(model); free {
+		return 0, 0, true
+	}
 	pr, ok := p.ep.Prices[model]
 	return pr[0], pr[1], ok
+}
+
+// Free implements delphi.FreeKnower: an endpoint you run (local) costs nothing; on a
+// third-party endpoint only models it marks free do.
+func (p *Provider) Free(model string) (free, local bool) {
+	if p.ep.Local {
+		return true, true
+	}
+	if p.ep.Free || (p.ep.FreeSuffix != "" && strings.HasSuffix(model, p.ep.FreeSuffix)) {
+		return true, false
+	}
+	for _, m := range p.ep.FreeModels {
+		if m == model {
+			return true, false
+		}
+	}
+	return false, false
 }
 
 func (p *Provider) Validate(r delphi.Request) []string {
