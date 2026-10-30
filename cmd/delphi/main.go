@@ -69,6 +69,10 @@ operations:
   profiles   the named tiers in the profiles file
   validate   check a JSONL file locally (no key, no cost)
 
+capability registry (docs/DELPHI_OBJECTIVES.md):
+  calibrate  run a calibration suite against one target, grade it, record the result
+  registry   import sourced public benchmark evidence, or print per-family tables
+
 every command takes -home DIR (default $DELPHI_HOME or ~/.delphi).
 run "delphi <command> -h" for its flags; README.md has the input format.
 
@@ -304,6 +308,7 @@ func run(ctx context.Context, args []string, a *app) int {
 		"ask": cmdAsk, "enqueue": cmdEnqueue, "get": cmdGet, "results": cmdResults, "serve": cmdServe, "run": cmdRun,
 		"goal":   cmdGoal,
 		"status": cmdStatus, "cancel": cmdCancel, "reconcile": cmdReconcile, "providers": cmdProviders, "profiles": cmdProfiles, "validate": cmdValidate,
+		"calibrate": cmdCalibrate, "registry": cmdRegistry,
 	}
 	fn, ok := cmds[args[0]]
 	if !ok {
@@ -656,7 +661,14 @@ func cmdRun(ctx context.Context, args []string, a *app) int {
 			return exitUsage
 		}
 	}
-	st, err := delphi.OpenFileStore(*out)
+	return a.drive(ctx, *out, reqs, reg, lf, func(st *delphi.FileStore) int { return a.writeRun(st, reqs, reg) })
+}
+
+// drive queues reqs into the store at out and loops until every one has a result, then calls
+// done with the store still locked. `run` and `calibrate` share it.
+func (a *app) drive(ctx context.Context, out string, reqs []delphi.Request, reg delphi.Registry, lf *loopFlags,
+	done func(*delphi.FileStore) int) int {
+	st, err := delphi.OpenFileStore(out)
 	if err != nil {
 		return a.fail(err)
 	}
@@ -690,7 +702,7 @@ func cmdRun(ctx context.Context, args []string, a *app) int {
 			}
 		}
 		if finished == len(reqs) {
-			return a.writeRun(st, reqs, reg)
+			return done(st)
 		}
 		a.logf("%d/%d answered", finished, len(reqs))
 		select {
