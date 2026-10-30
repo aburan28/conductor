@@ -404,6 +404,8 @@ var Presets = []Preset{
 	{Name: "openai", Kind: domain.InferenceOpenAI, BaseURL: "https://api.openai.com/v1", KeyHint: "OPENAI_API_KEY"},
 	{Name: "openrouter", Kind: domain.InferenceOpenAICompatible, BaseURL: "https://openrouter.ai/api/v1", KeyHint: "OPENROUTER_API_KEY"},
 	{Name: "fireworks", Kind: domain.InferenceOpenAICompatible, BaseURL: "https://api.fireworks.ai/inference/v1", KeyHint: "FIREWORKS_API_KEY"},
+	// OpenCode Console (Zen): paid models from any client; its -free models are OpenCode-only.
+	{Name: "opencode", Kind: domain.InferenceOpenAICompatible, BaseURL: "https://opencode.ai/inference/v1", KeyHint: "OPENCODE_API_KEY"},
 	{Name: "ollama", Kind: domain.InferenceOllama, BaseURL: "http://localhost:11434", Local: true},
 	{Name: "lmstudio", Kind: domain.InferenceOpenAICompatible, BaseURL: "http://localhost:1234/v1", Local: true},
 	{Name: "vllm", Kind: domain.InferenceOpenAICompatible, BaseURL: "http://localhost:8000/v1", Local: true},

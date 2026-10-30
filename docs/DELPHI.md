@@ -237,6 +237,55 @@ The API lives under `/v1/projects/{project}/delphi`:
 
 Observers can read metadata. Contributors can submit, read answers and cancel.
 
+## OpenAI-compatible endpoints: Fireworks, DeepSeek, Together, OpenRouter, vLLM
+
+The standalone `delphi` binary also sends requests to any server that speaks OpenAI's Chat
+Completions (`internal/delphi/compat`). Each endpoint is a provider of its own name, so
+`-provider fireworks -model accounts/fireworks/models/…`, a `fireworks:…` fallback target or a
+profile naming `provider: deepseek` all work the way `anthropic` and `openai` do.
+
+Most of these servers have no batch API, so delphi answers them live: `Submit` makes the calls
+itself (`concurrency` at a time) and writes every answer to
+`~/.delphi/compat/<endpoint>/<flight label>.jsonl` before the flight counts as running. The
+crash rule still holds. A flight whose spool file exists is complete; one without it left
+nothing at the provider, so `delphi reconcile -label L -requeue` runs it again, costing tokens
+and nothing else. Live calls are billed at the endpoint's live price, not a batch discount.
+
+Endpoints are Conductor's presets (`openrouter`, `fireworks`, `opencode`, `vllm`, `lmstudio`; see
+`conductor models endpoints`) plus an endpoints file, `$DELPHI_ENDPOINTS` or
+`~/.delphi/endpoints.json`:
+
+```json
+{
+  "deepseek":  {"base_url": "https://api.deepseek.com/v1", "key_env": "DEEPSEEK_API_KEY",
+                "default_model": "deepseek-chat", "concurrency": 8,
+                "prices": {"deepseek-chat": [0.27, 1.10]}},
+  "together":  {"base_url": "https://api.together.xyz/v1", "key_env": "TOGETHER_API_KEY"},
+  "fireworks": {"concurrency": 16},
+  "vllm":      {"base_url": "http://127.0.0.1:8000/v1", "default_model": "glm-5.3"}
+}
+```
+
+**OpenCode Console** (`opencode`, key `OPENCODE_API_KEY`) serves Meta's Muse Spark
+(`-provider opencode -model muse-spark-1.3`) and its other paid models; `delphi providers` or
+`curl https://opencode.ai/inference/v1/models` lists them. Its `-free` models (GLM-5.3-Flash Free,
+DeepSeek V4.1 Flash Free and the like) answer only inside OpenCode, not from other clients, and
+some of them may use prompts to improve the model; there is no free Muse Spark. OpenCode lists
+Muse Spark 1.3 at $1.25 in / $4.25 out per million tokens (docs, 2026-10-30); set it under
+`prices` in the endpoints file if you want costs, since no price is built in.
+
+A file entry fills unset fields from the preset of the same name. A remote endpoint is live
+when its key variable is set; a local one (`vllm`, `lmstudio`, or any entry with no
+`key_env`) only once the file names it. Prices are live $ per million input and output tokens
+and are never built in. `delphi providers` lists every endpoint and what would make it live.
+
+Request mapping: `system` becomes the first message, `effort` becomes `reasoning_effort`
+(servers that do not reason ignore or reject it), `max_tokens` is sent as `max_tokens`, and
+`params` pass through. A `refusal` in the answer, or `finish_reason: content_filter` with no
+text, counts as refused, so `--fallback` applies; `finish_reason: length` marks the answer
+truncated. HTTP 408, 409, 429 and 5xx and network failures are retryable; any other 4xx is
+final.
+
 ## Tiers
 
 Different work can go to different models. A **profile** is a model-catalog alias
@@ -405,5 +454,8 @@ See [OPERATIONS.md](OPERATIONS.md#delphi).
 - **Automatic resubmission**, including server-side fallback. It would need the server to
   hold request text, which this design rules out. The CLI and the standalone binary do it
   instead.
+- **OpenAI-compatible endpoints on the control plane.** `conductor delphi ask` still reaches
+  only Anthropic and OpenAI; the endpoints above are standalone `delphi` only, because a
+  live answer would hold a server request open for the whole call.
 - **Fallback chains in the catalog.** `models.yaml` profiles have no fallback list yet;
   the chain comes from `--fallback` or `$CONDUCTOR_DELPHI_FALLBACK`.
