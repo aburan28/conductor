@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -35,6 +36,7 @@ import (
 
 	"github.com/aburan28/conductor/internal/delphi"
 	"github.com/aburan28/conductor/internal/delphi/anthropic"
+	"github.com/aburan28/conductor/internal/delphi/compat"
 	"github.com/aburan28/conductor/internal/delphi/openai"
 )
 
@@ -111,9 +113,33 @@ func envInt(name string, def int) int {
 	return def
 }
 
+func defaultEndpoints() string {
+	if p := os.Getenv("DELPHI_ENDPOINTS"); p != "" {
+		return p
+	}
+	return filepath.Join(defaultHome(), "endpoints.json")
+}
+
+var endpointsWarning sync.Once
+
+// endpoints are the OpenAI-compatible servers (internal/delphi/compat). A malformed
+// endpoints file is reported once and leaves the presets.
+func endpoints() map[string]compat.Endpoint {
+	eps, err := compat.Endpoints(defaultEndpoints())
+	if err != nil {
+		endpointsWarning.Do(func() { fmt.Fprintf(os.Stderr, "delphi: endpoints file ignored: %v\n", err) })
+		eps, _ = compat.Endpoints("")
+	}
+	return eps
+}
+
 // offline can validate requests for every provider without credentials.
 func offline() delphi.Registry {
-	return delphi.Registry{"anthropic": anthropic.Offline(), "openai": openai.Offline()}
+	reg := delphi.Registry{"anthropic": anthropic.Offline(), "openai": openai.Offline()}
+	for name, e := range endpoints() {
+		reg[name] = compat.Offline(e)
+	}
+	return reg
 }
 
 // live holds the providers that have credentials; missing lists the others.
@@ -128,6 +154,13 @@ func live() (delphi.Registry, map[string]error) {
 		reg["openai"] = p
 	} else {
 		missing["openai"] = err
+	}
+	for name, e := range endpoints() {
+		if p, err := compat.New(e, filepath.Join(defaultHome(), "compat")); err == nil {
+			reg[name] = p
+		} else {
+			missing[name] = err
+		}
 	}
 	return reg, missing
 }
@@ -904,7 +937,9 @@ func cmdProviders(ctx context.Context, args []string, a *app) int {
 			state = missing[name].Error()
 		}
 		model := off[name].DefaultModel()
-		if model == "" {
+		if _, isCompat := off[name].(*compat.Provider); model == "" && isCompat {
+			model = "(none: default_model in the endpoints file, or -model)"
+		} else if model == "" {
 			model = "(none: set DELPHI_" + strings.ToUpper(name) + "_MODEL or -model)"
 		}
 		fmt.Fprintf(a.stdout, "%-10s default model %-40s %s\n", name, model, state)
