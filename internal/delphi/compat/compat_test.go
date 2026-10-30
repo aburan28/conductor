@@ -152,6 +152,9 @@ func TestEndpointsMergeFileOverPresets(t *testing.T) {
 	if err != nil || eps["fireworks"].KeyEnv != "FIREWORKS_API_KEY" || !eps["vllm"].Local || eps["vllm"].Listed {
 		t.Fatalf("presets = %+v, %v", eps, err)
 	}
+	if o := eps["opencode"]; o.KeyEnv != "OPENCODE_API_KEY" || o.BaseURL != "https://opencode.ai/inference/v1" || o.Local {
+		t.Errorf("opencode preset = %+v", o)
+	}
 	if _, ok := eps["openai"]; ok {
 		t.Fatal("the native openai provider must not appear as a compatible endpoint")
 	}
