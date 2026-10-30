@@ -278,6 +278,60 @@ text, counts as refused, so `--fallback` applies; `finish_reason: length` marks 
 truncated. HTTP 408, 409, 429 and 5xx and network failures are retryable; any other 4xx is
 final.
 
+## Capability registry: calibration suites and model equivalence
+
+`delphi calibrate` and `delphi registry` measure models on the work you actually give them
+(`internal/capability`; design: `docs/DELPHI_OBJECTIVES.md` §3). The registry is a directory,
+`$DELPHI_REGISTRY` or `~/.delphi/registry`:
+
+```
+families.json        margins, levels and benchmark→family weights (reviewed configuration)
+evidence/*.json      public benchmark results, each with source_url and retrieved date
+calibration/*.json   one graded suite run per file, write-once
+runs/                the delphi run directories the calibrations came from
+```
+
+A **suite** is a frozen set of items for one task family, graded deterministically:
+
+```json
+{"schema": "conductor.capability.suite.v1", "id": "cards-v1", "family": "card-compile",
+ "system": "…", "max_tokens": 8000,
+ "grader": {"kind": "command", "argv": ["python3", "tools/grade_card.py"], "timeout_seconds": 120},
+ "items": [{"id": "toy-bsgs", "prompt": "…"}]}
+```
+
+`exact` passes a trimmed answer equal to the item's `expect`; `regex` passes an answer matching
+`expect`; `command` runs `argv` in the suite file's directory with
+`{suite, item, prompt, expect, answer}` as JSON on stdin and reads `{"passed": bool, "reason":
+"…"}` from stdout, so a suite stored in a research repository grades with that repository's
+own tools. A grader that cannot run or prints no verdict stops the calibration without a record.
+
+```sh
+delphi calibrate -suite cards-v1.json -provider anthropic -model claude-haiku-5-5
+delphi calibrate -suite cards-v1.json -provider vllm -model glm-5.3
+delphi registry import -file evidence.json     # every record needs source_url and retrieved
+delphi registry table -family card-compile
+```
+
+Each calibration records the suite's sha256 (a changed suite is a new measurement), every
+grade with the answer's sha256, tokens, and cost at the requested model's price. Refusals count
+as failures; answers that never arrived (errored, expired) are counted apart and left out of
+the pass rate, and make the command exit 1. Calibration never falls back to another model.
+
+The table pools, per target, the latest run of every suite in the family and shows: passes,
+the Wilson 95% interval, cost per accepted answer, the public-evidence prior, the verdict
+against the reference (the row with the highest interval low bound) and the label.
+
+- **equivalent**: the 90% Agresti–Caffo interval of the difference lies inside ±δ (TOST at
+  α = 0.05; δ is 0.05 unless `families.json` says otherwise).
+- **better / worse**: the interval excludes zero.
+- **inconclusive**: neither. Small suites say this often, which is the point: three items
+  cannot tell 3/3 from 2/3.
+- **prior-only**: public evidence and no calibration of this model. Public scores are only a
+  prior (a weighted mean of percent and fraction scores over the family's benchmarks); elo and
+  index scores are listed, never averaged, and nothing is shipped: the registry holds only
+  records someone imported with their source.
+
 ## Tiers
 
 Different work can go to different models. A **profile** is a model-catalog alias
