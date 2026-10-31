@@ -34,6 +34,7 @@ import (
 	anthropicsdk "github.com/anthropics/anthropic-sdk-go"
 	openaisdk "github.com/openai/openai-go/v3"
 
+	"github.com/aburan28/conductor/internal/capability"
 	"github.com/aburan28/conductor/internal/delphi"
 	"github.com/aburan28/conductor/internal/delphi/anthropic"
 	"github.com/aburan28/conductor/internal/delphi/compat"
@@ -72,6 +73,7 @@ operations:
 capability registry (docs/DELPHI_OBJECTIVES.md):
   calibrate  run a calibration suite against one target, grade it, record the result
   registry   import sourced public benchmark evidence, or print per-family tables
+  route      which model the registry sends a task family to, and why (-route F on run, ask, enqueue)
 
 every command takes -home DIR (default $DELPHI_HOME or ~/.delphi).
 DELPHI_FREE=local|public calls only models that cost nothing (docs/DELPHI.md, "Free mode").
@@ -242,6 +244,7 @@ type requestFlags struct {
 	meta     multiFlag
 	profile  string
 	fallback string
+	route    string
 }
 
 func defaultProfiles() string {
@@ -291,7 +294,49 @@ func (rf *requestFlags) defaults() (delphi.Defaults, error) {
 	if set["fallback"] || len(d.Fallback) == 0 {
 		d.Fallback = delphi.SplitList(rf.fallback)
 	}
+	if rf.route != "" {
+		for _, f := range []string{"provider", "model", "effort", "profile"} {
+			if set[f] {
+				return d, fmt.Errorf("-route chooses provider, model and effort from the registry; drop -%s", f)
+			}
+		}
+		route, err := routeFamily(rf.route, defaultRegistry(), d.Free)
+		if err != nil {
+			return d, err
+		}
+		t, _ := capability.ParseTarget(route.Choice)
+		d.Provider, d.Model, d.Effort, d.Profile = t.Provider, t.Model, t.Effort, ""
+		if !set["fallback"] {
+			d.Fallback = route.Escalation // a refusal escalates to the next better model
+		}
+		d.Meta = map[string]string{"route_family": route.Family, "route_basis": route.Basis}
+	}
 	return d, nil
+}
+
+// routeFamily asks the registry for family's model, allowing only targets whose provider
+// delphi knows and, in free mode, that cost nothing.
+func routeFamily(family, registry string, free *delphi.FreePolicy) (capability.Route, error) {
+	reg, err := capability.Open(registry)
+	if err != nil {
+		return capability.Route{}, err
+	}
+	known := offline()
+	return reg.Route(family, func(target string) (bool, string) {
+		t, err := capability.ParseTarget(target)
+		if err != nil {
+			return false, err.Error()
+		}
+		if _, ok := known[t.Provider]; !ok {
+			return false, "delphi has no provider " + t.Provider
+		}
+		if free != nil {
+			if ok, why := free.Allows(known, delphi.Target{Provider: t.Provider, Model: t.Model, Effort: t.Effort}); !ok {
+				return false, "free mode: " + why
+			}
+		}
+		return true, ""
+	})
 }
 
 type multiFlag []string
@@ -313,6 +358,8 @@ func addRequestFlags(fs *flag.FlagSet) *requestFlags {
 	fs.StringVar(&rf.profile, "profile", os.Getenv("DELPHI_PROFILE"), "named tier from the profiles file ($DELPHI_PROFILES or ~/.delphi/profiles.json)")
 	fs.StringVar(&rf.fallback, "fallback", os.Getenv("DELPHI_FALLBACK"),
 		"where a refused request goes next: comma-separated provider:model[@effort] or profile names")
+	fs.StringVar(&rf.route, "route", "",
+		"task family: let the capability registry choose provider, model and effort (delphi route)")
 	return rf
 }
 
@@ -356,7 +403,7 @@ func run(ctx context.Context, args []string, a *app) int {
 		"ask": cmdAsk, "enqueue": cmdEnqueue, "get": cmdGet, "results": cmdResults, "serve": cmdServe, "run": cmdRun,
 		"goal":   cmdGoal,
 		"status": cmdStatus, "cancel": cmdCancel, "reconcile": cmdReconcile, "providers": cmdProviders, "profiles": cmdProfiles, "validate": cmdValidate,
-		"calibrate": cmdCalibrate, "registry": cmdRegistry,
+		"calibrate": cmdCalibrate, "registry": cmdRegistry, "route": cmdRoute,
 	}
 	fn, ok := cmds[args[0]]
 	if !ok {

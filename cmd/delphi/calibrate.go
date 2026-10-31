@@ -240,3 +240,45 @@ func orNone(s string) string {
 	}
 	return s
 }
+
+// cmdRoute prints the registry's delegation decision for a task family.
+func cmdRoute(_ context.Context, args []string, a *app) int {
+	fs, _ := newFS("route", a)
+	family := fs.String("family", "", "task family (as in the suites, e.g. card-compile)")
+	registry := fs.String("registry", defaultRegistry(), "registry directory ($DELPHI_REGISTRY)")
+	asJSON := fs.Bool("json", false, "machine-readable output")
+	if !parse(fs, args) {
+		return exitUsage
+	}
+	if *family == "" {
+		fmt.Fprintln(a.stderr, "usage: delphi route -family F [-json]")
+		return exitUsage
+	}
+	route, err := routeFamily(*family, *registry, a.free)
+	if *asJSON {
+		out := map[string]any{"route": route}
+		if err != nil {
+			out["error"] = err.Error()
+		}
+		b, _ := json.MarshalIndent(out, "", "  ")
+		fmt.Fprintln(a.stdout, string(b))
+		if err != nil {
+			return exitFailures
+		}
+		return exitOK
+	}
+	if err != nil {
+		return a.fail(err)
+	}
+	fmt.Fprintf(a.stdout, "%s -> %s\n  %s\n", route.Family, route.Choice, route.Basis)
+	if len(route.Escalation) > 0 {
+		fmt.Fprintf(a.stdout, "  escalates to: %s\n", strings.Join(route.Escalation, ", "))
+	}
+	w := tabwriter.NewWriter(a.stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(w, "  considered\teligible\twhy")
+	for _, c := range route.Considered {
+		fmt.Fprintf(w, "  %s\t%v\t%s\n", c.Target, c.Eligible, c.Why)
+	}
+	w.Flush()
+	return exitOK
+}

@@ -340,6 +340,29 @@ against the reference (the row with the highest interval low bound) and the labe
   index scores are listed, never averaged, and nothing is shipped: the registry holds only
   records someone imported with their source.
 
+## Routing: send each task family to the cheapest model measured good enough
+
+`delphi route -family F` reads the registry and decides which model gets that family's work;
+`-route F` on `run`, `ask` or `enqueue` applies the decision instead of `-provider`/`-model`
+(`internal/capability/route.go`; design: `docs/DELPHI_OBJECTIVES.md` §4).
+
+- **Eligible**: calibrated on the family (prior-only models never are), a provider delphi
+  knows, free under `DELPHI_FREE` when it is set, and good enough: its Wilson 95% low bound
+  reaches the family's `level` in `families.json`, or, with no level, it is the reference or
+  measured **equivalent** to it within δ.
+- **Chosen**: the cheapest eligible model per accepted answer. A model with no known cost is
+  never taken to be cheaper; ties go to the higher low bound.
+- **Escalation**: the next better eligible model and then the best (at most two); `-route`
+  makes them the request's fallback chain, so a refusal moves up a tier. An explicit
+  `-fallback` overrides it.
+- **Recorded**: every routed request carries `meta.route_family` and `meta.route_basis`
+  (e.g. "anthropic:claude-haiku-5-5 passed 188/200 on card-compile (95% 0.898..0.965),
+  $0.0053 per accepted answer; equivalent to the reference …"), so each answer says why it
+  went where it did.
+
+When nothing qualifies, routing stops with every model considered and why, rather than
+guessing; calibrate a model or review the family's level.
+
 ## Free mode: nothing that costs money is called
 
 `DELPHI_FREE` makes standalone `delphi` call only models that cost nothing, for every
