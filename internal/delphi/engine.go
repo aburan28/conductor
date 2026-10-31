@@ -26,6 +26,8 @@ type Engine struct {
 	// MaxAttempts bounds resubmission of retryable failures (expired, missing,
 	// transient errors). 1 means never resubmit.
 	MaxAttempts int
+	// Free, when set, refuses to submit any request that is not free under the policy.
+	Free *FreePolicy
 	// StatusOf extracts the HTTP status from a provider error, 0 if none.
 	StatusOf func(error) int
 	OnResult func(Result)
@@ -242,6 +244,42 @@ func (e *Engine) definitelyNotCreated(err error) (status int, sure bool) {
 
 func (e *Engine) submit(ctx context.Context, prov Provider, reqs []Request, rep *TickReport) error {
 	now := e.now()
+	if e.Free != nil {
+		// The last line of free mode: whatever path built a request, nothing paid is sent.
+		var allowed, paid []Request
+		var refused []Result
+		for _, r := range reqs {
+			if ok, why := e.Free.Allows(e.Providers, Target{Provider: prov.Name(), Model: r.Model}); ok {
+				allowed = append(allowed, r)
+			} else {
+				paid = append(paid, r)
+				refused = append(refused, Result{ID: r.ID, Provider: prov.Name(), Model: r.Model, Status: Errored,
+					Attempt: r.Attempt + 1, Meta: r.Meta, Hash: OriginHash(r), FallbackFrom: r.FallbackFrom,
+					FinishedAt: now.UTC().Format(time.RFC3339),
+					Error:      &Error{Type: "free_mode_refused", Message: "free mode: " + why}})
+			}
+		}
+		if len(refused) > 0 {
+			f := Flight{Label: newLabel(now) + "-free-refused", Provider: prov.Name(), State: FlightSubmitting,
+				SubmittedAt: now, Requests: paid}
+			if err := e.Store.BeginFlight(f); err != nil {
+				return err
+			}
+			if err := e.Store.FinishFlight(f, refused, nil, now); err != nil {
+				return err
+			}
+			e.logf("free mode refused %d request(s) to %s", len(refused), prov.Name())
+			for _, r := range refused {
+				if e.OnResult != nil {
+					e.OnResult(r)
+				}
+			}
+			rep.Finished += len(refused)
+		}
+		if reqs = allowed; len(reqs) == 0 {
+			return nil
+		}
+	}
 	f := Flight{Label: newLabel(now), Provider: prov.Name(), State: FlightSubmitting, SubmittedAt: now, Requests: reqs}
 	// Record the intent first: if we crash during the call, the flight shows
 	// a submission whose outcome must be reconciled, not repeated.
