@@ -200,14 +200,15 @@ func TestFreeModelsAndTheirPrice(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "endpoints.json")
 	if err := os.WriteFile(path, []byte(`{"vllm":{"base_url":"http://127.0.0.1:8000/v1"},
 		"donor":{"base_url":"https://donor.example/v1","key_env":"DONOR_KEY","free":true},
-		"mixed":{"base_url":"https://mixed.example/v1","key_env":"MIXED_KEY","free_models":["small"],"prices":{"big":[1,2]}}}`), 0o600); err != nil {
+		"mixed":{"base_url":"https://mixed.example/v1","key_env":"MIXED_KEY","free_models":["small"],"prices":{"big":[1,2]}},
+		"colab":{"base_url":"https://gpu.example/v1","key_env":"COLAB_KEY","self_hosted":true}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	eps, err := compat.Endpoints(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"OPENROUTER_API_KEY", "DONOR_KEY", "MIXED_KEY"} {
+	for _, k := range []string{"OPENROUTER_API_KEY", "DONOR_KEY", "MIXED_KEY", "COLAB_KEY"} {
 		t.Setenv(k, "k")
 	}
 	dir := t.TempDir()
@@ -228,6 +229,7 @@ func TestFreeModelsAndTheirPrice(t *testing.T) {
 		{"donor", "any", true, false}, // "free": true
 		{"mixed", "small", true, false},
 		{"mixed", "big", false, false},
+		{"colab", "any", true, true}, // self_hosted: yours behind a key
 	} {
 		if free, local := get(c.endpoint).Free(c.model); free != c.free || local != c.local {
 			t.Errorf("%s:%s free=%v local=%v, want %v %v", c.endpoint, c.model, free, local, c.free, c.local)

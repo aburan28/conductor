@@ -53,8 +53,11 @@ type Endpoint struct {
 	Free       bool     `json:"free,omitempty"`
 	FreeModels []string `json:"free_models,omitempty"`
 	FreeSuffix string   `json:"-"`
-	// Local endpoints need no key and are yours, so they are free and private; Listed ones
-	// were named by the endpoints file.
+	// SelfHosted marks an endpoint you run behind a key (a notebook GPU reached through a
+	// tunnel): free and private like a local one, though it needs a key.
+	SelfHosted bool `json:"self_hosted,omitempty"`
+	// Local endpoints are yours (keyless, or self_hosted), so they are free and private;
+	// Listed ones were named by the endpoints file.
 	Local  bool `json:"-"`
 	Listed bool `json:"-"`
 }
@@ -101,7 +104,7 @@ func Endpoints(path string) (map[string]Endpoint, error) {
 		if err := modelsrc.ValidateBaseURL(e.BaseURL); err != nil {
 			return nil, fmt.Errorf("%s: endpoint %q: %w", path, name, err)
 		}
-		e.Name, e.Listed, e.Local, e.FreeSuffix = name, true, preset.Local || e.KeyEnv == "", preset.FreeSuffix
+		e.Name, e.Listed, e.Local, e.FreeSuffix = name, true, preset.Local || e.KeyEnv == "" || e.SelfHosted, preset.FreeSuffix
 		out[name] = e
 	}
 	return out, nil

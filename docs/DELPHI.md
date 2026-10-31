@@ -316,6 +316,10 @@ before anything is sent, fallback chains are substituted or dropped, and the eng
 refuses to submit anything paid (`free_mode_refused`), whatever path built the request. Free
 models are priced at $0, so summaries say so.
 
+Setting up free endpoints (a Colab or Kaggle GPU running vLLM behind a tunnel, a local
+server, OpenRouter's free tier) is in `docs/DELPHI_FREE.md`. An endpoint you run behind a key
+is marked `"self_hosted": true` so free mode counts it as yours.
+
 What free mode does not do: make a model good at the job. A free substitute is still a
 different model; calibrate it (`delphi calibrate`) before trusting its answers where a paid
 model's were trusted.
