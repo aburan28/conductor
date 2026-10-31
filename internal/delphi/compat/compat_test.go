@@ -152,6 +152,9 @@ func TestEndpointsMergeFileOverPresets(t *testing.T) {
 	if err != nil || eps["fireworks"].KeyEnv != "FIREWORKS_API_KEY" || !eps["vllm"].Local || eps["vllm"].Listed {
 		t.Fatalf("presets = %+v, %v", eps, err)
 	}
+	if o := eps["opencode"]; o.KeyEnv != "OPENCODE_API_KEY" || o.BaseURL != "https://opencode.ai/inference/v1" || o.Local {
+		t.Errorf("opencode preset = %+v", o)
+	}
 	if _, ok := eps["openai"]; ok {
 		t.Fatal("the native openai provider must not appear as a compatible endpoint")
 	}
@@ -190,5 +193,55 @@ func TestNewSaysWhatWouldMakeAnEndpointLive(t *testing.T) {
 	}
 	if _, err := compat.New(compat.Endpoint{Name: "vllm", BaseURL: "http://127.0.0.1:8000/v1", Local: true, Listed: true}, t.TempDir()); err != nil {
 		t.Errorf("listed local endpoint: %v", err)
+	}
+}
+
+func TestFreeModelsAndTheirPrice(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "endpoints.json")
+	if err := os.WriteFile(path, []byte(`{"vllm":{"base_url":"http://127.0.0.1:8000/v1"},
+		"donor":{"base_url":"https://donor.example/v1","key_env":"DONOR_KEY","free":true},
+		"mixed":{"base_url":"https://mixed.example/v1","key_env":"MIXED_KEY","free_models":["small"],"prices":{"big":[1,2]}},
+		"colab":{"base_url":"https://gpu.example/v1","key_env":"COLAB_KEY","self_hosted":true}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eps, err := compat.Endpoints(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"OPENROUTER_API_KEY", "DONOR_KEY", "MIXED_KEY", "COLAB_KEY"} {
+		t.Setenv(k, "k")
+	}
+	dir := t.TempDir()
+	get := func(name string) *compat.Provider {
+		p, err := compat.New(eps[name], dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	for _, c := range []struct {
+		endpoint, model string
+		free, local     bool
+	}{
+		{"vllm", "anything", true, true},                           // an endpoint you run
+		{"openrouter", "poolside/laguna-xs-2.1:free", true, false}, // OpenRouter's ":free" ids
+		{"openrouter", "poolside/laguna-xs-2.1", false, false},
+		{"donor", "any", true, false}, // "free": true
+		{"mixed", "small", true, false},
+		{"mixed", "big", false, false},
+		{"colab", "any", true, true}, // self_hosted: yours behind a key
+	} {
+		if free, local := get(c.endpoint).Free(c.model); free != c.free || local != c.local {
+			t.Errorf("%s:%s free=%v local=%v, want %v %v", c.endpoint, c.model, free, local, c.free, c.local)
+		}
+	}
+	if in, out, ok := get("mixed").Price("small"); !ok || in != 0 || out != 0 {
+		t.Errorf("a free model is priced %v/%v (%v)", in, out, ok)
+	}
+	if in, _, ok := get("mixed").Price("big"); !ok || in != 1 {
+		t.Errorf("a paid model lost its price: %v %v", in, ok)
+	}
+	if _, _, ok := get("openrouter").Price("poolside/laguna-xs-2.1"); ok {
+		t.Error("a paid model with no configured price must stay unpriced, not free")
 	}
 }

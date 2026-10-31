@@ -201,6 +201,9 @@ type Defaults struct {
 	Profiles Profiles
 	// Fallback is the chain for rows (and profiles) that set none.
 	Fallback []string
+	// Free, when set, rewrites every request (and its fallback chain) to a target that
+	// costs nothing, or rejects it (free.go).
+	Free *FreePolicy
 }
 
 // RequestError lists every problem found in an input.
@@ -413,6 +416,12 @@ func Normalize(row map[string]any, d Defaults, reg Registry, where string) (Requ
 			add("%v", err)
 		}
 		r.Fallback = ts
+	}
+	if d.Free != nil && len(p) == 0 {
+		for _, msg := range d.Free.Apply(&r, reg) {
+			add("%s", msg)
+		}
+		prov = reg[r.Provider]
 	}
 	if len(p) == 0 {
 		for _, msg := range prov.Validate(r) {

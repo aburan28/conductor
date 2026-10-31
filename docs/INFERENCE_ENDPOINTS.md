@@ -33,8 +33,8 @@ The same is **Fleet → Inference endpoints → Add endpoint** in the dashboard.
 | `openai_compatible` | vLLM, LM Studio, llama.cpp, LiteLLM, OpenRouter, Fireworks, a gateway | `GET /v1/models`, bearer key if any |
 | `ollama` | Ollama's native API | `GET /api/tags` |
 
-Presets exist for `anthropic`, `openai`, `openrouter`, `fireworks`, `ollama`, `lmstudio` and
-`vllm`. A preset supplies an address and the name its provider's key usually lives under. It
+Presets exist for `anthropic`, `openai`, `openrouter`, `fireworks`, `opencode` (OpenCode Console),
+`ollama`, `lmstudio` and `vllm`. A preset supplies an address and the name its provider's key usually lives under. It
 never supplies a model.
 
 An endpoint holds a **name** for its key (`api_key_secret`), never the key. The key is opened

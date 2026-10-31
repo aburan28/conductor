@@ -74,6 +74,7 @@ capability registry (docs/DELPHI_OBJECTIVES.md):
   registry   import sourced public benchmark evidence, or print per-family tables
 
 every command takes -home DIR (default $DELPHI_HOME or ~/.delphi).
+DELPHI_FREE=local|public calls only models that cost nothing (docs/DELPHI.md, "Free mode").
 run "delphi <command> -h" for its flags; README.md has the input format.
 
 environment: ANTHROPIC_API_KEY or Anthropic WIF, OPENAI_API_KEY; DELPHI_PROVIDER
@@ -94,6 +95,8 @@ models that declined in fallback_from.
 type app struct {
 	stdin          io.Reader
 	stdout, stderr io.Writer
+	// free is free mode ($DELPHI_FREE), nil when off; every engine refuses paid requests.
+	free *delphi.FreePolicy
 }
 
 func (a *app) logf(format string, args ...any) {
@@ -135,6 +138,48 @@ func endpoints() map[string]compat.Endpoint {
 		eps, _ = compat.Endpoints("")
 	}
 	return eps
+}
+
+func defaultFreeMap() string {
+	if p := os.Getenv("DELPHI_FREE_MAP"); p != "" {
+		return p
+	}
+	return filepath.Join(defaultHome(), "free.json")
+}
+
+// freePolicy is free mode ($DELPHI_FREE=local|public), nil when off. Its substitutes come
+// from $DELPHI_FREE_MAP or ~/.delphi/free.json:
+//
+//	{"substitutes": {"anthropic:claude-sonnet-5-5": "vllm:glm-5.3", "anthropic:*": "vllm:qwen3.8-27b"}}
+//
+// Keys are "provider:model", "provider:*" or "*"; values are "provider:model[@effort]" or
+// profile names.
+func freePolicy(profiles delphi.Profiles) (*delphi.FreePolicy, error) {
+	mode, err := delphi.ParseFreeMode(os.Getenv("DELPHI_FREE"))
+	if err != nil || mode == "" {
+		return nil, err
+	}
+	fp := &delphi.FreePolicy{Mode: mode, Substitutes: map[string]delphi.Target{}}
+	data, err := os.ReadFile(defaultFreeMap())
+	if errors.Is(err, os.ErrNotExist) {
+		return fp, nil
+	} else if err != nil {
+		return nil, err
+	}
+	var file struct {
+		Substitutes map[string]string `json:"substitutes"`
+	}
+	if err := json.Unmarshal(data, &file); err != nil {
+		return nil, fmt.Errorf("%s: %w", defaultFreeMap(), err)
+	}
+	for key, value := range file.Substitutes {
+		ts, err := delphi.ParseTargets([]string{value}, profiles, offline())
+		if err != nil {
+			return nil, fmt.Errorf("%s: substitute for %q: %w", defaultFreeMap(), key, err)
+		}
+		fp.Substitutes[key] = ts[0]
+	}
+	return fp, nil
 }
 
 // offline can validate requests for every provider without credentials.
@@ -215,6 +260,9 @@ func (rf *requestFlags) defaults() (delphi.Defaults, error) {
 		return d, err
 	}
 	d.Profiles = profiles
+	if d.Free, err = freePolicy(profiles); err != nil {
+		return d, err
+	}
 	set := map[string]bool{}
 	rf.fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
 	if rf.profile != "" {
@@ -314,6 +362,19 @@ func run(ctx context.Context, args []string, a *app) int {
 	if !ok {
 		fmt.Fprintf(a.stderr, "unknown command %q\n\n%s", args[0], usage)
 		return exitUsage
+	}
+	if os.Getenv("DELPHI_FREE") != "" {
+		profiles, err := delphi.LoadProfiles(defaultProfiles())
+		if err == nil {
+			a.free, err = freePolicy(profiles)
+		}
+		if err != nil {
+			fmt.Fprintf(a.stderr, "error: %v\n", err)
+			return exitUsage
+		}
+	}
+	if a.free != nil {
+		fmt.Fprintf(a.stderr, "free mode (%s): only models that cost nothing are called\n", a.free.Mode)
 	}
 	return fn(ctx, args[1:], a)
 }
@@ -544,7 +605,7 @@ func addLoopFlags(fs *flag.FlagSet, every, flushEvery time.Duration) *loopFlags 
 
 func (a *app) engine(st *delphi.FileStore, reg delphi.Registry, lf *loopFlags) *delphi.Engine {
 	e := &delphi.Engine{Store: st, Providers: reg, FlushEvery: lf.flushEvery, FlushAt: lf.flushAt,
-		MaxAttempts: lf.attempts, StatusOf: statusOf, Log: a.logf}
+		MaxAttempts: lf.attempts, StatusOf: statusOf, Log: a.logf, Free: a.free}
 	if lf.onResult != "" {
 		e.OnResult = func(r delphi.Result) { a.hook(lf.onResult, st, r) }
 	}
@@ -1134,6 +1195,13 @@ func goalRequest(s goalState) (delphi.Request, error) {
 	}
 	id := fmt.Sprintf("goal-r%d-%s", s.Round, s.Stage)
 	d := delphi.Defaults{Provider: provider, Model: model, MaxTokens: s.MaxTokens, Effort: s.Effort}
+	profiles, err := delphi.LoadProfiles(defaultProfiles())
+	if err != nil {
+		return delphi.Request{}, err
+	}
+	if d.Free, err = freePolicy(profiles); err != nil {
+		return delphi.Request{}, err
+	}
 	r, problems := delphi.Normalize(map[string]any{"id": id, "prompt": goalPrompt(s)}, d, offline(), id)
 	if len(problems) > 0 {
 		return r, &delphi.RequestError{Problems: problems}
@@ -1315,7 +1383,7 @@ func runGoal(ctx context.Context, dir string, every time.Duration, a *app) int {
 	}
 	defer unlock()
 	reg, missing := live()
-	e := &delphi.Engine{Store: st, Providers: reg, MaxAttempts: 3, StatusOf: statusOf, Log: a.logf}
+	e := &delphi.Engine{Store: st, Providers: reg, MaxAttempts: 3, StatusOf: statusOf, Log: a.logf, Free: a.free}
 	for {
 		s, err := loadGoal(dir)
 		if err != nil {

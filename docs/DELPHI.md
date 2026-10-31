@@ -251,7 +251,7 @@ crash rule still holds. A flight whose spool file exists is complete; one withou
 nothing at the provider, so `delphi reconcile -label L -requeue` runs it again, costing tokens
 and nothing else. Live calls are billed at the endpoint's live price, not a batch discount.
 
-Endpoints are Conductor's presets (`openrouter`, `fireworks`, `vllm`, `lmstudio`; see
+Endpoints are Conductor's presets (`openrouter`, `fireworks`, `opencode`, `vllm`, `lmstudio`; see
 `conductor models endpoints`) plus an endpoints file, `$DELPHI_ENDPOINTS` or
 `~/.delphi/endpoints.json`:
 
@@ -265,6 +265,14 @@ Endpoints are Conductor's presets (`openrouter`, `fireworks`, `vllm`, `lmstudio`
   "vllm":      {"base_url": "http://127.0.0.1:8000/v1", "default_model": "glm-5.3"}
 }
 ```
+
+**OpenCode Console** (`opencode`, key `OPENCODE_API_KEY`) serves Meta's Muse Spark
+(`-provider opencode -model muse-spark-1.3`) and its other paid models; `delphi providers` or
+`curl https://opencode.ai/inference/v1/models` lists them. Its `-free` models (GLM-5.3-Flash Free,
+DeepSeek V4.1 Flash Free and the like) answer only inside OpenCode, not from other clients, and
+some of them may use prompts to improve the model; there is no free Muse Spark. OpenCode lists
+Muse Spark 1.3 at $1.25 in / $4.25 out per million tokens (docs, 2026-10-30); set it under
+`prices` in the endpoints file if you want costs, since no price is built in.
 
 A file entry fills unset fields from the preset of the same name. A remote endpoint is live
 when its key variable is set; a local one (`vllm`, `lmstudio`, or any entry with no
@@ -331,6 +339,45 @@ against the reference (the row with the highest interval low bound) and the labe
   prior (a weighted mean of percent and fraction scores over the family's benchmarks); elo and
   index scores are listed, never averaged, and nothing is shipped: the registry holds only
   records someone imported with their source.
+
+## Free mode: nothing that costs money is called
+
+`DELPHI_FREE` makes standalone `delphi` call only models that cost nothing, for every
+command: `run`, `ask`, `enqueue`, `serve`, `goal`, and anything built on them (`task_card.py
+lane --via delphi` included).
+
+| `DELPHI_FREE` | Allowed | Privacy |
+|---|---|---|
+| `local` | endpoints you run yourself: `vllm`, `lmstudio`, and endpoints-file entries with no `key_env` (a notebook GPU you tunnel to counts) | prompts stay with you |
+| `public` | the above, plus third-party free tiers: OpenRouter `:free` models, endpoints marked `"free": true`, models listed in `"free_models"` | those providers may train on prompts: public or synthetic content only |
+
+The Anthropic and OpenAI batch APIs are never free. A request for a paid model is rewritten
+to its **free substitute** from `$DELPHI_FREE_MAP` or `~/.delphi/free.json`:
+
+```json
+{"substitutes": {
+  "anthropic:claude-sonnet-5-5": "vllm:glm-5.3",
+  "anthropic:*": "vllm:qwen3.8-27b",
+  "*": "openrouter:poolside/laguna-xs-2.1:free"
+}}
+```
+
+Keys are `provider:model`, `provider:*` or `*`, tried in that order; values are
+`provider:model[@effort]` or profile names. A substitute on another provider drops the
+request's `effort` and `params` (they are written for one API), and the answer carries the
+original target in `meta.free_substitute_for`. A paid request with no substitute is refused
+before anything is sent, fallback chains are substituted or dropped, and the engine itself
+refuses to submit anything paid (`free_mode_refused`), whatever path built the request. Free
+models are priced at $0, so summaries say so.
+
+Setting up free endpoints (a Colab or Kaggle GPU running vLLM behind a tunnel, a local
+server, OpenRouter's free tier) is in `docs/DELPHI_FREE.md`. An endpoint you run behind a key
+is marked `"self_hosted": true` so free mode counts it as yours.
+
+What free mode does not do: make a model good at the job. A free substitute is still a
+different model; calibrate it (`delphi calibrate`) before trusting its answers where a paid
+model's were trusted.
+
 
 ## Tiers
 
