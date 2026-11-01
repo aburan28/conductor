@@ -61,6 +61,8 @@ the loop:
   serve      run the loop: flush the queue as batches, poll, collect, retry
   run        one-shot: queue -in F into -out DIR and loop until all are answered
   goal       init, start, run, status, or stop a detached, bounded goal loop
+  objective  init, start, run, status, or stop an objective tree: decompose, delegate by
+             the capability registry, review independently, escalate what fails
 
 operations:
   status     queue, flights and results at a glance
@@ -316,7 +318,9 @@ func (rf *requestFlags) defaults() (delphi.Defaults, error) {
 
 // routeFamily asks the registry for family's model, allowing only targets whose provider
 // delphi knows and, in free mode, that cost nothing.
-func routeFamily(family, registry string, free *delphi.FreePolicy) (capability.Route, error) {
+// Each reject returns a reason to rule a target out, or "" (independent review uses one to
+// exclude the author's vendor).
+func routeFamily(family, registry string, free *delphi.FreePolicy, reject ...func(capability.Target) string) (capability.Route, error) {
 	reg, err := capability.Open(registry)
 	if err != nil {
 		return capability.Route{}, err
@@ -333,6 +337,11 @@ func routeFamily(family, registry string, free *delphi.FreePolicy) (capability.R
 		if free != nil {
 			if ok, why := free.Allows(known, delphi.Target{Provider: t.Provider, Model: t.Model, Effort: t.Effort}); !ok {
 				return false, "free mode: " + why
+			}
+		}
+		for _, r := range reject {
+			if why := r(t); why != "" {
+				return false, why
 			}
 		}
 		return true, ""
@@ -401,8 +410,9 @@ func run(ctx context.Context, args []string, a *app) int {
 	}
 	cmds := map[string]func(context.Context, []string, *app) int{
 		"ask": cmdAsk, "enqueue": cmdEnqueue, "get": cmdGet, "results": cmdResults, "serve": cmdServe, "run": cmdRun,
-		"goal":   cmdGoal,
-		"status": cmdStatus, "cancel": cmdCancel, "reconcile": cmdReconcile, "providers": cmdProviders, "profiles": cmdProfiles, "validate": cmdValidate,
+		"goal":      cmdGoal,
+		"objective": cmdObjective,
+		"status":    cmdStatus, "cancel": cmdCancel, "reconcile": cmdReconcile, "providers": cmdProviders, "profiles": cmdProfiles, "validate": cmdValidate,
 		"calibrate": cmdCalibrate, "registry": cmdRegistry, "route": cmdRoute,
 	}
 	fn, ok := cmds[args[0]]

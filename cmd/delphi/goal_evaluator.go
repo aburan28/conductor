@@ -63,9 +63,20 @@ func runGoalEvaluator(ctx context.Context, dir string, s goalState) (goalEvaluat
 	if err != nil {
 		return result, err
 	}
-	callCtx, cancel := context.WithTimeout(ctx, time.Duration(s.EvalTimeoutSecs)*time.Second)
+	passed, feedback, score, err := runJSONEvaluator(ctx, dir, s.Evaluator, s.EvalTimeoutSecs, input)
+	if err != nil {
+		return result, err
+	}
+	return goalEvaluation{Passed: passed, Feedback: feedback, Score: score, DraftHash: hex.EncodeToString(hash[:])}, nil
+}
+
+// runJSONEvaluator runs an operator-supplied checker: input on stdin, one JSON object
+// {"passed": bool, "feedback": string, "score": 0..1} on stdout, in its own process group
+// so a timeout stops everything it started.
+func runJSONEvaluator(ctx context.Context, dir, exe string, timeoutSecs int, input []byte) (bool, string, *float64, error) {
+	callCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSecs)*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(callCtx, s.Evaluator)
+	cmd := exec.CommandContext(callCtx, exe)
 	// Evaluators often launch a test runner. Cancel the whole process group so
 	// descendants cannot keep running or hold the output pipes open past timeout.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -84,9 +95,9 @@ func runGoalEvaluator(ctx context.Context, dir string, s goalState) (goalEvaluat
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	if err := cmd.Run(); err != nil {
 		if callCtx.Err() != nil {
-			return result, fmt.Errorf("evaluator timed out or was interrupted: %w", callCtx.Err())
+			return false, "", nil, fmt.Errorf("evaluator timed out or was interrupted: %w", callCtx.Err())
 		}
-		return result, fmt.Errorf("evaluator failed: %w: %s", err, strings.TrimSpace(stderr.buf.String()))
+		return false, "", nil, fmt.Errorf("evaluator failed: %w: %s", err, strings.TrimSpace(stderr.buf.String()))
 	}
 	decoder := json.NewDecoder(bytes.NewReader(stdout.buf.Bytes()))
 	decoder.DisallowUnknownFields()
@@ -96,16 +107,16 @@ func runGoalEvaluator(ctx context.Context, dir string, s goalState) (goalEvaluat
 		Score    *float64 `json:"score"`
 	}
 	if err := decoder.Decode(&output); err != nil {
-		return result, fmt.Errorf("invalid evaluator JSON: %w", err)
+		return false, "", nil, fmt.Errorf("invalid evaluator JSON: %w", err)
 	}
 	if err := decoder.Decode(new(any)); err != io.EOF {
-		return result, errors.New("evaluator must emit exactly one JSON object")
+		return false, "", nil, errors.New("evaluator must emit exactly one JSON object")
 	}
 	if output.Passed == nil || (!*output.Passed && strings.TrimSpace(output.Feedback) == "") {
-		return result, errors.New("evaluator must provide passed and feedback for a failed check")
+		return false, "", nil, errors.New("evaluator must provide passed and feedback for a failed check")
 	}
 	if output.Score != nil && (math.IsNaN(*output.Score) || math.IsInf(*output.Score, 0) || *output.Score < 0 || *output.Score > 1) {
-		return result, errors.New("evaluator score must be between 0 and 1")
+		return false, "", nil, errors.New("evaluator score must be between 0 and 1")
 	}
-	return goalEvaluation{Passed: *output.Passed, Feedback: output.Feedback, Score: output.Score, DraftHash: hex.EncodeToString(hash[:])}, nil
+	return *output.Passed, output.Feedback, output.Score, nil
 }

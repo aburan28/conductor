@@ -2,8 +2,8 @@
 
 Status: design. Built so far: phase 1 (OpenAI-compatible endpoints), phase 2 (the registry,
 `delphi calibrate` and `delphi registry`, with the director suites in crypto-autoresearcher),
-free mode, and phase 3 (`delphi route`, `-route`, `task_card.py lane --route` and
-`delphi goal -route`). See `docs/DELPHI.md`. Owner decisions (2026-10-30): the engine
+free mode, phase 3 (`delphi route`, `-route`, `task_card.py lane --route` and
+`delphi goal -route`) and phase 4a (`delphi objective`). See `docs/DELPHI.md`. Owner decisions (2026-10-30): the engine
 lives in Delphi; model equivalence rests on public benchmarks as a prior plus our own
 calibration suites; OpenAI-compatible endpoints come first.
 
@@ -120,9 +120,13 @@ parent for a decision instead of spending.
    `card-compile` and `assess` suites in the research repositories, graded by `task_card.py`.
 3. **Delegation policy**: route by the registry (built: `delphi route`, `-route`,
    `task_card.py lane --route`, `delphi goal -route`/`-reviewer-route`, which escalates the
-   worker after each rejected round). Still open: the cross-vendor independent review.
+   worker after each rejected round).
 4. **Objective tree** in standalone `delphi` (`delphi objective start|status|resume`), durable
    like the goal loop, with decomposition checks, budgets, independent review and escalation.
+   Built (4a): `internal/objective` (event-sourced tree, mechanical decomposition checks,
+   vendor separation) and `delphi objective init|start|run|status|stop`, whose reviews are
+   always cross-vendor. Still open (4b): re-decomposition after a rejected synthesis,
+   deadlines, and a parent's decision on a child out of budget.
 5. **Control plane**: objectives as Conductor tasks with timelines; compatible endpoints on the
    control plane through an asynchronous worker (a live call must not hold an API request
    open); Codex and Claude Code harness delegates for `code-edit`.
