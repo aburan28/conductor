@@ -181,6 +181,23 @@ delphi goal stop -out ./my-goal
 delphi goal run -out ./my-goal       # resume a stopped or interrupted run
 ```
 
+**Routing.** `-route F` chooses the planner and worker from the capability registry, the
+cheapest model measured good enough on task family `F` (`delphi route -family F`). Use
+`-reviewer-route G` to choose the reviewer the same way. The decisions, chains and bases are
+frozen in `goal.json` at init; each request carries `route_family` and `route_basis` in its
+meta.
+- **Escalation.** A refusal climbs the rest of the chain within one call. A rejected round
+  (the reviewer says `revise`, or the evaluator fails the draft) moves the worker one step
+  up its chain for the next round, and the round's history records `escalated_to`. At the
+  top of the chain the worker stays.
+- **Flags.** `-route` and `-provider`/`-model`/`-effort` are exclusive, as are
+  `-reviewer-route` and `-reviewer-provider`/`-reviewer-model`.
+- **Free mode.** With `DELPHI_FREE` set, routes only consider free models.
+
+```sh
+delphi goal start -goal-file ./goal.txt -out ./my-goal -route card-compile -reviewer-route assess
+```
+
 `goal start` launches a background `delphi goal run` process through `nohup`
 on Unix and writes its
 progress to `goal.json`, individual provider requests and results to the run
