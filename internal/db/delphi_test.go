@@ -84,6 +84,16 @@ func TestDelphiDelegationLifecycle(t *testing.T) {
 		ProjectID: f.project.ID, Ref: "r3", Provider: "bedrock", Model: "m", BodySHA256: "x", Label: "L4"}); err == nil {
 		t.Fatal("an unknown provider passed the CHECK constraint")
 	}
+	// A live row may name an operator's OpenAI-compatible endpoint, by a plain name only.
+	live, err := f.store.CreateDelphiDelegation(f.ctx, domain.DelphiDelegation{OrganizationID: f.org.ID,
+		ProjectID: f.project.ID, Ref: "r4", Provider: "fireworks", Model: "m", BodySHA256: "x", Label: "L5", Live: true, Holder: "h"})
+	if err != nil || !live.Live || live.Holder != "h" {
+		t.Fatalf("live row: %+v %v", live, err)
+	}
+	if _, err := f.store.CreateDelphiDelegation(f.ctx, domain.DelphiDelegation{OrganizationID: f.org.ID,
+		ProjectID: f.project.ID, Ref: "r5", Provider: "Not A Name", Model: "m", BodySHA256: "x", Label: "L6", Live: true}); err == nil {
+		t.Fatal("a malformed endpoint name passed the CHECK constraint")
+	}
 }
 
 func TestUsageAcceptsDelegationSource(t *testing.T) {

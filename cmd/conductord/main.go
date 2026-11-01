@@ -36,6 +36,7 @@ import (
 	"github.com/aburan28/conductor/internal/config"
 	"github.com/aburan28/conductor/internal/coord"
 	"github.com/aburan28/conductor/internal/db"
+	"github.com/aburan28/conductor/internal/delphi/compat"
 	"github.com/aburan28/conductor/internal/delphi/hosted"
 	"github.com/aburan28/conductor/internal/domain"
 	"github.com/aburan28/conductor/internal/githubapp"
@@ -110,6 +111,9 @@ type serveConfig struct {
 	notifyPoll        time.Duration
 	modelDiscovery    time.Duration
 	delphiInterval    time.Duration
+	delphiEndpoints   string
+	delphiLive        bool
+	delphiLiveCalls   int
 	notifyNetwork     notify.NetworkPolicy
 	verbose           bool
 	// sso is single sign-on, with its providers built from --sso-provider.
@@ -240,6 +244,11 @@ func parseServeConfigMode(args []string, output io.Writer, checkOnly bool) (*ser
 		"how often inference endpoints are asked which models they serve, so new releases appear in the catalog without anyone editing it (negative disables the background refresh; endpoints can still be refreshed on request)")
 	fs.DurationVar(&c.delphiInterval, "delphi-interval", time.Minute,
 		"how often open delphi delegations are checked with their provider's batch API (negative disables delphi: its routes answer not configured)")
+	fs.StringVar(&c.delphiEndpoints, "delphi-endpoints", "",
+		"OpenAI-compatible endpoints file for delphi's live worker (same format as ~/.delphi/endpoints.json); the remote presets (OpenRouter, Fireworks, OpenCode) are always offered, and a local endpoint only when this file names it. Keys come from each project's vault under the endpoint's key name")
+	fs.BoolVar(&c.delphiLive, "delphi-live", true,
+		"let delphi call OpenAI-compatible endpoints in the background; prompts and answers are held in memory only, never stored (false keeps delphi to batch APIs)")
+	fs.IntVar(&c.delphiLiveCalls, "delphi-live-concurrency", 8, "live delphi calls in flight at once, per process")
 	fs.DurationVar(&c.notifyPoll, "notify-poll", 3*time.Second,
 		"how often the notification relay sends undelivered events to webhook and Slack channels (negative disables the relay)")
 	fs.BoolVar(&c.notifyNetwork.AllowPrivate, "notify-allow-private-networks", false,
@@ -646,6 +655,19 @@ func serve(args []string) error {
 				return opened.Value, err
 			},
 		}
+		if cfg.delphiLive {
+			eps, err := compat.Endpoints(cfg.delphiEndpoints)
+			if err != nil {
+				return fmt.Errorf("delphi endpoints: %w", err)
+			}
+			for name, ep := range eps {
+				if ep.Local && !ep.Listed {
+					delete(eps, name) // a local endpoint is the operator's to name
+				}
+			}
+			delphiSvc.Live = &hosted.Live{Endpoints: eps, Concurrency: cfg.delphiLiveCalls}
+			logger.Info("delphi live endpoints", "endpoints", delphiSvc.Live.Names())
+		}
 	}
 	server := api.New(store, svc, api.Options{
 		Logger:       logger,
@@ -703,6 +725,13 @@ func serve(args []string) error {
 	}
 	if cfg.notifyPoll >= 0 {
 		goBackground("notification relay", notifier.Run)
+	}
+	if delphiSvc != nil && delphiSvc.Live != nil {
+		// Live calls are made by the process that accepted them, scheduler or not.
+		goBackground("delphi live", func(ctx context.Context) error {
+			delphiSvc.RunLive(ctx)
+			return nil
+		})
 	}
 	if delphiSvc != nil && cfg.delphiInterval > 0 && !cfg.noScheduler {
 		goBackground("delphi", func(ctx context.Context) error {

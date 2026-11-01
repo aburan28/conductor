@@ -21,6 +21,10 @@ type DelphiDelegation struct {
 	BodySHA256 string `json:"body_sha256"`
 	Label      string `json:"label"`
 	BatchID    string `json:"batch_id,omitempty"`
+	// Live marks a call to an OpenAI-compatible endpoint made by conductord's live worker.
+	// Its answer is held only in the memory of Holder (a process id), never stored.
+	Live   bool   `json:"live,omitempty"`
+	Holder string `json:"holder,omitempty"`
 	// State is the delegation's lifecycle: submitting (provider outcome not yet known),
 	// running, finished, or abandoned (an unknown submit an operator gave up on).
 	State string `json:"state"`

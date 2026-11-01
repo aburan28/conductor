@@ -56,8 +56,11 @@ type Service struct {
 	// WIFProjectID opts one project into the server's Anthropic workload identity.
 	// Other projects continue to use their own vault credentials.
 	WIFProjectID domain.ID
-	Logger       *slog.Logger
-	Now          func() time.Time
+	// Live calls the operator's OpenAI-compatible endpoints in the background; nil keeps
+	// delphi to the batch APIs.
+	Live   *Live
+	Logger *slog.Logger
+	Now    func() time.Time
 }
 
 func (s *Service) now() time.Time {
@@ -323,17 +326,20 @@ func (s *Service) Submit(ctx context.Context, project domain.Project, by domain.
 		}
 	}
 	defaults := delphi.Defaults{Provider: "anthropic", MaxTokens: defaultTokens}
-	req, problems := delphi.Normalize(in.toRow(), defaults, Offline(), "request")
+	req, problems := delphi.Normalize(in.toRow(), defaults, s.Live.offline(Offline()), "request")
 	if len(problems) > 0 {
 		return d, false, fmt.Errorf("%w: %s", domain.ErrInvalidArgument, strings.Join(problems, "; "))
+	}
+	row := domain.DelphiDelegation{OrganizationID: project.OrganizationID, ProjectID: project.ID, Ref: req.ID,
+		PrincipalID: by, TaskID: in.TaskID, Provider: req.Provider, Model: req.Model,
+		BodySHA256: delphi.Hash(req), Label: newLabel(), Labels: in.Labels, Profile: in.Profile, FallbackOf: in.FallbackOf}
+	if s.Live.Has(req.Provider) {
+		return s.submitLive(ctx, project, row, req)
 	}
 	prov, err := s.provider(ctx, project, req.Provider)
 	if err != nil {
 		return d, false, err
 	}
-	row := domain.DelphiDelegation{OrganizationID: project.OrganizationID, ProjectID: project.ID, Ref: req.ID,
-		PrincipalID: by, TaskID: in.TaskID, Provider: req.Provider, Model: req.Model,
-		BodySHA256: delphi.Hash(req), Label: newLabel(), Labels: in.Labels, Profile: in.Profile, FallbackOf: in.FallbackOf}
 	d, err = s.Store.CreateDelphiDelegation(ctx, row)
 	if errors.Is(err, domain.ErrDuplicate) {
 		if d.BodySHA256 == row.BodySHA256 {
@@ -423,6 +429,19 @@ func (s *Service) Answer(ctx context.Context, project domain.Project, ref string
 		a.Unavailable = "the request " + d.Status + "; there is no answer"
 		return a, nil
 	}
+	if d.Live {
+		// Live answers are held in the memory of the process that made the call (§12.4).
+		if r, ok := s.Live.answer(d.ID); ok {
+			a.Text, a.Refusal = r.Text, r.Refusal
+			return a, nil
+		}
+		if s.Live == nil || d.Holder != s.Live.Holder {
+			a.Unavailable = "the answer is held in memory by " + d.Holder + ", not by this server process (a restart, or another replica); live answers are never stored"
+		} else {
+			a.Unavailable = "the answer has expired from memory; live answers are never stored"
+		}
+		return a, nil
+	}
 	prov, err := s.provider(ctx, project, d.Provider)
 	if err != nil {
 		return a, err
@@ -452,6 +471,12 @@ func (s *Service) Cancel(ctx context.Context, project domain.Project, ref string
 	}
 	if d.State != domain.DelphiRunning {
 		return d, fmt.Errorf("%w: delegation %s is %s; only a running one can be canceled", domain.ErrIllegalTransition, ref, d.State)
+	}
+	if d.Live {
+		if !s.Live.cancel(d.ID) {
+			return d, fmt.Errorf("%w: the live call is held by %s, not by this server process", domain.ErrCapacity, d.Holder)
+		}
+		return d, nil
 	}
 	prov, err := s.provider(ctx, project, d.Provider)
 	if err != nil {
@@ -498,8 +523,19 @@ func (s *Service) Run(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// Tick polls every open delegation once and records the ones whose batch ended.
+// Tick polls every open batch delegation once and records the ones whose batch ended, and
+// finishes as lost the live delegations whose holder stopped heartbeating.
 func (s *Service) Tick(ctx context.Context) error {
+	lost, err := s.Store.ExpireLiveDelphi(ctx, LiveStaleAfter)
+	if err != nil {
+		return err
+	}
+	for _, d := range lost {
+		s.log().Warn("delphi live: call lost with its holder", "project", d.ProjectID, "ref", d.Ref, "holder", d.Holder)
+		if project, err := s.Store.GetProject(ctx, d.ProjectID); err == nil {
+			s.announce(ctx, project, d)
+		}
+	}
 	open, err := s.Store.ListOpenDelphiDelegations(ctx)
 	if err != nil {
 		return err
@@ -577,6 +613,13 @@ func (s *Service) advance(ctx context.Context, project domain.Project, prov delp
 	case !found:
 		res = delphi.Result{Status: delphi.Missing}
 	}
+	return s.finish(ctx, project, prov, d, res)
+}
+
+// finish records a delegation's outcome once, then its usage and task event. The answer
+// text in res is never written: batch answers are fetched again when asked for, and live
+// ones are held in memory by the worker.
+func (s *Service) finish(ctx context.Context, project domain.Project, prov delphi.Provider, d domain.DelphiDelegation, res delphi.Result) error {
 	o := db.DelphiOutcome{Status: string(res.Status), Truncated: res.Truncated, StopReason: res.StopReason, FinishedAt: s.now()}
 	if res.Usage != nil {
 		o.InputTokens, o.OutputTokens = res.Usage.InputTokens, res.Usage.OutputTokens
@@ -591,7 +634,6 @@ func (s *Service) advance(ctx context.Context, project domain.Project, prov delp
 	if res.Refusal != nil {
 		o.RefusalCategory = res.Refusal.Category
 	}
-	// The answer text in res is dropped here: it is fetched again when asked for.
 	fin, changed, err := s.Store.FinishDelphi(ctx, d.ID, o)
 	if err != nil || !changed {
 		return err

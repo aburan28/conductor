@@ -135,6 +135,18 @@ func New(e Endpoint, spoolDir string) (*Provider, error) {
 // Offline returns a provider that can validate but not call the endpoint.
 func Offline(e Endpoint) *Provider { return &Provider{ep: e} }
 
+// NewWithKey returns a provider for e that keeps no spool: only Call works. conductord's
+// live worker uses it, with the key from the project's vault, and holds answers in memory.
+func NewWithKey(e Endpoint, key string) *Provider {
+	return &Provider{ep: e, key: key, http: &http.Client{Timeout: timeout()}}
+}
+
+// Endpoint is the endpoint this provider calls.
+func (p *Provider) Endpoint() Endpoint { return p.ep }
+
+// Call makes one request and returns its outcome. Nothing is written anywhere.
+func (p *Provider) Call(ctx context.Context, r delphi.Request) delphi.Result { return p.call(ctx, r) }
+
 func timeout() time.Duration {
 	if d, err := time.ParseDuration(os.Getenv("DELPHI_COMPAT_TIMEOUT")); err == nil && d > 0 {
 		return d
@@ -219,6 +231,9 @@ func (p *Provider) path(label string) string { return filepath.Join(p.spool, lab
 
 // Submit answers every request live and spools the results; the batch id is the label.
 func (p *Provider) Submit(ctx context.Context, reqs []delphi.Request, label string) (string, error) {
+	if p.spool == "" {
+		return "", errors.New(p.ep.Name + ": this provider has no spool; use Call")
+	}
 	if err := os.MkdirAll(p.spool, 0o700); err != nil {
 		return "", err
 	}
