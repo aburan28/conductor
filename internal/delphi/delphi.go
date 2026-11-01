@@ -143,6 +143,18 @@ type BatchStatus struct {
 var ErrNotSupported = errors.New("not supported by this provider")
 
 // Provider runs requests through one vendor's batch API.
+// LiveProvider is implemented by providers that answer within Submit (live calls, as
+// against a batch API that may take up to a day); deadline-aware callers prefer them.
+type LiveProvider interface {
+	Live() bool
+}
+
+// IsLive reports whether p answers within Submit.
+func IsLive(p Provider) bool {
+	l, ok := p.(LiveProvider)
+	return ok && l.Live()
+}
+
 type Provider interface {
 	Name() string
 	// DefaultModel is used for requests that name no model; "" means the

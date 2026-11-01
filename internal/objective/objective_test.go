@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidateRefusesWhatCannotBeCheckedOrBudgeted(t *testing.T) {
@@ -21,7 +22,7 @@ func TestValidateRefusesWhatCannotBeCheckedOrBudgeted(t *testing.T) {
 		{Kind: KindObjective, Statement: "b", Criteria: []string{"c"}, Family: "x", BudgetUSD: 0.5},
 		{Kind: "task", Statement: "", Criteria: []string{"c"}, BudgetUSD: 0},
 	}}
-	got := strings.Join(Validate(parent, d, lim, routable), "\n")
+	got := strings.Join(Validate(parent, d, lim, time.Now(), routable), "\n")
 	for _, want := range []string{"3 children, more than the limit of 2", "child 1: no acceptance criteria",
 		"child 2: at depth 2 it must be a work item", "child 2: an objective takes no family",
 		`child 3: kind "task"`, "child 3: no statement", "child 3: budget_usd must be positive",
@@ -30,11 +31,11 @@ func TestValidateRefusesWhatCannotBeCheckedOrBudgeted(t *testing.T) {
 			t.Errorf("problems lack %q:\n%s", want, got)
 		}
 	}
-	if p := Validate(parent, Decomposition{Decomposable: false, Reason: "too vague"}, lim, routable); len(p) != 1 || !strings.Contains(p[0], "too vague") {
+	if p := Validate(parent, Decomposition{Decomposable: false, Reason: "too vague"}, lim, time.Now(), routable); len(p) != 1 || !strings.Contains(p[0], "too vague") {
 		t.Errorf("not decomposable: %v", p)
 	}
 	ok := Decomposition{Decomposable: true, Children: []Child{{Kind: KindWork, Statement: "a", Criteria: []string{"c"}, Family: "summarize", BudgetUSD: 0.8}}}
-	if p := Validate(parent, ok, lim, routable); len(p) != 0 {
+	if p := Validate(parent, ok, lim, time.Now(), routable); len(p) != 0 {
 		t.Errorf("valid decomposition refused: %v", p)
 	}
 }
@@ -87,5 +88,42 @@ func TestLogIsAppendOnlyAndSurvivesATornLastLine(t *testing.T) {
 	}
 	if n := l2.Tree().Get("n0"); n.Route[0] != "p:m" || n.State != Open {
 		t.Fatalf("fold: %+v", n)
+	}
+}
+
+func TestGrantsAndUnallocatedKeepEverySubtreeCovered(t *testing.T) {
+	dir := t.TempDir()
+	l, err := Create(dir, InitData{Statement: "s", Criteria: []string{"c"}, BudgetUSD: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	must := func(node, typ string, data any) {
+		t.Helper()
+		if err := l.Append(node, typ, data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	must("n0", EvDelegated, Attempt{Target: "p:m", RequestID: "n0-plan-a0"})
+	must("n0", EvAnswered, AnsweredData{RequestID: "n0-plan-a0", Status: "succeeded", CostUSD: 1, Priced: true, Outcome: "decomposed"})
+	must("n0", EvDecomposed, DecomposedData{Children: []Child{
+		{Kind: KindObjective, Statement: "a", Criteria: []string{"c"}, BudgetUSD: 4},
+		{Kind: KindWork, Statement: "b", Criteria: []string{"c"}, Family: "f", BudgetUSD: 2}}})
+	tr := l.Tree()
+	if got := Unallocated(tr.Get("n0"), tr); got != 3 { // 10 - 1 spent - 6 allocated
+		t.Fatalf("unallocated = %v", got)
+	}
+	must("n0.1", EvDelegated, Attempt{Target: "p:m", RequestID: "n0_1-plan-a0"})
+	must("n0.1", EvAnswered, AnsweredData{RequestID: "n0_1-plan-a0", Status: "succeeded", CostUSD: 0.5, Priced: true, Outcome: "decomposed"})
+	must("n0.1", EvDecomposed, DecomposedData{Children: []Child{{Kind: KindWork, Statement: "c", Criteria: []string{"c"}, Family: "f", BudgetUSD: 3.5}}})
+	// A grant from the root to n0.1.1 raises n0.1 too, so n0.1 still covers its child.
+	must("n0.1.1", EvGrant, Grant{From: "n0", AmountUSD: 2, Reason: "r"})
+	if a, b := tr.Get("n0.1.1").BudgetUSD, tr.Get("n0.1").BudgetUSD; a != 5.5 || b != 6 {
+		t.Fatalf("budgets after grant: n0.1.1 %v n0.1 %v", a, b)
+	}
+	if got := Unallocated(tr.Get("n0"), tr); got != 1 {
+		t.Fatalf("root unallocated after grant = %v", got)
+	}
+	if err := l.Append("n0.2", EvGrant, Grant{From: "n0.1", AmountUSD: 1}); err == nil {
+		t.Fatal("a grant from a non-ancestor was accepted")
 	}
 }
