@@ -129,7 +129,8 @@ parent for a decision instead of spending.
    synthesis, deadlines with live-only routing inside the batch window, and budget grants
    from the nearest ancestor with unallocated budget.
 5. **Control plane** (in progress; built: the live worker for OpenAI-compatible endpoints,
-   with prompts and answers held in memory only): objectives as Conductor tasks with timelines; compatible endpoints on the
+   with prompts and answers held in memory only, and objectives mirrored as Conductor tasks
+   with timelines via `delphi objective -conductor`): objectives as Conductor tasks with timelines; compatible endpoints on the
    control plane through an asynchronous worker (a live call must not hold an API request
    open); Codex and Claude Code harness delegates for `code-edit`.
 6. **More providers**: Fireworks batch, Gemini.

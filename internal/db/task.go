@@ -150,6 +150,9 @@ func createTaskTx(ctx context.Context, tx pgx.Tx, p CreateTaskParams) (domain.Ta
 		p.ModelAlias, p.HarnessPref, budget, features, p.MaxAttempts, p.CreatedBy,
 		normalizeLabels(p.Labels),
 	).Scan)
+	if isUniqueViolation(err, "tasks_external_ref_unique") {
+		return domain.Task{}, fmt.Errorf("%w: a task with external ref %q already exists in this project", domain.ErrDuplicate, p.ExternalRef)
+	}
 	if err != nil {
 		return domain.Task{}, err
 	}
@@ -248,6 +251,8 @@ type ListTasksFilter struct {
 	OpenOnly    bool
 	CreatedBy   domain.ID
 	ExternalRef string
+	// ParentID keeps a task's direct children.
+	ParentID domain.ID
 	// Labels keeps tasks carrying any of the given labels.
 	Labels []string
 	Limit  int
@@ -276,6 +281,10 @@ func (s *Store) ListTasks(ctx context.Context, projectID domain.ID, f ListTasksF
 	if f.ExternalRef != "" {
 		args = append(args, f.ExternalRef)
 		fmt.Fprintf(&q, " AND t.external_ref = $%d", len(args))
+	}
+	if f.ParentID != "" {
+		args = append(args, f.ParentID)
+		fmt.Fprintf(&q, " AND t.parent_id = $%d::uuid", len(args))
 	}
 	if len(f.Labels) > 0 {
 		args = append(args, normalizeLabels(f.Labels))

@@ -61,6 +61,9 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /v1/tasks/{task}/handoff", auth(s.createHandoff))
 	m.HandleFunc("GET /v1/tasks/{task}/handoff", auth(s.getHandoff))
 	m.HandleFunc("POST /v1/tasks/{task}/scopes", auth(s.expandScope))
+	m.HandleFunc("GET /v1/tasks/{task}/timeline", auth(s.taskTimeline))
+	m.HandleFunc("POST /v1/tasks/{task}/timeline", auth(s.appendTaskTimeline))
+	m.HandleFunc("POST /v1/tasks/{task}/settle", auth(s.settleObjectiveTask))
 	m.HandleFunc("POST /v1/projects/{project}/claim-next", auth(s.claimNext))
 
 	m.HandleFunc("GET /v1/projects/{project}/reservations", auth(s.listReservations))
@@ -640,6 +643,19 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request, p domain.Prin
 		OpenOnly: r.URL.Query().Get("open") == "true",
 		Labels:   r.URL.Query()["label"],
 		Limit:    intParam(r, "limit", 200),
+		// external_ref finds the task an integration filed (unique per project).
+		ExternalRef: r.URL.Query().Get("external_ref"),
+	}
+	if parent := r.URL.Query().Get("parent"); parent != "" {
+		pt, err := s.store.GetTask(r.Context(), parent)
+		if err != nil || pt.ProjectID != project.ID {
+			pt, err = s.store.GetTaskByRef(r.Context(), project.ID, parent)
+		}
+		if err != nil {
+			s.fail(w, r, fmt.Errorf("%w: unknown parent %q", domain.ErrInvalidArgument, parent))
+			return
+		}
+		filter.ParentID = pt.ID
 	}
 	for _, st := range r.URL.Query()["status"] {
 		filter.Statuses = append(filter.Statuses, domain.TaskStatus(st))
@@ -666,6 +682,8 @@ type createTaskBody struct {
 	DependsOn          []string                     `json:"depends_on"`
 	AcceptanceCriteria []domain.AcceptanceCriterion `json:"acceptance_criteria"`
 	Scopes             []domain.ScopeRequest        `json:"scopes"`
+	// Parent is the task (ref or id, in this project) this one is part of.
+	Parent string `json:"parent"`
 }
 
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request, p domain.Principal) {
@@ -716,6 +734,17 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request, p domain.Pri
 			return
 		}
 	}
+	var parentID domain.ID
+	if body.Parent != "" {
+		if pt, err := s.store.GetTask(r.Context(), body.Parent); err == nil && pt.ProjectID == project.ID {
+			parentID = pt.ID
+		} else if pt, err := s.store.GetTaskByRef(r.Context(), project.ID, body.Parent); err == nil {
+			parentID = pt.ID
+		} else {
+			s.fail(w, r, fmt.Errorf("%w: unknown parent %q", domain.ErrInvalidArgument, body.Parent))
+			return
+		}
+	}
 	env := privacy.Envelope{
 		Summary:     body.Title + " " + body.Objective,
 		Scopes:      scopeStrings,
@@ -723,7 +752,7 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request, p domain.Pri
 	}
 
 	task, err := s.store.CreateTask(r.Context(), db.CreateTaskParams{
-		ProjectID: project.ID, CreatedBy: p.ID,
+		ProjectID: project.ID, CreatedBy: p.ID, ParentID: parentID,
 		ExternalRef:        body.ExternalRef,
 		Title:              privacy.ClampSummary(body.Title),
 		Objective:          privacy.ClampSummary(body.Objective),

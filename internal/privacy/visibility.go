@@ -36,21 +36,23 @@ func (v Viewer) IsSelf(o Owner) bool {
 // Note what is absent at every level: there is no prompt, transcript, reasoning, model
 // output, or tool payload field. Not "empty for most viewers" — absent from the type.
 type TaskView struct {
-	ID            domain.ID         `json:"id"`
-	Ref           string            `json:"ref"`
-	ProjectID     domain.ID         `json:"project_id"`
-	Status        domain.TaskStatus `json:"status"`
-	Visibility    domain.Visibility `json:"visibility"`
-	Owner         string            `json:"owner,omitempty"`
-	Priority      int               `json:"priority"`
-	RiskLevel     domain.RiskLevel  `json:"risk_level"`
-	Scopes        []string          `json:"scopes"`
-	Labels        []string          `json:"labels,omitempty"`
-	Branch        string            `json:"branch,omitempty"`
-	FencingEpoch  int64             `json:"fencing_epoch"`
-	AttemptsCount int               `json:"attempts_count"`
-	UpdatedAt     time.Time         `json:"updated_at"`
-	CreatedAt     time.Time         `json:"created_at"`
+	ID         domain.ID         `json:"id"`
+	Ref        string            `json:"ref"`
+	ProjectID  domain.ID         `json:"project_id"`
+	Status     domain.TaskStatus `json:"status"`
+	Visibility domain.Visibility `json:"visibility"`
+	Owner      string            `json:"owner,omitempty"`
+	Priority   int               `json:"priority"`
+	RiskLevel  domain.RiskLevel  `json:"risk_level"`
+	Scopes     []string          `json:"scopes"`
+	Labels     []string          `json:"labels,omitempty"`
+	// ParentID is the task this one is part of (an objective tree's parent node).
+	ParentID      domain.ID `json:"parent_id,omitempty"`
+	Branch        string    `json:"branch,omitempty"`
+	FencingEpoch  int64     `json:"fencing_epoch"`
+	AttemptsCount int       `json:"attempts_count"`
+	UpdatedAt     time.Time `json:"updated_at"`
+	CreatedAt     time.Time `json:"created_at"`
 
 	// team_summary and above.
 	Title              string                       `json:"title,omitempty"`
@@ -100,6 +102,7 @@ func ProjectTask(v Viewer, t domain.Task, p TaskProjection) TaskView {
 		ID:            t.ID,
 		Ref:           t.Ref,
 		ProjectID:     t.ProjectID,
+		ParentID:      t.ParentID,
 		Status:        t.Status,
 		Visibility:    t.Visibility,
 		Owner:         p.Owner.Handle,
@@ -543,6 +546,12 @@ var EventPayloadAllowlist = map[string]bool{
 	"fencing_epoch": true, "attempt_number": true, "expires_at": true,
 	"visibility": true, "count": true, "error": true, "title": true,
 	"workflow_sha": true, "similarity": true, "tier": true,
+	// Objective trees (objective.* on a delphi objective task's timeline): structure, routing,
+	// hashes, verdicts, costs and outcome categories only; never a prompt, an answer or a
+	// reviewer's feedback.
+	"node": true, "parent": true, "attempt": true, "target": true, "family": true, "basis": true,
+	"answer_sha256": true, "verdict": true, "budget_usd": true, "spent_usd": true,
+	"amount_usd": true, "deadline_at": true, "children": true, "chain": true,
 	// Queue and swarm.
 	"ticket_id": true, "position": true, "queue_depth": true, "lane": true,
 	"granted": true, "expired": true, "labels": true, "provider": true, "priority": true,
