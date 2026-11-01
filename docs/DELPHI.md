@@ -654,6 +654,42 @@ spend is not counted by project budgets, which read attempts.
 delegations are checked. The default is `1m`, and a negative value turns delphi off.
 See [OPERATIONS.md](OPERATIONS.md#delphi).
 
+## OpenAI-compatible endpoints on the control plane (live worker)
+
+`conductor delphi ask --provider fireworks --model … --task …` works against the control
+plane too, through conductord's live worker. Such endpoints answer once and keep nothing,
+so they cannot be submitted and polled later like a batch API. Holding the API request
+open for the whole call would tie it to the model's latency.
+
+**How a call runs**
+- The API records the delegation, hands the request to a background worker in the same
+  process, and returns at once with the delegation `running`.
+- The worker makes the call, at most `--delphi-live-concurrency` (default 8) at a time.
+  It retries retryable failures twice, then records the outcome, usage and the task's
+  `delphi.finished` event exactly as for a batch.
+
+**Configuration**
+- **Endpoints** are the operator's alone. The remote presets (OpenRouter, Fireworks,
+  OpenCode) are always offered, and `--delphi-endpoints FILE` adds others in the
+  `~/.delphi/endpoints.json` format: DeepSeek, Together, or a vLLM the operator runs. A
+  local endpoint is used only when that file names it. Members never supply a base URL.
+- **Keys** come from each project's vault, under the endpoint's key name
+  (`FIREWORKS_API_KEY`, `OPENROUTER_API_KEY`, …).
+- **Turning it off:** `--delphi-live=false` keeps delphi to the batch APIs.
+
+**What is stored (DESIGN.md §12.4 is unchanged)**
+- The prompt is held only in the worker's memory until the call is made.
+- The answer is held only in the memory of the process that made the call, for 24 hours,
+  for `conductor delphi answer`. The row records which process holds it (`holder`).
+- A restart, or a fetch through another replica, reports the answer as unavailable rather
+  than store it.
+- A call whose process stops is not resumed: nothing was stored to resume from. Once its
+  holder has gone 5 minutes without a heartbeat, the loop finishes it as `missing`
+  (`error_type: lost`) so the caller can resubmit. The endpoint may still bill a call that
+  was in flight.
+- With several replicas, fetch answers through the replica that accepted the call (sticky
+  sessions), or run one.
+
 ## Not built yet
 
 - **MCP tools.** The tool list is capped at 15 (DESIGN.md §4.9) and is full; agents use
@@ -662,8 +698,5 @@ See [OPERATIONS.md](OPERATIONS.md#delphi).
 - **Automatic resubmission**, including server-side fallback. It would need the server to
   hold request text, which this design rules out. The CLI and the standalone binary do it
   instead.
-- **OpenAI-compatible endpoints on the control plane.** `conductor delphi ask` still reaches
-  only Anthropic and OpenAI; the endpoints above are standalone `delphi` only, because a
-  live answer would hold a server request open for the whole call.
 - **Fallback chains in the catalog.** `models.yaml` profiles have no fallback list yet;
   the chain comes from `--fallback` or `$CONDUCTOR_DELPHI_FALLBACK`.
