@@ -142,7 +142,10 @@ func timeout() time.Duration {
 	return 10 * time.Minute
 }
 
-func (p *Provider) Name() string         { return p.ep.Name }
+func (p *Provider) Name() string { return p.ep.Name }
+
+// Live: calls are made, and answered, within Submit.
+func (p *Provider) Live() bool           { return true }
 func (p *Provider) DefaultModel() string { return p.ep.DefaultModel }
 
 // Limits keeps one flight to what Submit can answer live in reasonable time.

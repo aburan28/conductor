@@ -64,6 +64,9 @@ type Config struct {
 	Evaluator       string `json:"evaluator,omitempty"`
 	EvalTimeoutSecs int    `json:"eval_timeout_seconds,omitempty"`
 	MaxTokens       int    `json:"max_tokens"`
+	// BatchWindowSecs is how long a batch API may take. Inside that window of a node's
+	// deadline, its calls go only to live providers.
+	BatchWindowSecs int `json:"batch_window_seconds,omitempty"`
 }
 
 // Attempt is one model asked to answer a node (or, for an objective, to decompose it).
@@ -79,6 +82,9 @@ type Attempt struct {
 	Outcome string `json:"outcome,omitempty"`
 	// Reviewer is the independent reviewer chosen for this attempt's answer.
 	Reviewer string `json:"reviewer,omitempty"`
+	// ChainIndex is Target's place in the node's route; an attempt may skip a batch model
+	// when the deadline is too near for it.
+	ChainIndex int `json:"chain_index"`
 }
 
 // Check is one verdict on an answer.
@@ -102,7 +108,9 @@ type Node struct {
 	Statement string   `json:"statement"`
 	Criteria  []string `json:"criteria"`
 	Family    string   `json:"family,omitempty"` // work items: the task family it routes by
-	BudgetUSD float64  `json:"budget_usd"`
+	BudgetUSD float64  `json:"budget_usd"`       // grants included
+	// DeadlineAt (RFC 3339) is when the node must be settled; "" for none.
+	DeadlineAt string `json:"deadline_at,omitempty"`
 
 	State    string    `json:"state"`
 	Route    []string  `json:"route,omitempty"` // the chain this node climbs
@@ -110,8 +118,12 @@ type Node struct {
 	Attempts []Attempt `json:"attempts,omitempty"`
 	Checks   []Check   `json:"checks,omitempty"`
 	Children []string  `json:"children,omitempty"`
-	Answer   string    `json:"answer,omitempty"` // accepted (or last) answer
-	Reason   string    `json:"reason,omitempty"` // why it failed or was abandoned
+	// Superseded are earlier generations of children, replaced by a re-decomposition after
+	// their combined answer was rejected. They stay in the tree as history.
+	Superseded []string `json:"superseded,omitempty"`
+	Grants     []Grant  `json:"grants,omitempty"`
+	Answer     string   `json:"answer,omitempty"` // accepted (or last) answer
+	Reason     string   `json:"reason,omitempty"` // why it failed or was abandoned
 	// SpentUSD and SpentTokens include every descendant's calls.
 	SpentUSD    float64 `json:"spent_usd"`
 	SpentTokens int64   `json:"spent_tokens"`
@@ -153,7 +165,15 @@ const (
 	EvAbandoned  = "abandoned"  // ReasonData
 	EvReviewer   = "reviewer"   // ReviewerData: who reviews the current attempt
 	EvSynthesis  = "synthesis"  // SynthesisData: an objective's children, combined for its check
+	EvGrant      = "grant"      // Grant: an ancestor's spare budget given to a node that ran out
 )
+
+// Grant is budget an ancestor gave a node that ran out, instead of the node failing.
+type Grant struct {
+	From      string  `json:"from"` // the ancestor whose unallocated budget paid for it
+	AmountUSD float64 `json:"amount_usd"`
+	Reason    string  `json:"reason"`
+}
 
 type ReviewerData struct {
 	Target string `json:"target"`
@@ -164,10 +184,11 @@ type SynthesisData struct {
 }
 
 type InitData struct {
-	Config    Config   `json:"config"`
-	Statement string   `json:"statement"`
-	Criteria  []string `json:"criteria"`
-	BudgetUSD float64  `json:"budget_usd"`
+	Config     Config   `json:"config"`
+	Statement  string   `json:"statement"`
+	Criteria   []string `json:"criteria"`
+	BudgetUSD  float64  `json:"budget_usd"`
+	DeadlineAt string   `json:"deadline_at,omitempty"`
 }
 
 type RoutedData struct {
@@ -228,7 +249,8 @@ func (t *Tree) Apply(e Event) error {
 		}
 		t.Config = d.Config
 		t.Root = "n0"
-		t.add(&Node{ID: "n0", Kind: KindObjective, Statement: d.Statement, Criteria: d.Criteria, BudgetUSD: d.BudgetUSD, State: Open})
+		t.add(&Node{ID: "n0", Kind: KindObjective, Statement: d.Statement, Criteria: d.Criteria, BudgetUSD: d.BudgetUSD,
+			DeadlineAt: d.DeadlineAt, State: Open})
 		return nil
 	}
 	n := t.Nodes[e.Node]
@@ -277,11 +299,20 @@ func (t *Tree) Apply(e Event) error {
 		if a := n.Current(); a != nil {
 			a.Outcome = "decomposed"
 		}
+		// A re-decomposition replaces the previous generation, which stays as history; ids
+		// keep counting so none is ever reused.
+		n.Superseded = append(n.Superseded, n.Children...)
+		n.Children = nil
+		at, _ := time.Parse(time.RFC3339Nano, e.At)
 		for i, c := range d.Children {
-			id := fmt.Sprintf("%s.%d", n.ID, i+1)
+			id := fmt.Sprintf("%s.%d", n.ID, len(n.Superseded)+i+1)
 			n.Children = append(n.Children, id)
+			deadline := n.DeadlineAt
+			if c.DeadlineMinutes > 0 {
+				deadline = at.Add(time.Duration(c.DeadlineMinutes) * time.Minute).UTC().Format(time.RFC3339)
+			}
 			t.add(&Node{ID: id, Parent: n.ID, Depth: n.Depth + 1, Kind: c.Kind, Statement: c.Statement,
-				Criteria: c.Criteria, Family: c.Family, BudgetUSD: c.BudgetUSD, State: Open})
+				Criteria: c.Criteria, Family: c.Family, BudgetUSD: c.BudgetUSD, DeadlineAt: deadline, State: Open})
 		}
 		n.State = Delegated // waiting on its children
 	case EvChecked:
@@ -295,8 +326,12 @@ func (t *Tree) Apply(e Event) error {
 		}
 		n.Checks = append(n.Checks, c)
 		if !c.Passed {
-			if a := n.Current(); a != nil && a.Outcome == "" {
-				a.Outcome = "rejected by " + c.By + ": " + c.Feedback
+			if a := n.Current(); a != nil && (a.Outcome == "" || a.Outcome == "decomposed") {
+				what := "rejected by "
+				if a.Outcome == "decomposed" {
+					what = "combined answer rejected by "
+				}
+				a.Outcome = what + c.By + ": " + c.Feedback
 			}
 			n.State = Open // the next attempt, if any, climbs the chain
 		}
@@ -314,6 +349,23 @@ func (t *Tree) Apply(e Event) error {
 			return err
 		}
 		n.Answer, n.State = d.Answer, Checking
+	case EvGrant:
+		var g Grant
+		if err := json.Unmarshal(e.Data, &g); err != nil {
+			return err
+		}
+		if t.Nodes[g.From] == nil || !(g.AmountUSD > 0) {
+			return fmt.Errorf("event %d: invalid grant %+v", e.Seq, g)
+		}
+		// The grant raises the budget of the node and of every ancestor below the giver,
+		// so each subtree's budget still covers its children's.
+		for p := n; p != nil && p.ID != g.From; p = t.Nodes[p.Parent] {
+			p.BudgetUSD += g.AmountUSD
+			if p.Parent == "" {
+				return fmt.Errorf("event %d: %s is not an ancestor of %s", e.Seq, g.From, n.ID)
+			}
+		}
+		n.Grants = append(n.Grants, g)
 	case EvAccepted, EvFailed, EvAbandoned:
 		var d ReasonData
 		if err := json.Unmarshal(e.Data, &d); err != nil {
@@ -469,6 +521,8 @@ type Child struct {
 	Criteria  []string `json:"criteria"`
 	Family    string   `json:"family,omitempty"`
 	BudgetUSD float64  `json:"budget_usd"`
+	// DeadlineMinutes optionally gives the child an earlier deadline than its parent's.
+	DeadlineMinutes int `json:"deadline_minutes,omitempty"`
 }
 
 // Decomposition is what the planner returns.
@@ -502,7 +556,7 @@ func ParseDecomposition(text string) (Decomposition, error) {
 // statement, checkable criteria, a kind, a routable family (work items) and a budget, the
 // budgets fit the parent's remaining budget, and the tree stays within its limits.
 // routable says whether a family has a model; it is asked once per family.
-func Validate(parent *Node, d Decomposition, lim Limits, routable func(family string) error) []string {
+func Validate(parent *Node, d Decomposition, lim Limits, now time.Time, routable func(family string) error) []string {
 	var problems []string
 	if !d.Decomposable {
 		return []string{"not decomposable: " + strings.TrimSpace(d.Reason)}
@@ -533,6 +587,13 @@ func Validate(parent *Node, d Decomposition, lim Limits, routable func(family st
 			problems = append(problems, at+": budget_usd must be positive")
 		}
 		sum += c.BudgetUSD
+		if c.DeadlineMinutes < 0 {
+			problems = append(problems, at+": deadline_minutes cannot be negative")
+		} else if c.DeadlineMinutes > 0 && parent.DeadlineAt != "" {
+			if left := TimeLeft(parent, now); time.Duration(c.DeadlineMinutes)*time.Minute > left {
+				problems = append(problems, fmt.Sprintf("%s: deadline_minutes %d is later than the parent's deadline (%s left)", at, c.DeadlineMinutes, left.Round(time.Minute)))
+			}
+		}
 		switch c.Kind {
 		case KindWork:
 			if c.Family == "" {
@@ -558,7 +619,7 @@ func Validate(parent *Node, d Decomposition, lim Limits, routable func(family st
 			problems = append(problems, fmt.Sprintf("%s: kind %q is not objective or work", at, c.Kind))
 		}
 	}
-	if remaining := parent.BudgetUSD - parent.SpentUSD; sum > remaining+1e-9 {
+	if remaining := Unallocated(parent, nil); sum > remaining+1e-9 {
 		problems = append(problems, fmt.Sprintf("children's budgets sum to $%.4f, more than the $%.4f left", sum, remaining))
 	}
 	return problems
@@ -597,6 +658,41 @@ func (t *Tree) Subtree(id string) []string {
 		out = append(out, t.Subtree(c)...)
 	}
 	return out
+}
+
+// TimeLeft is how long until the node's deadline; a very long time when it has none.
+func TimeLeft(n *Node, now time.Time) time.Duration {
+	if n.DeadlineAt == "" {
+		return 1<<63 - 1
+	}
+	at, err := time.Parse(time.RFC3339, n.DeadlineAt)
+	if err != nil {
+		return 0
+	}
+	return at.Sub(now)
+}
+
+// Unallocated is what a node has neither spent itself nor handed to its current children:
+// its budget, less its own calls (decompositions, reviews of its synthesis), less what its
+// current children were given, less what superseded children spent. Re-decomposition and
+// grants draw on it. With t nil, a node with no children: budget less spend.
+func Unallocated(n *Node, t *Tree) float64 {
+	if t == nil || (len(n.Children) == 0 && len(n.Superseded) == 0) {
+		return n.BudgetUSD - n.SpentUSD
+	}
+	own := n.SpentUSD
+	alloc := 0.0
+	for _, id := range n.Children {
+		c := t.Nodes[id]
+		own -= c.SpentUSD
+		alloc += c.BudgetUSD
+	}
+	for _, id := range n.Superseded {
+		c := t.Nodes[id]
+		own -= c.SpentUSD
+		alloc += c.SpentUSD
+	}
+	return n.BudgetUSD - own - alloc
 }
 
 // Summary counts nodes by state.
@@ -640,6 +736,9 @@ func (t *Tree) Waiting() []*Node {
 		n := t.Nodes[id]
 		if n.Kind != KindObjective || n.State != Delegated || len(n.Children) == 0 {
 			continue
+		}
+		if a := n.Current(); a == nil || a.Outcome != "decomposed" {
+			continue // a re-decomposition is out; these children are the previous generation
 		}
 		done := true
 		for _, c := range n.Children {

@@ -418,8 +418,26 @@ delphi objective stop -out ./obj
 - **Failure.** A failed child fails its parent and abandons its unfinished siblings.
 - **Completion.** An objective whose children are all accepted is checked again against
   its own criteria, using its children's combined answers.
+- **Re-decomposition.** If that combined answer is rejected, the objective is decomposed
+  again by the next planner up its route. The new planner is told the reviewer's feedback
+  and what the earlier children were. The earlier children stay in the tree as
+  `superseded`, and new children get new ids.
 - **Budgets.** Each call's cost (priced like `run`), including reviews, is charged to its
-  node and every ancestor. A node out of budget fails instead of spending.
+  node and every ancestor.
+  - A node out of budget asks its ancestors before failing. The nearest one with
+    unallocated budget grants what the node has already spent, once per node. Unallocated
+    means not spent itself, not given to current children, and not spent by superseded
+    children.
+  - The grant raises every budget between the giver and the node, and is recorded as a
+    `grant` event with its reason.
+  - With no ancestor to cover it, the node fails rather than spend.
+- **Deadlines.** `-deadline 6h` sets when the root must be settled; a planner may give a
+  child an earlier one (`deadline_minutes`).
+  - Inside `-batch-window` (default 24h) of a node's deadline, routes and reviewers skip
+    batch APIs and use only live providers (OpenAI-compatible endpoints).
+  - A node past its deadline fails rather than start a call, and an objective past its
+    deadline abandons the children still running. A batch request already out may still
+    be billed; `delphi status` shows it.
 
 **What is recorded**
 - **The event log.** `objective.jsonl` is append-only, written with fsync, and nodes are its
@@ -432,11 +450,10 @@ delphi objective stop -out ./obj
   are shared and a resumed run asks nothing twice.
 - **Report.** `report.md` is written when the root settles.
 
-**Not yet built (phase 4b)**
-- re-decomposing an objective whose combined answer is rejected (today it fails with the
-  reviewer's reason);
-- per-node deadlines, and preferring batch versus live by deadline;
-- a parent deciding what to do about a child out of budget.
+**Not built yet**
+- Reusing an accepted child across a re-decomposition: the new generation starts fresh.
+- Cancelling a batch request that is still out when its node's deadline passes.
+- Objectives as Conductor tasks (phase 5).
 
 ## Free mode: nothing that costs money is called
 

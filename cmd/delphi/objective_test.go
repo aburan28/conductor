@@ -2,10 +2,14 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/aburan28/conductor/internal/capability"
 	"github.com/aburan28/conductor/internal/objective"
@@ -235,5 +239,178 @@ func TestObjectiveNeverLetsAVendorReviewItsOwnAnswer(t *testing.T) {
 	n := l.Tree().Get("n0.1")
 	if n.State != objective.Failed || !strings.Contains(n.Reason, "no independent reviewer") || !strings.Contains(n.Reason, "same vendor") {
 		t.Fatalf("n0.1: %s %q", n.State, n.Reason)
+	}
+}
+
+// ---- phase 4b: re-decomposition, budget grants, deadlines -----------------
+
+func TestObjectiveReDecomposesWithTheNextPlannerAfterItsCombinedAnswerIsRejected(t *testing.T) {
+	fa, fo := servers(t)
+	reg := objectiveRegistry(t)
+	seedRegistry(t, reg, objCal("plan", "anthropic", "claude-opus-5-5", "high", 192, 9)) // the next planner up
+	fa.mu.Lock()
+	fa.outcome = func(id string) string {
+		if id == "n0-plan-a0" || id == "n0-plan-a1" {
+			return claudeMsg(twoWorkItems, "end_turn", "")
+		}
+		return claudeMsg("answer "+id, "end_turn", "")
+	}
+	fa.mu.Unlock()
+	fo.mu.Lock()
+	fo.outcome = func(id string, _ map[string]any) (string, string) {
+		if id == "n0-review-a0" {
+			return oaOK(id, `{"verdict":"reject","feedback":"the options are never compared"}`, "completed"), ""
+		}
+		return oaOK(id, `{"verdict":"accept","feedback":"ok"}`, "completed"), ""
+	}
+	fo.mu.Unlock()
+	out := filepath.Join(t.TempDir(), "obj")
+	if code, _, se := cli(t, "", "objective", "init", "-out", out, "-objective", "Compare A and B", "-criterion", "compared", "-budget-usd", "5"); code != 0 {
+		t.Fatalf("init: %d %s", code, se)
+	}
+	if code, so, se := cli(t, "", "objective", "run", "-out", out, "-every", "1ms"); code != 0 {
+		_, st, _ := cli(t, "", "objective", "status", "-out", out)
+		t.Fatalf("run: %d\n%s\n%s\n%s", code, so, se, st)
+	}
+	l, _ := objective.Load(out)
+	tr := l.Tree()
+	root := tr.Get("n0")
+	if root.State != objective.Accepted || len(root.Attempts) != 2 || root.Attempts[1].Target != "anthropic:claude-opus-5-5@high" {
+		t.Fatalf("root: %s %q %+v", root.State, root.Reason, root.Attempts)
+	}
+	if strings.Join(root.Superseded, ",") != "n0.1,n0.2" || strings.Join(root.Children, ",") != "n0.3,n0.4" {
+		t.Fatalf("generations: superseded %v, children %v", root.Superseded, root.Children)
+	}
+	if tr.Get("n0.1").State != objective.Accepted || tr.Get("n0.3").State != objective.Accepted {
+		t.Errorf("children: n0.1 %s, n0.3 %s", tr.Get("n0.1").State, tr.Get("n0.3").State)
+	}
+	// The second planner was told why the first decomposition's answer was rejected.
+	fa.mu.Lock()
+	body, _ := json.Marshal(fa.bodies)
+	fa.mu.Unlock()
+	if !strings.Contains(string(body), "the options are never compared") {
+		t.Errorf("the re-decomposition prompt does not carry the reviewer's feedback")
+	}
+}
+
+func TestObjectiveAncestorGrantsBudgetToAChildThatRanOut(t *testing.T) {
+	fa, fo := servers(t)
+	objectiveRegistry(t)
+	fa.mu.Lock()
+	fa.outcome = func(id string) string {
+		if id == "n0-plan-a0" {
+			return claudeMsg(`{"decomposable": true, "children": [
+ {"kind": "work", "statement": "Summarize B", "criteria": ["names the risk"], "family": "summarize", "budget_usd": 0.000001}]}`, "end_turn", "")
+		}
+		return claudeMsg("answer "+id, "end_turn", "")
+	}
+	fa.mu.Unlock()
+	fo.mu.Lock()
+	fo.outcome = func(id string, _ map[string]any) (string, string) {
+		if id == "n0_1-review-a0" {
+			return oaOK(id, `{"verdict":"reject","feedback":"no risk named"}`, "completed"), ""
+		}
+		return oaOK(id, `{"verdict":"accept","feedback":"ok"}`, "completed"), ""
+	}
+	fo.mu.Unlock()
+	out := filepath.Join(t.TempDir(), "obj")
+	if code, _, se := cli(t, "", "objective", "init", "-out", out, "-objective", "x", "-criterion", "c", "-budget-usd", "5"); code != 0 {
+		t.Fatalf("init: %d %s", code, se)
+	}
+	if code, so, se := cli(t, "", "objective", "run", "-out", out, "-every", "1ms"); code != 0 {
+		t.Fatalf("run: %d\n%s\n%s", code, so, se)
+	}
+	l, _ := objective.Load(out)
+	n := l.Tree().Get("n0.1")
+	if n.State != objective.Accepted || len(n.Attempts) != 2 || len(n.Grants) != 1 || n.Grants[0].From != "n0" ||
+		!(n.BudgetUSD > 0.000001) || !strings.Contains(n.Grants[0].Reason, "out of budget") {
+		t.Fatalf("n0.1: %s %q attempts %d grants %+v budget %v", n.State, n.Reason, len(n.Attempts), n.Grants, n.BudgetUSD)
+	}
+}
+
+// liveModels is an OpenAI-compatible endpoint whose answer depends on the model asked.
+func liveModels(t *testing.T, answers map[string]string) *[]string {
+	t.Helper()
+	var mu sync.Mutex
+	var asked []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		model := body["model"].(string)
+		mu.Lock()
+		asked = append(asked, model)
+		mu.Unlock()
+		b, _ := json.Marshal(map[string]any{"model": model, "choices": []any{map[string]any{
+			"message": map[string]any{"content": answers[model]}, "finish_reason": "stop"}},
+			"usage": map[string]any{"prompt_tokens": 5, "completion_tokens": 2}})
+		w.Write(b)
+	}))
+	t.Cleanup(srv.Close)
+	home := os.Getenv("DELPHI_HOME")
+	os.WriteFile(filepath.Join(home, "endpoints.json"), []byte(`{"vllm":{"base_url":"`+srv.URL+`/v1"}}`), 0o600)
+	return &asked
+}
+
+func TestObjectiveNearItsDeadlineUsesOnlyLiveModels(t *testing.T) {
+	fa, fo := servers(t)
+	reg := objectiveRegistry(t) // the batch models win on cost...
+	seedRegistry(t, reg,        // ...and live ones are measured equivalent
+		objCal("plan", "vllm", "acme/planner", "", 190, 5),
+		objCal("summarize", "vllm", "acme/worker", "", 188, 2),
+		objCal("review", "vllm", "other/reviewer", "", 195, 4))
+	asked := liveModels(t, map[string]string{
+		"acme/planner":   `{"decomposable": true, "children": [{"kind": "work", "statement": "s", "criteria": ["c"], "family": "summarize", "budget_usd": 0.5, "deadline_minutes": 60}]}`,
+		"acme/worker":    "the work",
+		"other/reviewer": `{"verdict": "accept", "feedback": "ok"}`,
+	})
+	out := filepath.Join(t.TempDir(), "obj")
+	// Two hours left, inside the 24-hour batch window.
+	if code, _, se := cli(t, "", "objective", "init", "-out", out, "-objective", "x", "-criterion", "c", "-budget-usd", "1", "-deadline", "2h"); code != 0 {
+		t.Fatalf("init: %d %s", code, se)
+	}
+	if code, so, se := cli(t, "", "objective", "run", "-out", out, "-every", "1ms"); code != 0 {
+		t.Fatalf("run: %d\n%s\n%s", code, so, se)
+	}
+	fa.mu.Lock()
+	nBatch := len(fa.bodies)
+	fa.mu.Unlock()
+	fo.mu.Lock()
+	nBatch += len(fo.lines)
+	fo.mu.Unlock()
+	if nBatch != 0 {
+		t.Errorf("%d request(s) went to a batch API inside the deadline's batch window", nBatch)
+	}
+	l, _ := objective.Load(out)
+	tr := l.Tree()
+	child := tr.Get("n0.1")
+	if tr.Get("n0").State != objective.Accepted || child.Current().Target != "vllm:acme/worker" || child.Current().Reviewer != "vllm:other/reviewer" {
+		t.Fatalf("root %s, child %+v", tr.Get("n0").State, child.Current())
+	}
+	// The child took the earlier deadline it was given.
+	if child.DeadlineAt == "" || child.DeadlineAt >= tr.Get("n0").DeadlineAt {
+		t.Errorf("deadlines: child %q root %q", child.DeadlineAt, tr.Get("n0").DeadlineAt)
+	}
+	if len(*asked) != 4 { // plan, work, review of the work, review of the root
+		t.Errorf("live calls: %v", *asked)
+	}
+}
+
+func TestObjectivePastItsDeadlineFailsWithoutSpending(t *testing.T) {
+	servers(t)
+	objectiveRegistry(t)
+	out := filepath.Join(t.TempDir(), "obj")
+	if code, _, se := cli(t, "", "objective", "init", "-out", out, "-objective", "x", "-criterion", "c", "-budget-usd", "1"); code != 0 {
+		t.Fatalf("init: %d %s", code, se)
+	}
+	l, _ := objective.Load(out)
+	r := &objRunner{dir: out, log: l, registry: os.Getenv("DELPHI_REGISTRY"), a: &app{},
+		clock: func() time.Time { return time.Now().Add(time.Hour) }}
+	n := l.Tree().Get("n0")
+	n.DeadlineAt = time.Now().UTC().Format(time.RFC3339) // already passed at r's clock
+	if err := r.delegate(n); err != nil {
+		t.Fatal(err)
+	}
+	if n.State != objective.Failed || !strings.Contains(n.Reason, "deadline") || len(n.Attempts) != 0 {
+		t.Fatalf("root: %s %q %d attempts", n.State, n.Reason, len(n.Attempts))
 	}
 }
