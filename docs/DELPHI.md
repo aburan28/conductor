@@ -380,6 +380,64 @@ against the reference (the row with the highest interval low bound) and the labe
 When nothing qualifies, routing stops with every model considered and why, rather than
 guessing; calibrate a model or review the family's level.
 
+## Objective trees: decompose, delegate, review independently, escalate
+
+`delphi objective` takes a broad objective and runs it as a tree (phase 4 of
+`docs/DELPHI_OBJECTIVES.md`). It is durable and resumable like the goal loop.
+
+```sh
+delphi objective init -out ./obj -objective-file ./objective.md \
+  -criterion "every option is compared on cost and risk" -budget-usd 2
+delphi objective run -out ./obj          # or `start` to detach; resume the same way
+delphi objective status -out ./obj [-json]
+delphi objective stop -out ./obj
+```
+
+**How a node moves through the tree**
+- **Decomposition.** The root, and every sub-objective, is decomposed by the model the
+  registry routes for `-plan-family` (default `plan`). The reply is one JSON object of
+  children, and it is checked mechanically before any child runs:
+  - every child has a statement, checkable criteria, a kind and a positive budget;
+  - every work item names a task family that has a model;
+  - the budgets fit what is left;
+  - the tree stays within `-max-depth` and `-max-fanout`.
+  An invalid decomposition is that attempt's failure. A planner that says the objective
+  cannot be decomposed is believed; it is never pressed into guessing.
+- **Work items.** Each goes to the cheapest model measured good enough for its family.
+- **Checks.** Every answer is checked:
+  - first by `-evaluator`, the operator's executable, which reads JSON on stdin and writes
+    `{"passed", "feedback"}`;
+  - then by an independent reviewer from `-review-family` (default `review`). The reviewer
+    is always a model of a different vendor than the answer's author: a Claude answer is
+    reviewed by GPT, GLM or another non-Claude model, and the reverse. If no such reviewer
+    is routable, the node fails; unreviewed work is never accepted.
+  - Commands written by a model are never run.
+- **Escalation.** A rejected answer, a refusal or an invalid decomposition sends the node's
+  next attempt one model up its route, up to `-max-attempts` (at most 3). After that the
+  node fails with every attempt recorded.
+- **Failure.** A failed child fails its parent and abandons its unfinished siblings.
+- **Completion.** An objective whose children are all accepted is checked again against
+  its own criteria, using its children's combined answers.
+- **Budgets.** Each call's cost (priced like `run`), including reviews, is charged to its
+  node and every ancestor. A node out of budget fails instead of spending.
+
+**What is recorded**
+- **The event log.** `objective.jsonl` is append-only, written with fsync, and nodes are its
+  fold. Each event records:
+  - the route and its basis;
+  - every attempt, with its target, request id, answer sha256, tokens and cost;
+  - every check and its verdict;
+  - why each node was accepted, failed or abandoned.
+- **Requests.** Model calls are ordinary Delphi requests in the same directory, so batches
+  are shared and a resumed run asks nothing twice.
+- **Report.** `report.md` is written when the root settles.
+
+**Not yet built (phase 4b)**
+- re-decomposing an objective whose combined answer is rejected (today it fails with the
+  reviewer's reason);
+- per-node deadlines, and preferring batch versus live by deadline;
+- a parent deciding what to do about a child out of budget.
+
 ## Free mode: nothing that costs money is called
 
 `DELPHI_FREE` makes standalone `delphi` call only models that cost nothing, for every
