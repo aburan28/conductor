@@ -2,8 +2,8 @@
 
 Status: design. Built so far: phase 1 (OpenAI-compatible endpoints), phase 2 (the registry,
 `delphi calibrate` and `delphi registry`, with the director suites in crypto-autoresearcher),
-free mode, and phase 3's router (`delphi route`, `-route`); `task_card.py lane` and the goal
-loop still name fixed models. See `docs/DELPHI.md`. Owner decisions (2026-10-30): the engine
+free mode, and phase 3 (`delphi route`, `-route`, `task_card.py lane --route` and
+`delphi goal -route`). See `docs/DELPHI.md`. Owner decisions (2026-10-30): the engine
 lives in Delphi; model equivalence rests on public benchmarks as a prior plus our own
 calibration suites; OpenAI-compatible endpoints come first.
 
@@ -118,8 +118,9 @@ parent for a decision instead of spending.
 2. **Capability registry**: schema, public-evidence importer with source and date on every
    record, calibration runner, equivalence tables (built: `internal/capability`); then the
    `card-compile` and `assess` suites in the research repositories, graded by `task_card.py`.
-3. **Delegation policy**: route by the registry (built: `delphi route`, `-route`); then
-   `task_card.py lane` and the goal loop use it instead of fixed models.
+3. **Delegation policy**: route by the registry (built: `delphi route`, `-route`,
+   `task_card.py lane --route`, `delphi goal -route`/`-reviewer-route`, which escalates the
+   worker after each rejected round). Still open: the cross-vendor independent review.
 4. **Objective tree** in standalone `delphi` (`delphi objective start|status|resume`), durable
    like the goal loop, with decomposition checks, budgets, independent review and escalation.
 5. **Control plane**: objectives as Conductor tasks with timelines; compatible endpoints on the

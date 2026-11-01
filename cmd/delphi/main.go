@@ -1102,35 +1102,87 @@ func cmdProfiles(ctx context.Context, args []string, a *app) int {
 // goalState is a durable, bounded plan/draft/review loop. Model feedback changes
 // the next plan, never the runner's code or its round/credential limits.
 type goalState struct {
-	Goal             string          `json:"goal"`
-	Status           string          `json:"status"`
-	Stage            string          `json:"stage"`
-	Round            int             `json:"round"`
-	MaxRounds        int             `json:"max_rounds"`
-	Provider         string          `json:"provider"`
-	Model            string          `json:"model"`
-	Effort           string          `json:"effort,omitempty"`
-	ReviewerProvider string          `json:"reviewer_provider"`
-	ReviewerModel    string          `json:"reviewer_model"`
-	MaxTokens        int             `json:"max_tokens"`
-	Evaluator        string          `json:"evaluator,omitempty"`
-	EvalTimeoutSecs  int             `json:"eval_timeout_seconds,omitempty"`
-	Evaluation       *goalEvaluation `json:"evaluation,omitempty"`
-	Plan             string          `json:"plan,omitempty"`
-	Draft            string          `json:"draft,omitempty"`
-	Feedback         string          `json:"feedback,omitempty"`
-	Verdict          string          `json:"verdict,omitempty"`
-	History          []goalRound     `json:"history,omitempty"`
-	UpdatedAt        string          `json:"updated_at"`
+	Goal             string `json:"goal"`
+	Status           string `json:"status"`
+	Stage            string `json:"stage"`
+	Round            int    `json:"round"`
+	MaxRounds        int    `json:"max_rounds"`
+	Provider         string `json:"provider"`
+	Model            string `json:"model"`
+	Effort           string `json:"effort,omitempty"`
+	ReviewerProvider string `json:"reviewer_provider"`
+	ReviewerModel    string `json:"reviewer_model"`
+	ReviewerEffort   string `json:"reviewer_effort,omitempty"`
+	// Route and ReviewerRoute are the registry's decisions, frozen at init (-route,
+	// -reviewer-route); the worker climbs Route's chain one step per rejected round.
+	Route           *goalRoute      `json:"route,omitempty"`
+	ReviewerRoute   *goalRoute      `json:"reviewer_route,omitempty"`
+	MaxTokens       int             `json:"max_tokens"`
+	Evaluator       string          `json:"evaluator,omitempty"`
+	EvalTimeoutSecs int             `json:"eval_timeout_seconds,omitempty"`
+	Evaluation      *goalEvaluation `json:"evaluation,omitempty"`
+	Plan            string          `json:"plan,omitempty"`
+	Draft           string          `json:"draft,omitempty"`
+	Feedback        string          `json:"feedback,omitempty"`
+	Verdict         string          `json:"verdict,omitempty"`
+	History         []goalRound     `json:"history,omitempty"`
+	UpdatedAt       string          `json:"updated_at"`
+}
+
+// goalRoute is one routing decision: the chain is [choice, escalation...] and Step is the
+// worker's current place in it.
+type goalRoute struct {
+	Family string   `json:"family"`
+	Chain  []string `json:"chain"`
+	Basis  string   `json:"basis"`
+	Step   int      `json:"step"`
+}
+
+func newGoalRoute(r capability.Route) *goalRoute {
+	return &goalRoute{Family: r.Family, Chain: append([]string{r.Choice}, r.Escalation...), Basis: r.Basis}
+}
+
+func (g *goalRoute) current() capability.Target {
+	t, _ := capability.ParseTarget(g.Chain[g.Step])
+	return t
+}
+
+// escalateWorker moves the worker one step up its route after a rejected round (a reviewer's
+// revise or a failed evaluation): the cheap model had its try, so the next round goes to the
+// next better one. Without a route, or at the top of the chain, the worker stays.
+func escalateWorker(s *goalState) string {
+	if s.Route == nil || s.Route.Step+1 >= len(s.Route.Chain) {
+		return ""
+	}
+	s.Route.Step++
+	t := s.Route.current()
+	s.Provider, s.Model, s.Effort = t.Provider, t.Model, t.Effort
+	return t.String()
+}
+
+// nextRound starts the next round after a rejected one, or ends the loop at the limit.
+func nextRound(s *goalState) {
+	if s.Round >= s.MaxRounds {
+		s.Status, s.Stage = "needs_review", "done"
+		return
+	}
+	if to := escalateWorker(s); to != "" {
+		s.History[len(s.History)-1].EscalatedTo = to
+	}
+	s.Round++
+	s.Stage = "plan"
+	s.Evaluation = nil
 }
 
 type goalRound struct {
-	Round      int             `json:"round"`
-	Plan       string          `json:"plan"`
-	Draft      string          `json:"draft"`
-	Verdict    string          `json:"verdict"`
-	Feedback   string          `json:"feedback"`
-	Evaluation *goalEvaluation `json:"evaluation,omitempty"`
+	Round int `json:"round"`
+	// EscalatedTo is the routed worker the next round moved to after this one was rejected.
+	EscalatedTo string          `json:"escalated_to,omitempty"`
+	Plan        string          `json:"plan"`
+	Draft       string          `json:"draft"`
+	Verdict     string          `json:"verdict"`
+	Feedback    string          `json:"feedback"`
+	Evaluation  *goalEvaluation `json:"evaluation,omitempty"`
 }
 
 func goalPath(dir string) string { return filepath.Join(dir, "goal.json") }
@@ -1222,12 +1274,8 @@ func nextGoal(s *goalState, r delphi.Result) error {
 			if s.Evaluation != nil {
 				s.Status = "tool_checked"
 			}
-		} else if s.Round >= s.MaxRounds {
-			s.Status, s.Stage = "needs_review", "done"
 		} else {
-			s.Round++
-			s.Stage = "plan"
-			s.Evaluation = nil
+			nextRound(s)
 		}
 	default:
 		return fmt.Errorf("unknown goal stage %q", s.Stage)
@@ -1236,12 +1284,19 @@ func nextGoal(s *goalState, r delphi.Result) error {
 }
 
 func goalRequest(s goalState) (delphi.Request, error) {
-	provider, model := s.Provider, s.Model
+	provider, model, effort, route := s.Provider, s.Model, s.Effort, s.Route
 	if s.Stage == "review" {
-		provider, model = s.ReviewerProvider, s.ReviewerModel
+		provider, model, route = s.ReviewerProvider, s.ReviewerModel, s.ReviewerRoute
+		if s.ReviewerRoute != nil || s.Route != nil {
+			effort = s.ReviewerEffort // a routed side's effort is its own
+		}
 	}
 	id := fmt.Sprintf("goal-r%d-%s", s.Round, s.Stage)
-	d := delphi.Defaults{Provider: provider, Model: model, MaxTokens: s.MaxTokens, Effort: s.Effort}
+	d := delphi.Defaults{Provider: provider, Model: model, MaxTokens: s.MaxTokens, Effort: effort}
+	if route != nil {
+		d.Fallback = route.Chain[route.Step+1:] // a refusal climbs the rest of the chain
+		d.Meta = map[string]string{"route_family": route.Family, "route_basis": route.Basis}
+	}
 	profiles, err := delphi.LoadProfiles(defaultProfiles())
 	if err != nil {
 		return delphi.Request{}, err
@@ -1277,9 +1332,14 @@ func cmdGoal(ctx context.Context, args []string, a *app) int {
 	every := fs.Duration("every", time.Minute, "provider poll interval")
 	evaluator := fs.String("evaluator", "", "executable that grades each draft using JSON on stdin/stdout")
 	evalTimeout := fs.Duration("eval-timeout", 2*time.Minute, "time limit for each evaluator call")
+	routeF := fs.String("route", "", "worker task family: plan and draft go to the registry's model for it, climbing its chain after each rejected round")
+	reviewerRouteF := fs.String("reviewer-route", "", "reviewer task family: the review goes to the registry's model for it")
+	registry := fs.String("registry", defaultRegistry(), "registry directory ($DELPHI_REGISTRY)")
 	if !parse(fs, args[1:]) {
 		return exitUsage
 	}
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
 	if *out == "" {
 		fmt.Fprintln(a.stderr, "-out is required")
 		return exitUsage
@@ -1322,7 +1382,38 @@ func cmdGoal(ctx context.Context, args []string, a *app) int {
 		if err := os.MkdirAll(*out, 0o700); err != nil {
 			return a.fail(err)
 		}
-		rp, rm := *reviewerProvider, *reviewerModel
+		var workerRoute, reviewerRoute *goalRoute
+		for _, r := range []struct {
+			family string
+			into   **goalRoute
+			flags  []string
+		}{{*routeF, &workerRoute, []string{"provider", "model", "effort"}},
+			{*reviewerRouteF, &reviewerRoute, []string{"reviewer-provider", "reviewer-model"}}} {
+			if r.family == "" {
+				continue
+			}
+			for _, f := range r.flags {
+				if set[f] {
+					fmt.Fprintf(a.stderr, "a route chooses provider, model and effort from the registry; drop -%s\n", f)
+					return exitUsage
+				}
+			}
+			route, err := routeFamily(r.family, *registry, a.free)
+			if err != nil {
+				return a.fail(err)
+			}
+			*r.into = newGoalRoute(route)
+			fmt.Fprintf(a.stdout, "%s -> %s (%s)\n", route.Family, route.Choice, route.Basis)
+		}
+		if workerRoute != nil {
+			t := workerRoute.current()
+			*provider, *model, *effort = t.Provider, t.Model, t.Effort
+		}
+		rp, rm, re := *reviewerProvider, *reviewerModel, *effort
+		if reviewerRoute != nil {
+			t := reviewerRoute.current()
+			rp, rm, re = t.Provider, t.Model, t.Effort
+		}
 		if rp == "" {
 			rp = *provider
 		}
@@ -1332,7 +1423,7 @@ func cmdGoal(ctx context.Context, args []string, a *app) int {
 				rm = "claude-sonnet-5-5"
 			}
 		}
-		s := goalState{Goal: *goal, Status: "queued", Stage: "plan", Round: 1, MaxRounds: *rounds, Provider: *provider, Model: *model, ReviewerProvider: rp, ReviewerModel: rm, Effort: *effort, MaxTokens: *maxTokens, Evaluator: *evaluator, EvalTimeoutSecs: int(evalTimeout.Seconds())}
+		s := goalState{Goal: *goal, Status: "queued", Stage: "plan", Round: 1, MaxRounds: *rounds, Provider: *provider, Model: *model, ReviewerProvider: rp, ReviewerModel: rm, ReviewerEffort: re, Effort: *effort, MaxTokens: *maxTokens, Evaluator: *evaluator, EvalTimeoutSecs: int(evalTimeout.Seconds()), Route: workerRoute, ReviewerRoute: reviewerRoute}
 		if _, err := goalRequest(s); err != nil {
 			return a.fail(err)
 		}
@@ -1474,13 +1565,7 @@ func runGoal(ctx context.Context, dir string, every time.Duration, a *app) int {
 			} else {
 				s.Verdict, s.Feedback = "revise", result.Feedback
 				s.History = append(s.History, goalRound{Round: s.Round, Plan: s.Plan, Draft: s.Draft, Verdict: "revise", Feedback: result.Feedback, Evaluation: s.Evaluation})
-				if s.Round >= s.MaxRounds {
-					s.Status, s.Stage = "needs_review", "done"
-				} else {
-					s.Round++
-					s.Stage = "plan"
-					s.Evaluation = nil
-				}
+				nextRound(&s)
 			}
 			if err := saveGoal(dir, s); err != nil {
 				return a.fail(err)
