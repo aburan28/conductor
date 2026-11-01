@@ -455,6 +455,50 @@ delphi objective stop -out ./obj
 - Cancelling a batch request that is still out when its node's deadline passes.
 - Objectives as Conductor tasks (phase 5).
 
+## Objectives as Conductor tasks
+
+`delphi objective init -conductor [-conductor-project P]` mirrors the tree into Conductor,
+using the CLI's login or `CONDUCTOR_ENDPOINT`/`CONDUCTOR_TOKEN`.
+
+```sh
+delphi objective init -out ./obj -objective-file ./objective.md -criterion "…" -budget-usd 2 -conductor
+delphi objective sync -out ./obj      # catch Conductor up after it was unreachable
+conductor task show T-41              # the root; its children have parent_id T-41
+curl …/v1/tasks/T-41/timeline?subtree=true
+```
+
+**Tasks**
+- Every node is a task labelled `delphi-objective`, linked to its parent node's task through
+  `parent` (the API's `parent_id`).
+- Its title and acceptance criteria are the node's statement and criteria, as for any task
+  an agent files.
+- **Status.** A node's task stays `proposed` while delphi drives it, so no runner claims it.
+  When the node settles, `POST /v1/tasks/{task}/settle` moves it once, atomically, to `done`
+  (accepted), `failed` or `cancelled` (abandoned). The state machine is walked edge by edge
+  and only the final status is written.
+
+**Timeline**
+- Each decision is an event on the node's task: `objective.created`, `routed`, `delegated`,
+  `answered`, `decomposed`, `checked`, `reviewer`, `synthesized`, `granted` and `settled`.
+- `GET /v1/tasks/{task}/timeline?subtree=true` reads the whole tree's history. It passes
+  through the same per-caller visibility as the project event feed.
+- **Who may write:** only the objective's creator or a maintainer may append to it or
+  settle it, and only `objective.*` events with allowlisted payload keys.
+
+**What crosses to Conductor, and what doesn't**
+- Crosses: routes and bases, targets, answer sha256s, tokens, costs, verdicts, and outcome
+  categories.
+- Never crosses (DESIGN.md §12.4): a prompt, an answer, or a reviewer's feedback. A
+  rejection names who rejected, not what they said.
+
+**Resuming**
+- `objective.jsonl` stays the source of truth. The mirror records how far it got in
+  `conductor.json`, which holds no token.
+- An unreachable Conductor never stops the tree; the next step or `delphi objective sync`
+  catches up.
+- Tasks carry a unique per-run external ref, so a replay after a crash finds the task it
+  already filed rather than filing another.
+
 ## Free mode: nothing that costs money is called
 
 `DELPHI_FREE` makes standalone `delphi` call only models that cost nothing, for every

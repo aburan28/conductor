@@ -27,7 +27,7 @@ import (
 // vendor, a rejected answer climbs its route, and budgets bound every subtree.
 func cmdObjective(ctx context.Context, args []string, a *app) int {
 	if len(args) == 0 {
-		fmt.Fprintln(a.stderr, "usage: delphi objective init|start|run|status|stop -out DIR [flags]")
+		fmt.Fprintln(a.stderr, "usage: delphi objective init|start|run|status|stop|sync -out DIR [flags]")
 		return exitUsage
 	}
 	sub := args[0]
@@ -52,6 +52,8 @@ func cmdObjective(ctx context.Context, args []string, a *app) int {
 	deadline := fs.Duration("deadline", 0, "settle the objective within this long, or fail what is unfinished (init/start; 0 = none)")
 	batchWindow := fs.Duration("batch-window", 24*time.Hour, "how long a batch API may take; inside this much of a deadline only live providers are used")
 	asJSON := fs.Bool("json", false, "status: machine-readable output")
+	toConductor := fs.Bool("conductor", false, "mirror the tree into Conductor: a task per node, its decisions on each task's timeline (init/start)")
+	conductorProject := fs.String("conductor-project", "", "Conductor project for -conductor (default: the CLI login's project)")
 	if !parse(fs, args[1:]) {
 		return exitUsage
 	}
@@ -129,8 +131,22 @@ func cmdObjective(ctx context.Context, args []string, a *app) int {
 				crit = append(crit, strings.TrimSpace(c))
 			}
 		}
-		if _, err := objective.Create(*out, objective.InitData{Config: cfg, Statement: strings.TrimSpace(*text), Criteria: crit, BudgetUSD: *budget, DeadlineAt: deadlineAt}); err != nil {
+		l, err := objective.Create(*out, objective.InitData{Config: cfg, Statement: strings.TrimSpace(*text), Criteria: crit, BudgetUSD: *budget, DeadlineAt: deadlineAt})
+		if err != nil {
 			return a.fail(err)
+		}
+		if *toConductor {
+			if err := initMirror(*out, *conductorProject); err != nil {
+				return a.fail(err)
+			}
+			m, err := loadMirror(*out)
+			if err == nil {
+				err = m.sync(ctx, l)
+			}
+			if err != nil {
+				return a.fail(fmt.Errorf("%w (the objective is initialized; `delphi objective sync -out %s` retries)", err, *out))
+			}
+			fmt.Fprintf(a.stdout, "mirrored to Conductor as task %s\n", m.st.Tasks[l.Tree().Root].Ref)
 		}
 		if sub == "init" {
 			fmt.Fprintf(a.stdout, "initialized %s; run with `delphi objective run -out %s`\n", objective.EventsPath(*out), *out)
@@ -160,6 +176,24 @@ func cmdObjective(ctx context.Context, args []string, a *app) int {
 		if err := os.WriteFile(filepath.Join(*out, "stop.requested"), nil, 0o600); err != nil {
 			return a.fail(err)
 		}
+		return exitOK
+	case "sync":
+		l, err := objective.Load(*out)
+		if err != nil {
+			return a.fail(err)
+		}
+		m, err := loadMirror(*out)
+		if err != nil {
+			return a.fail(err)
+		}
+		if m == nil {
+			fmt.Fprintln(a.stderr, "this objective does not mirror to Conductor (init with -conductor)")
+			return exitUsage
+		}
+		if err := m.sync(ctx, l); err != nil {
+			return a.fail(err)
+		}
+		fmt.Fprintf(a.stdout, "Conductor is up to date (event %d, %d task(s))\n", m.st.Seq, len(m.st.Tasks))
 		return exitOK
 	}
 	fmt.Fprintf(a.stderr, "unknown objective command %q\n", sub)
@@ -227,6 +261,10 @@ func runObjective(ctx context.Context, dir string, every time.Duration, registry
 	reg, missing := live()
 	e := &delphi.Engine{Store: st, Providers: reg, MaxAttempts: 3, StatusOf: statusOf, Log: a.logf, Free: a.free}
 	r := &objRunner{dir: dir, st: st, reg: reg, missing: missing, registry: registry, a: a}
+	mirror, err := loadMirror(dir)
+	if err != nil {
+		return a.fail(err)
+	}
 	for {
 		l, err := objective.Load(dir)
 		if err != nil {
@@ -234,6 +272,12 @@ func runObjective(ctx context.Context, dir string, every time.Duration, registry
 		}
 		r.log = l
 		t := l.Tree()
+		if mirror != nil {
+			// Conductor being unreachable never stops the tree; the mirror catches up later.
+			if err := mirror.sync(ctx, l); err != nil {
+				a.logf("%v; continuing (`delphi objective sync` catches up)", err)
+			}
+		}
 		if root := t.Get(t.Root); root.Terminal() {
 			if err := os.WriteFile(filepath.Join(dir, "report.md"), []byte(renderReport(t)), 0o600); err != nil {
 				return a.fail(err)

@@ -406,9 +406,13 @@ func newTree() *Tree {
 
 // Log is a run's append-only event file.
 type Log struct {
-	path string
-	tree *Tree
+	path   string
+	tree   *Tree
+	events []Event
 }
+
+// Events lists every event recorded, in order.
+func (l *Log) Events() []Event { return l.events }
 
 // EventsPath is where a run directory keeps its events.
 func EventsPath(dir string) string { return filepath.Join(dir, "objective.jsonl") }
@@ -455,6 +459,7 @@ func Load(dir string) (*Log, error) {
 		if err := l.tree.Apply(e); err != nil {
 			return nil, fmt.Errorf("%s: %w", l.path, err)
 		}
+		l.events = append(l.events, e)
 	}
 	if err := sc.Err(); err != nil {
 		return nil, err
@@ -499,7 +504,11 @@ func (l *Log) Append(node, typ string, data any) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return l.tree.Apply(e)
+	if err := l.tree.Apply(e); err != nil {
+		return err
+	}
+	l.events = append(l.events, e)
+	return nil
 }
 
 // dryRun applies e to a re-fold of the file, which leaves l.tree untouched.

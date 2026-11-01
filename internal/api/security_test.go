@@ -541,6 +541,9 @@ func TestNoGETRouteLeaksAPrivateTask(t *testing.T) {
 		"/v1/tasks/{task}", "/v1/tasks/{task}/attempts", "/v1/tasks/{task}/card",
 		"/v1/tasks/{task}/decisions", "/v1/tasks/{task}/handoff", "/v1/tasks/{task}/route/explain",
 		"/v1/tasks/{task}/validation", "/v1/attempts/{attempt}/brief",
+		// An objective task's timeline (and its subtree's): it passes through the same
+		// per-caller event visibility as the project feed.
+		"/v1/tasks/{task}/timeline", "/v1/tasks/{task}/timeline?subtree=true",
 		"/v1/tokens", "/v1/peers", "/v1/security", "/v1/github/status",
 		"/v1/ready", "/metrics", "/v1/quota", "/v1/projects/{project}/quota",
 		"/v1/sso/providers", "/v1/sso/status", "/v1/sso/{provider}/start", "/v1/sso/{provider}/callback",
