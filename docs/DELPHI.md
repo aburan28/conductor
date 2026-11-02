@@ -294,6 +294,43 @@ delphi run -provider gemini -model gemini-3.8-flash -effort low -prompt "…" -o
 **Hosted:** hosted delphi can use Gemini too, with the key from the project vault under
 `GEMINI_API_KEY`. Migration `0022` admits `gemini` as a batch provider.
 
+## Fireworks batch inference
+
+`-provider fireworks-batch` runs requests as a Fireworks batch inference job
+(<https://docs.fireworks.ai/guides/batch-inference>), at half the serverless price. Plain
+`-provider fireworks` is the live OpenAI-compatible endpoint, which answers at once at the
+full price.
+
+```sh
+export FIREWORKS_API_KEY=… FIREWORKS_ACCOUNT_ID=my-account
+export DELPHI_FIREWORKS_BATCH_PRICES='{"accounts/fireworks/models/glm-5p3":[0.3,1.1]}'   # batch $/MTok; none built in
+delphi run -provider fireworks-batch -model accounts/fireworks/models/glm-5p3 -prompt "…" -out run/
+```
+
+**How a flight runs**
+- Delphi writes each model's requests to a JSONL dataset (`{"custom_id", "body": {chat
+  completion}}`), uploads it, and creates a job reading it into an output dataset.
+- When the job completes, delphi downloads every file of the output dataset through its
+  signed URLs and matches answers by `custom_id`.
+- A job serves one model, so a flight with several becomes one job per model, joined in
+  the batch id.
+- Models are named in full (`accounts/fireworks/models/…`).
+
+**Recovery:** every job and dataset id is derived from the flight's label
+(`<label>[-mN]`, `-in`, `-out`), so `Find` recovers a flight after a crash with a plain GET.
+A flight that created some of its jobs before an error waits for reconciliation.
+
+**Limits, stated plainly**
+- **Output format.** Fireworks documents a results file and an error file but not their
+  line format. Delphi reads a completion at the top level, under `response`, or under
+  `response.body`, and an `error` field as a retryable failure; a line it cannot read is
+  reported as such. The first real job should be small.
+- **No cancel.** Fireworks documents no cancel for batch jobs, so `cancel` reports
+  "not supported".
+- **Datasets stay.** The datasets stay in the account after the job; delete them in the
+  console.
+- **Hosted delphi doesn't offer it yet:** each project would need its own account id.
+
 ## OpenAI-compatible endpoints: Fireworks, DeepSeek, Together, OpenRouter, vLLM
 
 The standalone `delphi` binary also sends requests to any server that speaks OpenAI's Chat
