@@ -455,6 +455,52 @@ delphi objective stop -out ./obj
 - Cancelling a batch request that is still out when its node's deadline passes.
 - Objectives as Conductor tasks (phase 5).
 
+## Coding agents as delegates (Claude Code, Codex)
+
+A work item can be done by a coding agent instead of a single model call. Pin a family to a
+chain of agents and give the repository they work in:
+
+```sh
+delphi objective init -out ./obj -objective-file ./objective.md -criterion "…" -budget-usd 5 \
+  -repo ~/src/app -base main \
+  -pin code-edit=codex:gpt-5.5-codex@high,claude-code:claude-opus-5-5 \
+  -evaluator ./run-tests.sh
+```
+
+**Routing**
+- **Pins.** `-pin family=target,…` routes a family to a fixed chain, up to 3 targets. It is
+  the operator's decision, recorded as the route's basis, because no calibration suite
+  measures coding agents yet. A pin may also name ordinary models.
+- **Targets.** `claude-code:<model>[@effort]` runs `claude -p`; `codex:<model>[@effort]` runs
+  `codex exec`. Each runs with the operator's own login.
+  - `DELPHI_CLAUDE_CODE_COMMAND` and `DELPHI_CODEX_COMMAND` replace the binaries.
+  - `DELPHI_CLAUDE_CODE_PERMISSION` (default `acceptEdits`) is Claude Code's permission
+    mode.
+- **Where they run.** Coding agents run as local processes, so they count as live for
+  deadlines. They are never free, so free mode refuses them.
+
+**A run**
+- Each attempt gets its own git worktree and branch (`agent/objective-<node>/attempt-<n>`)
+  from `-base`, under the objective directory.
+- The agent runs there in the background, up to `-harness-timeout` (default 30m).
+- Whatever it changed is committed on that branch. Nothing is pushed or merged; the branch
+  is there for a person.
+
+**What gets checked**
+- The attempt's answer is the diff: branch, commit, changed files, then the diff itself,
+  trimmed at 256 KiB.
+- The evaluator also receives `worktree`, `branch`, `commit` and `changed`, so it can run
+  the repository's tests on the work.
+- The independent reviewer reads the diff. As always it is a different vendor: Claude
+  Code's work is reviewed by a non-Anthropic model, and Codex's by a non-OpenAI one.
+
+**Failure and escalation**
+- An agent that exits non-zero, times out or changes nothing fails the attempt, and the
+  next target in the chain takes over in a fresh worktree.
+- A run whose runner stopped is reported as interrupted, not resumed.
+- With `-conductor`, the mirror records the branch, commit and changed paths on the task's
+  timeline, never the diff.
+
 ## Objectives as Conductor tasks
 
 `delphi objective init -conductor [-conductor-project P]` mirrors the tree into Conductor,
