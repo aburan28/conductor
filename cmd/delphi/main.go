@@ -38,6 +38,7 @@ import (
 	"github.com/aburan28/conductor/internal/delphi"
 	"github.com/aburan28/conductor/internal/delphi/anthropic"
 	"github.com/aburan28/conductor/internal/delphi/compat"
+	"github.com/aburan28/conductor/internal/delphi/fireworks"
 	"github.com/aburan28/conductor/internal/delphi/gemini"
 	"github.com/aburan28/conductor/internal/delphi/openai"
 )
@@ -189,7 +190,8 @@ func freePolicy(profiles delphi.Profiles) (*delphi.FreePolicy, error) {
 
 // offline can validate requests for every provider without credentials.
 func offline() delphi.Registry {
-	reg := delphi.Registry{"anthropic": anthropic.Offline(), "openai": openai.Offline(), "gemini": gemini.Offline()}
+	reg := delphi.Registry{"anthropic": anthropic.Offline(), "openai": openai.Offline(), "gemini": gemini.Offline(),
+		fireworks.Name: fireworks.Offline()}
 	for name, e := range endpoints() {
 		reg[name] = compat.Offline(e)
 	}
@@ -214,6 +216,11 @@ func live() (delphi.Registry, map[string]error) {
 	} else {
 		missing["gemini"] = err
 	}
+	if p, err := fireworks.New(); err == nil {
+		reg[fireworks.Name] = p
+	} else {
+		missing[fireworks.Name] = err
+	}
 	for name, e := range endpoints() {
 		if p, err := compat.New(e, filepath.Join(defaultHome(), "compat")); err == nil {
 			reg[name] = p
@@ -233,6 +240,9 @@ func statusOf(err error) int {
 	if errors.As(err, &oe) {
 		return oe.StatusCode
 	}
+	if s := fireworks.StatusOf(err); s != 0 {
+		return s
+	}
 	return gemini.StatusOf(err)
 }
 
@@ -241,6 +251,9 @@ func describe(err error) string {
 		return s
 	}
 	if s, ok := gemini.Describe(err); ok {
+		return s
+	}
+	if s, ok := fireworks.Describe(err); ok {
 		return s
 	}
 	if s, ok := openai.Describe(err); ok {
