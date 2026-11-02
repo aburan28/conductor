@@ -6,7 +6,7 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.84.0
 	github.com/huin/goupnp v1.3.0
 	github.com/jackc/pgx/v5 v5.11.0
-	github.com/openai/openai-go/v3 v3.86.0
+	github.com/openai/openai-go/v3 v3.90.0
 	github.com/redis/go-redis/v9 v9.23.0
 	golang.org/x/text v0.43.0
 	gopkg.in/yaml.v3 v3.0.1
