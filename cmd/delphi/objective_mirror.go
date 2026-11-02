@@ -159,6 +159,9 @@ func (m *objMirror) apply(ctx context.Context, t *objective.Tree, e objective.Ev
 		if d.Outcome != "" {
 			p["outcome"] = category(d.Outcome)
 		}
+		if d.Branch != "" { // a coding agent's work: where it is, never what it says
+			p["branch"], p["commit_sha"], p["changed_paths"] = d.Branch, d.Commit, d.Changed
+		}
 		return ev("objective.answered", p)
 	case objective.EvDecomposed:
 		var refs []string

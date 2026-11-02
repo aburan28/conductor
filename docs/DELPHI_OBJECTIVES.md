@@ -47,7 +47,7 @@ node that cannot be decomposed into checkable children is sent back up, not gues
 | Batch call (Anthropic Message Batches, OpenAI Batch/Responses) | single-turn reasoning at half price | yes, Delphi |
 | Live call (any OpenAI-compatible endpoint: Fireworks, DeepSeek, Together, OpenRouter, vLLM GLM/Qwen) | open models, providers without batch | **yes** (standalone `delphi`; control plane through the live worker) |
 | Task card (`tools/task_card.py lane`) | run exact commands, no model judgment | yes, research repositories |
-| Agent harness (Codex, Claude Code through Conductor's harness) | edit a repository, multi-turn tool use | yes in Conductor, not reachable from Delphi |
+| Agent harness (Codex, Claude Code through Conductor's harness) | edit a repository, multi-turn tool use | **yes** (`claude-code:` and `codex:` targets on objective work items, in worktrees) |
 
 ## 3. Task families and the capability registry
 
@@ -129,8 +129,9 @@ parent for a decision instead of spending.
    synthesis, deadlines with live-only routing inside the batch window, and budget grants
    from the nearest ancestor with unallocated budget.
 5. **Control plane** (in progress; built: the live worker for OpenAI-compatible endpoints,
-   with prompts and answers held in memory only, and objectives mirrored as Conductor tasks
-   with timelines via `delphi objective -conductor`): objectives as Conductor tasks with timelines; compatible endpoints on the
+   with prompts and answers held in memory only; objectives mirrored as Conductor tasks
+   with timelines via `delphi objective -conductor`; and Claude Code and Codex as delegates
+   for work items via `-pin` and `-repo`): objectives as Conductor tasks with timelines; compatible endpoints on the
    control plane through an asynchronous worker (a live call must not hold an API request
    open); Codex and Claude Code harness delegates for `code-edit`.
 6. **More providers**: Fireworks batch, Gemini.

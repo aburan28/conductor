@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -52,6 +53,11 @@ func cmdObjective(ctx context.Context, args []string, a *app) int {
 	deadline := fs.Duration("deadline", 0, "settle the objective within this long, or fail what is unfinished (init/start; 0 = none)")
 	batchWindow := fs.Duration("batch-window", 24*time.Hour, "how long a batch API may take; inside this much of a deadline only live providers are used")
 	asJSON := fs.Bool("json", false, "status: machine-readable output")
+	repo := fs.String("repo", "", "repository the coding-agent delegates (claude-code, codex) work in, one worktree and branch per attempt (init/start)")
+	baseRef := fs.String("base", "main", "branch or commit the delegates' worktrees start from (init/start)")
+	var pins multiFlag
+	fs.Var(&pins, "pin", "family=target[,target...]: route a family to a fixed chain, e.g. code-edit=codex:gpt-5.5-codex@high,claude-code:claude-opus-5-5 (repeatable; init/start)")
+	harnessTimeout := fs.Duration("harness-timeout", 30*time.Minute, "time limit for each coding-agent run")
 	toConductor := fs.Bool("conductor", false, "mirror the tree into Conductor: a task per node, its decisions on each task's timeline (init/start)")
 	conductorProject := fs.String("conductor-project", "", "Conductor project for -conductor (default: the CLI login's project)")
 	if !parse(fs, args[1:]) {
@@ -117,10 +123,38 @@ func cmdObjective(ctx context.Context, args []string, a *app) int {
 		if err != nil {
 			return a.fail(err)
 		}
+		pinned, err := parsePins(pins, a.free != nil)
+		if err != nil {
+			fmt.Fprintln(a.stderr, err)
+			return exitUsage
+		}
+		for f, chain := range pinned {
+			if !slices.Contains(families, f) {
+				families = append(families, f)
+			}
+			for _, tg := range chain {
+				if t, _ := capability.ParseTarget(tg); isHarness(t.Provider) && *repo == "" {
+					fmt.Fprintf(a.stderr, "-pin %s names the coding agent %s; give the repository it works in with -repo\n", f, t.Provider)
+					return exitUsage
+				}
+			}
+		}
+		sort.Strings(families)
+		if *repo != "" {
+			abs, err := filepath.Abs(*repo)
+			if err != nil {
+				return a.fail(err)
+			}
+			if out, err := exec.Command("git", "-C", abs, "rev-parse", "--verify", *baseRef+"^{commit}").CombinedOutput(); err != nil {
+				return a.fail(fmt.Errorf("-repo %s -base %s: %s", abs, *baseRef, strings.TrimSpace(string(out))))
+			}
+			*repo = abs
+		}
 		cfg := objective.Config{Limits: objective.Limits{MaxDepth: *maxDepth, MaxFanout: *maxFanout, MaxAttempts: *maxAttempts},
 			PlanFamily: *planFamily, ReviewFamily: *reviewFamily, Families: families,
 			Evaluator: *evaluator, EvalTimeoutSecs: int(evalTimeout.Seconds()), MaxTokens: *maxTokens,
-			BatchWindowSecs: int(batchWindow.Seconds())}
+			BatchWindowSecs: int(batchWindow.Seconds()), Repo: *repo, BaseRef: *baseRef, Pins: pinned,
+			HarnessTimeoutSecs: int(harnessTimeout.Seconds())}
 		deadlineAt := ""
 		if *deadline > 0 {
 			deadlineAt = time.Now().Add(*deadline).UTC().Format(time.RFC3339)
@@ -345,7 +379,7 @@ func (r *objRunner) tooSlow(n *objective.Node, now time.Time) func(capability.Ta
 		if left >= r.window() {
 			return ""
 		}
-		if p, ok := r.reg[t.Provider]; ok && delphi.IsLive(p) {
+		if p, ok := r.reg[t.Provider]; (ok && delphi.IsLive(p)) || isHarness(t.Provider) {
 			return ""
 		}
 		return fmt.Sprintf("a batch API may take up to %s and the deadline is %s away", r.window(), left.Round(time.Minute))
@@ -465,12 +499,18 @@ func (r *objRunner) delegate(n *objective.Node) error {
 		if n.Kind == objective.KindObjective {
 			family = cfg.PlanFamily
 		}
-		route, err := routeFamily(family, r.registry, r.a.free, r.tooSlow(n, now))
-		if err != nil {
-			return r.log.Append(n.ID, objective.EvFailed, objective.ReasonData{Reason: "no model for family " + family + ": " + err.Error()})
+		var chain []string
+		basis := ""
+		if pin, ok := cfg.Pins[family]; ok {
+			chain, basis = pin, "pinned by the operator (-pin "+family+")"
+		} else {
+			route, err := routeFamily(family, r.registry, r.a.free, r.tooSlow(n, now))
+			if err != nil {
+				return r.log.Append(n.ID, objective.EvFailed, objective.ReasonData{Reason: "no model for family " + family + ": " + err.Error()})
+			}
+			chain, basis = append([]string{route.Choice}, route.Escalation...), route.Basis
 		}
-		chain := append([]string{route.Choice}, route.Escalation...)
-		if err := r.log.Append(n.ID, objective.EvRouted, objective.RoutedData{Chain: chain, Basis: route.Basis}); err != nil {
+		if err := r.log.Append(n.ID, objective.EvRouted, objective.RoutedData{Chain: chain, Basis: basis}); err != nil {
 			return err
 		}
 	}
@@ -517,6 +557,16 @@ func (r *objRunner) delegate(n *objective.Node) error {
 		stage = "plan"
 	}
 	att := objective.Attempt{Target: n.Route[next], ChainIndex: next, RequestID: fmt.Sprintf("%s-%s-a%d", objective.Key(n.ID), stage, i)}
+	if tg, _ := capability.ParseTarget(att.Target); isHarness(tg.Provider) {
+		if n.Kind != objective.KindWork || cfg.Repo == "" {
+			return r.log.Append(n.ID, objective.EvFailed, objective.ReasonData{Reason: "a coding agent (" + tg.Provider + ") does work items in a repository; the objective has no -repo"})
+		}
+		if err := r.log.Append(n.ID, objective.EvDelegated, att); err != nil {
+			return err
+		}
+		r.startHarness(n, att, r.harnessPrompt(n))
+		return nil
+	}
 	req, err := r.request(att.RequestID, att.Target, r.prompt(n, stage), n)
 	if err != nil {
 		return err
@@ -555,6 +605,9 @@ func (r *objRunner) collect(n *objective.Node) (bool, error) {
 			return true, r.expire(n)
 		}
 		return false, nil // waiting on children, or already recorded
+	}
+	if tg, _ := capability.ParseTarget(a.Target); isHarness(tg.Provider) {
+		return r.collectHarness(n, a)
 	}
 	res, found, err := r.st.Result(a.RequestID)
 	if err != nil {
@@ -632,7 +685,9 @@ func (r *objRunner) check(ctx context.Context, n *objective.Node) (bool, error) 
 	}
 	if cfg.Evaluator != "" && !done["evaluator"] {
 		input, _ := json.Marshal(map[string]any{"objective": r.log.Tree().Get(r.log.Tree().Root).Statement,
-			"node": n.ID, "kind": n.Kind, "statement": n.Statement, "criteria": n.Criteria, "answer": n.Answer})
+			"node": n.ID, "kind": n.Kind, "statement": n.Statement, "criteria": n.Criteria, "answer": n.Answer,
+			// A coding agent's work, for an evaluator that runs the repository's tests on it.
+			"worktree": n.Current().Worktree, "branch": n.Current().Branch, "commit": n.Current().Commit, "changed": n.Current().Changed})
 		passed, feedback, _, err := runJSONEvaluator(ctx, r.dir, cfg.Evaluator, cfg.EvalTimeoutSecs, input)
 		if err != nil {
 			return false, fmt.Errorf("evaluator on %s: %w", n.ID, err)
@@ -870,4 +925,32 @@ func renderReport(t *objective.Tree) string {
 	}
 	b.WriteString("\nEvery decision, request and check is in objective.jsonl; answers are in the request store.\n")
 	return b.String()
+}
+
+// parsePins reads -pin family=target,target. A pinned chain is the operator's decision, not
+// a measurement; in free mode it may not name a coding agent, which is never free.
+func parsePins(pins []string, free bool) (map[string][]string, error) {
+	out := map[string][]string{}
+	for _, p := range pins {
+		family, list, ok := strings.Cut(p, "=")
+		if !ok || family == "" || list == "" {
+			return nil, fmt.Errorf("-pin %q: want family=target[,target...]", p)
+		}
+		var chain []string
+		for _, tg := range strings.Split(list, ",") {
+			t, err := capability.ParseTarget(strings.TrimSpace(tg))
+			if err != nil {
+				return nil, fmt.Errorf("-pin %s: %w", family, err)
+			}
+			if free && isHarness(t.Provider) {
+				return nil, fmt.Errorf("-pin %s: free mode cannot use the coding agent %s", family, t.Provider)
+			}
+			chain = append(chain, t.String())
+		}
+		if len(chain) > 3 {
+			return nil, fmt.Errorf("-pin %s: at most 3 targets (a choice and two escalations)", family)
+		}
+		out[family] = chain
+	}
+	return out, nil
 }

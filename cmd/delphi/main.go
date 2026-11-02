@@ -331,6 +331,12 @@ func routeFamily(family, registry string, free *delphi.FreePolicy, reject ...fun
 		if err != nil {
 			return false, err.Error()
 		}
+		if isHarness(t.Provider) {
+			if free != nil {
+				return false, "free mode: a coding agent (" + t.Provider + ") is not free"
+			}
+			return true, ""
+		}
 		if _, ok := known[t.Provider]; !ok {
 			return false, "delphi has no provider " + t.Provider
 		}

@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -412,5 +414,119 @@ func TestObjectivePastItsDeadlineFailsWithoutSpending(t *testing.T) {
 	}
 	if n.State != objective.Failed || !strings.Contains(n.Reason, "deadline") || len(n.Attempts) != 0 {
 		t.Fatalf("root: %s %q %d attempts", n.State, n.Reason, len(n.Attempts))
+	}
+}
+
+// ---- phase 5: coding-agent delegates ----------------------------------------
+
+func gitRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, args := range [][]string{{"init", "-q", "-b", "main"}, {"config", "user.email", "t@example.com"},
+		{"config", "user.name", "t"}, {"commit", "-q", "--allow-empty", "-m", "base"}} {
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+	}
+	return dir
+}
+
+func script(t *testing.T, name, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestObjectiveSendsCodeEditToCodingAgentsInWorktreesAndEscalatesBetweenThem(t *testing.T) {
+	fa, fo := servers(t)
+	var reviewed []string
+	fo.mu.Lock()
+	fo.outcome = func(id string, body map[string]any) (string, string) {
+		reviewed = append(reviewed, fmt.Sprint(body))
+		return oaOK(id, `{"verdict":"accept","feedback":"ok"}`, "completed"), ""
+	}
+	fo.mu.Unlock()
+	objectiveRegistry(t)
+	repo := gitRepo(t)
+	// Codex fails; Claude Code, the next in the pinned chain, makes the change.
+	t.Setenv("DELPHI_CODEX_COMMAND", script(t, "codex", "cat >/dev/null\nexit 3\n"))
+	t.Setenv("DELPHI_CLAUDE_CODE_COMMAND", script(t, "claude", "cat >/dev/null\necho 'func Fixed() {}' > fixed.go\n"))
+	evaluator := script(t, "eval", `input=$(cat)
+case "$input" in
+  *'"kind":"objective"'*) echo '{"passed": true, "feedback": ""}' ;;
+  *'"branch":"agent/'*'"changed":["fixed.go"]'*) echo '{"passed": true, "feedback": ""}' ;;
+  *) echo '{"passed": false, "feedback": "no branch with fixed.go"}' ;;
+esac
+`)
+	fa.mu.Lock()
+	fa.outcome = func(id string) string {
+		switch id {
+		case "n0-plan-a0":
+			return claudeMsg(`{"decomposable": true, "children": [{"kind": "work", "statement": "Add Fixed()", "criteria": ["fixed.go defines Fixed"], "family": "code-edit", "budget_usd": 0.5}]}`, "end_turn", "")
+		}
+		return claudeMsg(`{"verdict":"accept","feedback":"ok"}`, "end_turn", "")
+	}
+	fa.mu.Unlock()
+
+	out := filepath.Join(t.TempDir(), "obj")
+	code, _, se := cli(t, "", "objective", "init", "-out", out, "-objective", "Add Fixed", "-criterion", "done", "-budget-usd", "1",
+		"-repo", repo, "-pin", "code-edit=codex:gpt-5.5-codex@high,claude-code:claude-opus-5-5", "-evaluator", evaluator)
+	if code != 0 {
+		t.Fatalf("init: %d %s", code, se)
+	}
+	if code, so, se := cli(t, "", "objective", "run", "-out", out, "-every", "10ms"); code != 0 {
+		_, st, _ := cli(t, "", "objective", "status", "-out", out)
+		t.Fatalf("run: %d\n%s\n%s\n%s", code, so, se, st)
+	}
+	l, _ := objective.Load(out)
+	n := l.Tree().Get("n0.1")
+	if n.State != objective.Accepted || len(n.Attempts) != 2 || !strings.Contains(n.Basis, "pinned") {
+		t.Fatalf("n0.1: %s %q basis %q attempts %+v", n.State, n.Reason, n.Basis, n.Attempts)
+	}
+	if !strings.Contains(n.Attempts[0].Outcome, "coding agent failed") || n.Attempts[0].Target != "codex:gpt-5.5-codex@high" {
+		t.Errorf("codex attempt: %+v", n.Attempts[0])
+	}
+	a := n.Attempts[1]
+	if a.Target != "claude-code:claude-opus-5-5" || a.Commit == "" || !strings.HasPrefix(a.Branch, "agent/") || len(a.Changed) != 1 {
+		t.Fatalf("claude-code attempt: %+v", a)
+	}
+	// The work is committed on its own branch in the repository; main is untouched.
+	if out, err := exec.Command("git", "-C", repo, "show", a.Branch+":fixed.go").CombinedOutput(); err != nil || !strings.Contains(string(out), "Fixed") {
+		t.Errorf("branch %s: %v %s", a.Branch, err, out)
+	}
+	if _, err := exec.Command("git", "-C", repo, "show", "main:fixed.go").CombinedOutput(); err == nil {
+		t.Error("main was changed")
+	}
+	// Claude Code's work was reviewed by a non-Anthropic model, which saw the diff.
+	if !strings.Contains(n.Answer, "+func Fixed() {}") || a.Reviewer != "openai:gpt-test" {
+		t.Errorf("answer %q reviewer %q", n.Answer, a.Reviewer)
+	}
+	fo.mu.Lock()
+	sawDiff := false
+	for _, r := range reviewed {
+		sawDiff = sawDiff || strings.Contains(r, "func Fixed()")
+	}
+	fo.mu.Unlock()
+	if !sawDiff {
+		t.Error("the reviewer was not shown the diff")
+	}
+}
+
+func TestPinsNamingACodingAgentNeedARepository(t *testing.T) {
+	servers(t)
+	objectiveRegistry(t)
+	code, _, se := cli(t, "", "objective", "init", "-out", filepath.Join(t.TempDir(), "o"), "-objective", "x", "-criterion", "c",
+		"-budget-usd", "1", "-pin", "code-edit=codex:gpt-5.5-codex")
+	if code != exitUsage || !strings.Contains(se, "-repo") {
+		t.Fatalf("exit %d: %s", code, se)
+	}
+	t.Setenv("DELPHI_FREE", "local")
+	code, _, se = cli(t, "", "objective", "init", "-out", filepath.Join(t.TempDir(), "p"), "-objective", "x", "-criterion", "c",
+		"-budget-usd", "1", "-repo", gitRepo(t), "-pin", "code-edit=codex:gpt-5.5-codex")
+	if code == 0 || !strings.Contains(se, "free mode") {
+		t.Fatalf("free mode: exit %d: %s", code, se)
 	}
 }

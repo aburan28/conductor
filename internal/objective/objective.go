@@ -67,6 +67,14 @@ type Config struct {
 	// BatchWindowSecs is how long a batch API may take. Inside that window of a node's
 	// deadline, its calls go only to live providers.
 	BatchWindowSecs int `json:"batch_window_seconds,omitempty"`
+	// Repo and BaseRef are the repository coding-agent delegates (claude-code, codex) work
+	// in: each attempt gets its own worktree and branch from BaseRef.
+	Repo    string `json:"repo,omitempty"`
+	BaseRef string `json:"base_ref,omitempty"`
+	// Pins route a family to a fixed chain of targets instead of the registry, for
+	// delegates no calibration suite measures yet (a coding agent on code-edit).
+	Pins               map[string][]string `json:"pins,omitempty"`
+	HarnessTimeoutSecs int                 `json:"harness_timeout_seconds,omitempty"`
 }
 
 // Attempt is one model asked to answer a node (or, for an objective, to decompose it).
@@ -85,6 +93,11 @@ type Attempt struct {
 	// ChainIndex is Target's place in the node's route; an attempt may skip a batch model
 	// when the deadline is too near for it.
 	ChainIndex int `json:"chain_index"`
+	// A coding-agent attempt's work: its worktree, branch, commit and changed paths.
+	Worktree string   `json:"worktree,omitempty"`
+	Branch   string   `json:"branch,omitempty"`
+	Commit   string   `json:"commit,omitempty"`
+	Changed  []string `json:"changed,omitempty"`
 }
 
 // Check is one verdict on an answer.
@@ -207,6 +220,11 @@ type AnsweredData struct {
 	// Outcome is set when the answer itself ends the attempt (a refusal, an error, an
 	// invalid decomposition) without a check.
 	Outcome string `json:"outcome,omitempty"`
+	// Set for a coding-agent attempt.
+	Worktree string   `json:"worktree,omitempty"`
+	Branch   string   `json:"branch,omitempty"`
+	Commit   string   `json:"commit,omitempty"`
+	Changed  []string `json:"changed,omitempty"`
 }
 
 type DecomposedData struct {
@@ -282,6 +300,7 @@ func (t *Tree) Apply(e Event) error {
 			return fmt.Errorf("event %d answers %s, which %s is not waiting for", e.Seq, d.RequestID, n.ID)
 		}
 		a.Status, a.AnswerSHA, a.CostUSD, a.Tokens, a.Priced, a.Outcome = d.Status, d.AnswerSHA, d.CostUSD, d.Tokens, d.Priced, d.Outcome
+		a.Worktree, a.Branch, a.Commit, a.Changed = d.Worktree, d.Branch, d.Commit, d.Changed
 		t.spend(n, d)
 		if d.Answer != "" {
 			n.Answer = d.Answer
