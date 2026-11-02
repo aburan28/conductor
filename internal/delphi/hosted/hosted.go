@@ -30,6 +30,7 @@ import (
 	"github.com/aburan28/conductor/internal/db"
 	"github.com/aburan28/conductor/internal/delphi"
 	"github.com/aburan28/conductor/internal/delphi/anthropic"
+	"github.com/aburan28/conductor/internal/delphi/gemini"
 	"github.com/aburan28/conductor/internal/delphi/openai"
 	"github.com/aburan28/conductor/internal/domain"
 )
@@ -46,7 +47,7 @@ type ProviderFactory func(kind, key string) (delphi.Provider, error)
 
 // DefaultSecret is the vault secret a provider's key is read from when the project has no
 // inference endpoint of that kind naming another one.
-var DefaultSecret = map[string]string{"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
+var DefaultSecret = map[string]string{"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY", "gemini": "GEMINI_API_KEY"}
 
 // Service is conductord's delphi.
 type Service struct {
@@ -84,13 +85,15 @@ func DefaultProvider(kind, key string) (delphi.Provider, error) {
 		return anthropic.NewWithKey(key), nil
 	case "openai":
 		return openai.NewWithKey(key), nil
+	case "gemini":
+		return gemini.NewWithKey(key), nil
 	}
 	return nil, fmt.Errorf("%w: unknown provider %q", domain.ErrInvalidArgument, kind)
 }
 
 // Offline validates requests without credentials.
 func Offline() delphi.Registry {
-	return delphi.Registry{"anthropic": anthropic.Offline(), "openai": openai.Offline()}
+	return delphi.Registry{"anthropic": anthropic.Offline(), "openai": openai.Offline(), "gemini": gemini.Offline()}
 }
 
 // provider opens the project's key for kind and builds a provider. The secret is the one an
@@ -377,6 +380,9 @@ func describe(err error) string {
 	if s, ok := openai.Describe(err); ok {
 		return s
 	}
+	if s, ok := gemini.Describe(err); ok {
+		return s
+	}
 	return err.Error()
 }
 
@@ -389,7 +395,7 @@ func statusOf(err error) int {
 	if errors.As(err, &oe) {
 		return oe.StatusCode
 	}
-	return 0
+	return gemini.StatusOf(err)
 }
 
 // definitelyNotCreated reports whether a failed submit cannot have created a batch: the

@@ -110,7 +110,7 @@ parent for a decision instead of spending.
 | DeepSeek | OpenAI-compatible | live | **phase 1** |
 | GLM, Qwen on vLLM / LM Studio | OpenAI-compatible | live | **phase 1** |
 | Fireworks batch | native batch | yes | phase 6 |
-| Google Gemini | native | yes | phase 6 |
+| Google Gemini | native Batch Mode | yes | **built** (`internal/delphi/gemini`) |
 
 ## 6. Phases
 
@@ -134,7 +134,7 @@ parent for a decision instead of spending.
    for work items via `-pin` and `-repo`): objectives as Conductor tasks with timelines; compatible endpoints on the
    control plane through an asynchronous worker (a live call must not hold an API request
    open); Codex and Claude Code harness delegates for `code-edit`.
-6. **More providers**: Fireworks batch, Gemini.
+6. **More providers**: Gemini Batch Mode (built: `internal/delphi/gemini`, standalone and hosted); Fireworks batch.
 
 ## Open questions
 

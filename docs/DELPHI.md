@@ -254,6 +254,46 @@ The API lives under `/v1/projects/{project}/delphi`:
 
 Observers can read metadata. Contributors can submit, read answers and cancel.
 
+## Gemini Batch Mode
+
+`-provider gemini` sends requests to Google's Gemini API Batch Mode
+(<https://ai.google.dev/api/batch-mode>), at half the interactive price. Results are kept
+for six weeks, and a batch not finished within 48 hours expires.
+
+```sh
+export GEMINI_API_KEY=…                                   # or GOOGLE_API_KEY
+export DELPHI_GEMINI_PRICES='{"gemini-3.8-flash":[0.15,1.25]}'   # batch $/MTok in, out; none built in
+delphi run -provider gemini -model gemini-3.8-flash -effort low -prompt "…" -out run/
+```
+
+**Submitting**
+- Requests go inline to `models/{model}:batchGenerateContent`. The documented inline limit
+  is 20 MB; delphi stays under 18 MB.
+- A Gemini batch serves one model, so a flight with several models becomes one batch per
+  model, joined in the batch id (`batches/a|batches/b`). Each batch is named after the
+  flight's label (`label#n`), so a crash between creating them and recording them is
+  recovered with `Find`.
+- A flight that created some of its batches before an error waits for reconciliation; it
+  is never resubmitted wholesale.
+
+**Mapping**
+- `system` becomes `systemInstruction`, and `assistant` turns become `model`.
+- `effort` becomes `thinkingConfig.thinkingLevel` (minimal, low, medium or high).
+- `max_tokens` becomes `maxOutputTokens`. Other `params` go into `generationConfig`, except
+  `tools`, `toolConfig`, `safetySettings` and `cachedContent`, which stay at the request's
+  top level.
+
+**Results**
+- Answers are matched to requests by the `metadata.key` each request carries. Thinking
+  parts are dropped from the text, and thinking tokens count as output.
+- A `SAFETY`, `RECITATION` or `PROHIBITED_CONTENT` stop with no text, or a blocked prompt,
+  is a refusal, so `--fallback` applies.
+- `MAX_TOKENS` marks the answer truncated.
+- Status codes 4, 8, 13 and 14 are retryable.
+
+**Hosted:** hosted delphi can use Gemini too, with the key from the project vault under
+`GEMINI_API_KEY`. Migration `0022` admits `gemini` as a batch provider.
+
 ## OpenAI-compatible endpoints: Fireworks, DeepSeek, Together, OpenRouter, vLLM
 
 The standalone `delphi` binary also sends requests to any server that speaks OpenAI's Chat
