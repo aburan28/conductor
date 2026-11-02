@@ -38,6 +38,7 @@ import (
 	"github.com/aburan28/conductor/internal/delphi"
 	"github.com/aburan28/conductor/internal/delphi/anthropic"
 	"github.com/aburan28/conductor/internal/delphi/compat"
+	"github.com/aburan28/conductor/internal/delphi/gemini"
 	"github.com/aburan28/conductor/internal/delphi/openai"
 )
 
@@ -188,7 +189,7 @@ func freePolicy(profiles delphi.Profiles) (*delphi.FreePolicy, error) {
 
 // offline can validate requests for every provider without credentials.
 func offline() delphi.Registry {
-	reg := delphi.Registry{"anthropic": anthropic.Offline(), "openai": openai.Offline()}
+	reg := delphi.Registry{"anthropic": anthropic.Offline(), "openai": openai.Offline(), "gemini": gemini.Offline()}
 	for name, e := range endpoints() {
 		reg[name] = compat.Offline(e)
 	}
@@ -207,6 +208,11 @@ func live() (delphi.Registry, map[string]error) {
 		reg["openai"] = p
 	} else {
 		missing["openai"] = err
+	}
+	if p, err := gemini.New(); err == nil {
+		reg["gemini"] = p
+	} else {
+		missing["gemini"] = err
 	}
 	for name, e := range endpoints() {
 		if p, err := compat.New(e, filepath.Join(defaultHome(), "compat")); err == nil {
@@ -227,11 +233,14 @@ func statusOf(err error) int {
 	if errors.As(err, &oe) {
 		return oe.StatusCode
 	}
-	return 0
+	return gemini.StatusOf(err)
 }
 
 func describe(err error) string {
 	if s, ok := anthropic.Describe(err); ok {
+		return s
+	}
+	if s, ok := gemini.Describe(err); ok {
 		return s
 	}
 	if s, ok := openai.Describe(err); ok {
