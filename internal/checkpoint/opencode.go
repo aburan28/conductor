@@ -73,13 +73,20 @@ func LocateOpenCode(ctx context.Context, cwd, sessionID string, since time.Time)
 // ParseOpenCode builds the neutral conversation from an export.
 func ParseOpenCode(data []byte) *Conversation {
 	c := &Conversation{Harness: "opencode"}
+	// OpenCode has shipped two export shapes. v1 nests a message's role under info and its
+	// blocks under parts; v2 keeps user messages flat (text) and assistant messages as a
+	// content list. Both are accepted here so a checkpoint made before or after the change
+	// still yields a conversation.
 	var doc struct {
 		Info struct {
 			ID        string `json:"id"`
 			Title     string `json:"title"`
 			Directory string `json:"directory"`
 			Version   string `json:"version"`
-			Time      struct {
+			Location  struct {
+				Directory string `json:"directory"`
+			} `json:"location"`
+			Time struct {
 				Created int64 `json:"created"`
 				Updated int64 `json:"updated"`
 			} `json:"time"`
@@ -101,12 +108,32 @@ func ParseOpenCode(data []byte) *Conversation {
 					Title  string         `json:"title"`
 				} `json:"state"`
 			} `json:"parts"`
+			ID   string `json:"id"`
+			Type string `json:"type"`
+			Text string `json:"text"`
+			Time struct {
+				Created int64 `json:"created"`
+			} `json:"time"`
+			Content []struct {
+				Type  string `json:"type"`
+				Text  string `json:"text"`
+				Name  string `json:"name"`
+				State struct {
+					Status string         `json:"status"`
+					Input  map[string]any `json:"input"`
+					Title  string         `json:"title"`
+				} `json:"state"`
+			} `json:"content"`
 		} `json:"messages"`
 	}
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return c
 	}
-	c.SessionID, c.Title, c.Cwd, c.Version = doc.Info.ID, doc.Info.Title, doc.Info.Directory, doc.Info.Version
+	c.SessionID, c.Title, c.Version = doc.Info.ID, doc.Info.Title, doc.Info.Version
+	c.Cwd = doc.Info.Directory
+	if c.Cwd == "" {
+		c.Cwd = doc.Info.Location.Directory
+	}
 	if doc.Info.Time.Created > 0 {
 		c.Started = time.UnixMilli(doc.Info.Time.Created).UTC()
 	}
@@ -115,20 +142,46 @@ func ParseOpenCode(data []byte) *Conversation {
 	}
 	c.Records = len(doc.Messages)
 	for _, m := range doc.Messages {
-		t := Turn{Role: m.Info.Role}
-		if m.Info.Time.Created > 0 {
-			t.At = time.UnixMilli(m.Info.Time.Created).UTC()
-		}
-		for _, p := range m.Parts {
-			switch p.Type {
-			case "text":
-				t.Text = joinText(t.Text, p.Text)
-			case "tool":
-				summary, path := ToolSummary(p.Tool, p.State.Input)
-				if summary == "" {
-					summary = p.State.Title
+		t := Turn{}
+		switch {
+		case m.Info.Role != "" || len(m.Parts) > 0:
+			// v1
+			t.Role = m.Info.Role
+			if m.Info.Time.Created > 0 {
+				t.At = time.UnixMilli(m.Info.Time.Created).UTC()
+			}
+			for _, p := range m.Parts {
+				switch p.Type {
+				case "text":
+					t.Text = joinText(t.Text, p.Text)
+				case "tool":
+					summary, path := ToolSummary(p.Tool, p.State.Input)
+					if summary == "" {
+						summary = p.State.Title
+					}
+					t.Tools = append(t.Tools, ToolCall{Name: p.Tool, Summary: summary, Path: path, Error: p.State.Status == "error"})
 				}
-				t.Tools = append(t.Tools, ToolCall{Name: p.Tool, Summary: summary, Path: path, Error: p.State.Status == "error"})
+			}
+		default:
+			// v2
+			t.Role = m.Type
+			if m.Time.Created > 0 {
+				t.At = time.UnixMilli(m.Time.Created).UTC()
+			}
+			if t.Role == "user" {
+				t.Text = m.Text
+			}
+			for _, p := range m.Content {
+				switch p.Type {
+				case "text":
+					t.Text = joinText(t.Text, p.Text)
+				case "tool":
+					summary, path := ToolSummary(p.Name, p.State.Input)
+					if summary == "" {
+						summary = p.State.Title
+					}
+					t.Tools = append(t.Tools, ToolCall{Name: p.Name, Summary: summary, Path: path, Error: p.State.Status == "error"})
+				}
 			}
 		}
 		if t.Role == "user" && isInjectedContext(strings.TrimSpace(t.Text)) {
@@ -163,8 +216,11 @@ func InstallOpenCode(ctx context.Context, b *Bundle, cwd string) (string, error)
 		return "", err
 	}
 	tmp.Close()
-	if _, err := usage.OpenCodeCLI(ctx, cwd, "import", name); err != nil {
-		return "", fmt.Errorf("opencode import: %w", err)
+	// v2 moved the command under `session`; older builds only know `opencode import`.
+	if _, err := usage.OpenCodeCLI(ctx, cwd, "session", "import", name, "--directory", cwd); err != nil {
+		if _, err2 := usage.OpenCodeCLI(ctx, cwd, "import", name); err2 != nil {
+			return "", fmt.Errorf("opencode session import: %v; opencode import: %w", err, err2)
+		}
 	}
 	return m.SessionID, nil
 }
