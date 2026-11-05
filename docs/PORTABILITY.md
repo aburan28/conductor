@@ -163,6 +163,114 @@ the same selection with `--execute` continues them later. These files contain pr
 conversation material and remain on the machine that ran the command. Run the inventory
 on every machine with Claude sessions before claiming that `--all` covers the fleet.
 
+## Moving many sessions at once: `sessions transfer`
+
+A checkpoint is one conversation plus its working tree. When the unit of movement is a
+*project* — every conversation about it, not one — use the transfer commands. They carry
+the harness's transcripts verbatim, in the same bundle layout
+[`cct`](https://github.com/ahmojo/codex-claude-transfer) writes, so either tool can import
+the other's file.
+
+```
+conductor sessions transfer export --project .        # → <project>-sessions-<date>.codexbundle
+conductor sessions transfer inspect app.codexbundle   # read-only: what is inside
+conductor sessions transfer import app.codexbundle --dry-run
+conductor sessions transfer import app.codexbundle    # write it here
+conductor sessions transfer import app.codexbundle --merge   # catch up a growing chat
+```
+
+`--tool claude|codex` picks the agent (auto-detected from the installed homes); `--all`
+exports every session of that tool, and `--session <id>` a single one. `--since 7d` and
+`--match <text>` narrow the selection.
+
+### What the bundle holds
+
+A `.codexbundle` is a ZIP:
+
+| Member | Contents |
+|---|---|
+| `manifest.json` | format version, tool, source home and project, and per-session metadata (id, original path, cwd, size, SHA-256) |
+| `checksums.json` | SHA-256 of every other member |
+| `projects/<slug>/<id>.jsonl` | Claude Code transcripts, at exactly the path the harness uses (plus the session's subagent directory, when it has one) |
+| `sessions/YYYY/MM/DD/rollout-*.jsonl[.zst]` | Codex rollouts, at exactly the path Codex uses |
+
+Every member is verified against `checksums.json` before anything is written; an undeclared
+member, a missing member, or a digest mismatch aborts the import. Entries are capped at
+100 MiB (256 MiB with an explicit override), the archive at 2 GiB, and 100 000 members.
+The harness's index/SQLite is never touched: it re-discovers the files on its next start.
+
+Compressed Codex sessions (`.jsonl.zst`) are copied byte-for-byte. If the optional `zstd`
+tool is installed they are also decompressed to read their cwd and scan their text; without
+it they are still carried, but cannot be filtered by `--project` or examined by the secret
+gate.
+
+### Import is a plan, not a blind copy
+
+Each incoming session is classified against what is already here:
+
+| Outcome | Meaning | What happens |
+|---|---|---|
+| `new` | no local copy | written |
+| `identical` | byte-for-byte equal | skipped |
+| `grown` | the local file is a byte prefix of the bundle's | with `--merge`: only the new bytes are appended; without it: a conflict |
+| `ahead` | the bundle is a prefix of the local file | left alone ("already up to date") |
+| `diverged` | both sides changed | conflict: skipped by default |
+
+`--merge` is lossless by construction (nothing is ever truncated or re-pasted) and
+idempotent (importing the same bundle twice writes nothing). A genuinely diverged session
+is never merged. Resolve it explicitly with `--replace-with-backup` (the local file is kept
+as `<name>.bak-<time>`) or `--import-as-copy` (the bundle's version lands beside it under a
+new session id, leaving the local one untouched).
+
+`--map-cwd OLD=NEW` rewrites the recorded working directory inside the transcript, and for
+Claude Code moves it into the matching `projects/<slug>/` folder so the sidebar group is
+right. `--map-cwd-here` is the shorthand for a single-project bundle: it maps the bundle's
+project to the directory you run the command from. `inspect` prints a ready-to-paste
+`--map-cwd` line for every recorded project that does not exist on this machine.
+
+### Before a bundle leaves the machine
+
+The export scans exactly the bytes it would write for likely credentials — provider API
+keys, GitHub/Slack/Google tokens, bearer tokens, private-key blocks, and high-signal
+`secret = …` assignments. A finding stops the export; `--redact` replaces it with
+`[REDACTED:<kind>]` (lossy, recorded in the manifest), and `--allow-secrets` overrides
+deliberately. `conductor sessions transfer scan <bundle>` runs the same check on a file
+someone sent you.
+
+`--encrypt-to <age recipient>` (repeatable), `--recipients-file`, and `--passphrase` encrypt
+with the optional `age` tool and remove the plaintext, exactly as cct does; `import`,
+`inspect`, and `scan` detect an age file and decrypt it with `--identity` or `--passphrase`.
+The `checkpoint` command's own AES-256-GCM sealing remains separate and unchanged.
+
+### Local-network sync
+
+```
+# machine A
+conductor sessions transfer serve --i-understand
+# machine B, using the address and code A printed
+conductor sessions transfer connect 192.168.1.20:54321 --i-understand
+```
+
+The exchange is peer-to-peer: no server, no relay, no cloud, no account. TLS protects the
+bytes, and a one-time pairing code — bound to both endpoints' certificate fingerprints —
+authenticates the peer, so another device on the network cannot interpose. Both sides apply
+what arrives through the same `--merge` import path, so growth is appended and divergence is
+reported, never overwritten. `--direction pull|push` restricts a run to one way, and
+`--dry-run` reports what would be written. The listener refuses any peer that resolves to a
+non-private address, and both commands require `--i-understand` because this is the one
+transfer path that sends session data off the machine. `serve` binds `0.0.0.0:0` by default;
+`--addr 127.0.0.1:PORT` keeps it on the loopback interface.
+
+### What transfer does not do
+
+- It does not carry the working tree. Use a checkpoint for that, or move the code with git.
+- It does not translate between harnesses. A bundle is for the same tool; use
+  `checkpoint resume --harness` (or `checkpoint migrate`) for a cross-harness continuation.
+- It does not rewrite a diverged session. `--merge` only appends to a log that grew on one
+  side; anything else needs an explicit policy.
+- It does not read a compressed session's text without `zstd`, and it cannot re-home one
+  with `--map-cwd` (rewriting a compressed frame would require recompressing it).
+
 ## Formats this build understands
 
 | Harness | Located by | Parsed records |
