@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/aburan28/conductor/internal/wif"
@@ -37,8 +38,13 @@ func cmdWIFExec(ctx context.Context, args []string) error {
 	if *providerName == "" || *rule == "" || *org == "" || *service == "" || len(argv) == 0 {
 		return errors.New("usage: conductor wif exec --provider gcp|aws|file --rule-id fdrl_... --organization-id UUID --service-account-id svac_... [--workspace-id wrkspc_...] [PROVIDER OPTIONS] -- claude [ARGS...]")
 	}
-	if argv[0] != "claude" && !(argv[0] == "conductor" && len(argv) >= 3 && argv[1] == "wrap" && argv[2] == "claude") {
-		return errors.New("wif exec accepts only claude or conductor wrap claude")
+	// The federation env block below is harness-neutral: any child that reads
+	// ANTHROPIC_IDENTITY_TOKEN_FILE and the federation IDs can use it.  Claude
+	// Code and delphi both do; everything else stays refused.
+	child := filepath.Base(argv[0])
+	allowed := child == "claude" || child == "delphi"
+	if !allowed && !(child == "conductor" && len(argv) >= 3 && argv[1] == "wrap" && argv[2] == "claude") {
+		return errors.New("wif exec accepts only claude, delphi, or conductor wrap claude")
 	}
 	var provider wif.Provider
 	var identityPath string
