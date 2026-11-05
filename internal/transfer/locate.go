@@ -2,6 +2,7 @@ package transfer
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -43,6 +44,8 @@ type ExportOptions struct {
 
 	// Source is recorded in the manifest (export, handoff, sync).
 	Source string
+	// Context carries cancellation for tools that shell out (OpenCode). Nil means Background.
+	Context context.Context
 }
 
 // Report summarizes what an export wrote.
@@ -63,6 +66,7 @@ type Report struct {
 type candidate struct {
 	session    Session
 	source     string   // absolute path of the transcript
+	data       []byte   // already-read bytes (OpenCode export), instead of a file
 	extras     []string // absolute paths of supporting files (Claude session directory)
 	compressed bool
 }
@@ -114,6 +118,10 @@ func isDir(p string) bool {
 // hashed into the archive, scanned for secrets, and (with --match) searched. A bundle is
 // only written if at least one session matched.
 func Export(w io.Writer, opts ExportOptions) (Report, error) {
+	ctx := opts.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	tool := normTool(opts.Tool)
 	claudeHome, err := ClaudeHome(opts.ClaudeHome)
 	if err != nil {
@@ -127,12 +135,15 @@ func Export(w io.Writer, opts ExportOptions) (Report, error) {
 		tool = DetectTool(claudeHome, codexHome)
 	}
 	home := claudeHome
-	if tool == ToolCodex {
+	switch tool {
+	case ToolCodex:
 		home = codexHome
+	case ToolOpenCode:
+		home = ""
 	}
 	rep := Report{Tool: tool, Home: home, Project: opts.Project}
 
-	cands, warnings, err := selectCandidates(opts, tool, home)
+	cands, warnings, err := selectCandidates(ctx, opts, tool, home)
 	if err != nil {
 		return rep, err
 	}
@@ -167,6 +178,9 @@ func Export(w io.Writer, opts ExportOptions) (Report, error) {
 
 	for _, c := range cands {
 		data, compressed, warn, err := loadSessionBytes(c.source)
+		if c.data != nil {
+			data, compressed, warn, err = c.data, false, "", nil
+		}
 		if err != nil {
 			rep.Warnings = append(rep.Warnings, fmt.Sprintf("%s: %v (skipped)", c.session.BundlePath, err))
 			continue
@@ -268,11 +282,78 @@ func loadSessionBytes(p string) (data []byte, compressed bool, warn string, err 
 	return data, false, "", err
 }
 
-func selectCandidates(opts ExportOptions, tool, home string) ([]candidate, []string, error) {
-	if tool == ToolClaude {
+func selectCandidates(ctx context.Context, opts ExportOptions, tool, home string) ([]candidate, []string, error) {
+	switch tool {
+	case ToolClaude:
 		return selectClaude(opts, home)
+	case ToolOpenCode:
+		return selectOpenCode(ctx, opts)
+	default:
+		return selectCodex(opts, home)
 	}
-	return selectCodex(opts, home)
+}
+
+// selectOpenCode asks the installed OpenCode for the sessions it associates with the
+// project directory (its list command is project-scoped) and exports each one.
+func selectOpenCode(ctx context.Context, opts ExportOptions) ([]candidate, []string, error) {
+	if !opencodeAvailable() {
+		return nil, []string{"the opencode CLI is not installed (nothing to export)"}, nil
+	}
+	dir := opts.Project
+	if dir == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return nil, nil, err
+		}
+		dir = wd
+	}
+	sessions, err := listOpenCode(ctx, dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	var out []candidate
+	var warns []string
+	for _, row := range sessions {
+		if !matchesAnyID(opts.Sessions, row.ID) {
+			continue
+		}
+		if !opts.Since.IsZero() && time.UnixMilli(row.Updated).Before(opts.Since) {
+			continue
+		}
+		data, err := exportOpenCode(ctx, dir, row.ID)
+		if err != nil {
+			warns = append(warns, fmt.Sprintf("%s: %v (skipped)", row.ID, err))
+			continue
+		}
+		created, updated, cwd, title := openCodeExportTime(data)
+		if opts.Project != "" && !opts.All && cwd != "" && !samePath(cwd, opts.Project) {
+			continue
+		}
+		if title == "" {
+			title = row.Title
+		}
+		at := row.Updated
+		if at == 0 {
+			at = updated
+		}
+		if at == 0 {
+			at = created
+		}
+		out = append(out, candidate{
+			session: Session{
+				ThreadID:     row.ID,
+				OriginalPath: "opencode://" + row.ID,
+				BundlePath:   "opencode/" + row.ID + ".json",
+				OriginalCWD:  cwd,
+				Preview:      title,
+				UpdatedAt:    time.UnixMilli(at).UTC().Format(time.RFC3339),
+				SizeBytes:    int64(len(data)),
+			},
+			data: data,
+		})
+	}
+	sortCandidates(out)
+	return out, warns, nil
 }
 
 func selectClaude(opts ExportOptions, home string) ([]candidate, []string, error) {

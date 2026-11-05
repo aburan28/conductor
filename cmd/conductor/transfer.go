@@ -177,6 +177,7 @@ Flags:
 		Redact:          *redact,
 		AllowSecrets:    *allowSecrets,
 		Source:          "export",
+		Context:         context.Background(),
 	})
 	closeErr := tmp.Close()
 	if err != nil {
@@ -243,6 +244,9 @@ func transferImport(args []string) error {
 	identity := fs.String("identity", "", "age identity file, for an encrypted bundle")
 	passphrase := fs.Bool("passphrase", false, "the bundle is passphrase-encrypted (age prompts)")
 	dryRun := fs.Bool("dry-run", false, "validate and print the plan; write nothing")
+	to := fs.String("to", "", "translate into another harness instead: claude, codex, or opencode")
+	cwd := fs.String("cwd", "", "target working directory for a translation (default: the recorded cwd)")
+	force := fs.Bool("force", false, "replace an existing translated session whose bytes differ")
 	asJSON := fs.Bool("json", false, "machine-readable plan/result")
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, `conductor sessions transfer import — copy a bundle's sessions into this machine
@@ -257,6 +261,14 @@ overwritten by default; a diverged session is reported as a conflict.
   conductor sessions transfer import app.codexbundle --map-cwd-here   re-home the project here
   conductor sessions transfer import app.codexbundle --map-cwd /old/app=/new/app
 
+Cross-harness: --to renders each conversation into the target's own session format, so it
+opens there as a real session. Text is preserved; tool calls become one-line notes and no
+model or runtime state crosses over.
+
+  conductor sessions transfer import app.codexbundle --to codex
+  conductor sessions transfer import codex.codexbundle --to claude --cwd ~/src/app
+  conductor sessions transfer import claude.codexbundle --to opencode --cwd ~/src/app
+
 Flags:
 `)
 		fs.PrintDefaults()
@@ -270,6 +282,9 @@ Flags:
 	}
 	if *replace && *asCopy {
 		return errors.New("--replace-with-backup and --import-as-copy are mutually exclusive")
+	}
+	if *to != "" && (*merge || *replace || *asCopy) {
+		return errors.New("--to translates into a new session; --merge, --replace-with-backup, and --import-as-copy do not apply")
 	}
 	var mappings []transfer.Mapping
 	for _, raw := range *mapCwd {
@@ -287,6 +302,26 @@ Flags:
 	defer cleanup()
 	defer b.Close()
 
+	if *to != "" {
+		tres, err := transfer.TranslateImport(context.Background(), b, transfer.TranslateOptions{
+			Target:     *to,
+			Cwd:        *cwd,
+			ClaudeHome: *claudeHome,
+			CodexHome:  *codexHome,
+			Sessions:   *sessions,
+			DryRun:     *dryRun,
+			Force:      *force,
+		})
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			return emit(tres)
+		}
+		printTranslateResult(tres)
+		return nil
+	}
+
 	res, err := transfer.Import(b, transfer.ImportOptions{
 		Tool:              *tool,
 		ClaudeHome:        *claudeHome,
@@ -299,6 +334,7 @@ Flags:
 		MapCwd:            mappings,
 		MapCwdHere:        *mapHere,
 		DryRun:            *dryRun,
+		Context:           context.Background(),
 	})
 	if err != nil {
 		return err
@@ -360,6 +396,30 @@ func printImportResult(res transfer.ImportResult) {
 		fmt.Println("\nNothing was written. Re-run without --dry-run to apply.")
 	} else {
 		fmt.Printf("\n%d session(s) now available; restart the agent so it re-discovers them.\n", len(res.Items)-res.Skipped)
+	}
+}
+
+func printTranslateResult(res transfer.TranslateResult) {
+	verb := "Translated"
+	if res.DryRun {
+		verb = "Would translate"
+	}
+	fmt.Printf("%s %s -> %s\n", verb, res.SourceTool, res.TargetTool)
+	for _, it := range res.Items {
+		switch it.Action {
+		case "translated":
+			fmt.Printf("  + %s -> %s  (%d turns)\n", it.SourceID, it.DestPath, it.Turns)
+		case "conflict":
+			fmt.Printf("  ! %s: %s\n", it.BundlePath, it.Reason)
+		case "skip":
+			fmt.Printf("  - %s: %s\n", it.BundlePath, it.Reason)
+		}
+	}
+	fmt.Printf("\n%d translated, %d skipped.\n", res.Translated, res.Skipped)
+	if res.DryRun {
+		fmt.Println("Nothing was written. Re-run without --dry-run to apply.")
+	} else if res.Translated > 0 {
+		fmt.Println("The target harness re-discovers the session on its next start; the conversation opens with a handoff note.")
 	}
 }
 

@@ -58,8 +58,9 @@ const (
 
 // Tools a bundle can carry. The names match cct's manifest values.
 const (
-	ToolClaude = "claude"
-	ToolCodex  = "codex"
+	ToolClaude   = "claude"
+	ToolCodex    = "codex"
+	ToolOpenCode = "opencode"
 )
 
 // Manifest describes a bundle. Field names and types follow cct's manifest so the two
@@ -377,6 +378,8 @@ func normTool(t string) string {
 		return ToolClaude
 	case ToolCodex:
 		return ToolCodex
+	case ToolOpenCode, "open-code":
+		return ToolOpenCode
 	default:
 		return ""
 	}

@@ -2,6 +2,7 @@ package transfer
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -63,6 +64,8 @@ type ImportOptions struct {
 
 	// DryRun validates and reports without writing anything.
 	DryRun bool
+	// Context carries cancellation for tools that shell out (OpenCode). Nil means Background.
+	Context context.Context
 }
 
 // Item is the per-session outcome.
@@ -101,6 +104,13 @@ func Import(b *Bundle, opts ImportOptions) (ImportResult, error) {
 		tool = normTool(b.Manifest.Tool)
 	}
 	res.Tool = tool
+	ctx := opts.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if tool == ToolOpenCode {
+		return importOpenCodeBundle(ctx, b, opts)
+	}
 	claudeHome, err := ClaudeHome(opts.ClaudeHome)
 	if err != nil {
 		return res, err
@@ -112,6 +122,9 @@ func Import(b *Bundle, opts ImportOptions) (ImportResult, error) {
 	home := claudeHome
 	if tool == ToolCodex {
 		home = codexHome
+	}
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		return res, err
 	}
 	if tool == "" {
 		return res, fmt.Errorf("bundle names no tool")
@@ -483,4 +496,99 @@ func orDash(s string) string {
 		return "—"
 	}
 	return s
+}
+
+// importOpenCodeBundle loads OpenCode exports through the CLI. OpenCode owns its store, so
+// there is no file to classify here: the import is idempotent when the session id already
+// exists, and that is reported as an identical skip.
+func importOpenCodeBundle(ctx context.Context, b *Bundle, opts ImportOptions) (ImportResult, error) {
+	res := ImportResult{Tool: ToolOpenCode, Bundle: b.Path, DryRun: opts.DryRun}
+	if !opencodeAvailable() {
+		return res, errors.New("the opencode CLI is not installed")
+	}
+	baseDir := opts.Project
+	if baseDir == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return res, err
+		}
+		baseDir = wd
+	}
+	mappings, err := resolveMappings(opts)
+	if err != nil {
+		return res, err
+	}
+	if err := finishMappings(mappings, b.Manifest.Sessions); err != nil {
+		return res, err
+	}
+	for _, s := range b.Manifest.Sessions {
+		if !matchesAnyID(opts.Sessions, s.ThreadID) {
+			res.Items = append(res.Items, Item{ThreadID: s.ThreadID, BundlePath: s.BundlePath, Action: ActionSkipDeselected})
+			res.Skipped++
+			continue
+		}
+		data, err := b.Read(s.BundlePath)
+		if err != nil {
+			return res, err
+		}
+		cwd := s.OriginalCWD
+		if to, ok := mappings[filepath.Clean(cwd)]; ok {
+			data = rewriteOpenCodeCwd(data, cwd, to)
+			cwd = to
+		}
+		if cwd == "" {
+			cwd = baseDir
+		}
+		item := Item{ThreadID: s.ThreadID, BundlePath: s.BundlePath, Bytes: int64(len(data))}
+		if opts.DryRun {
+			item.Action = ActionImport
+			item.DestPath = "opencode:" + s.ThreadID + " (" + cwd + ")"
+			res.Items = append(res.Items, item)
+			res.Imported++
+			continue
+		}
+		got, err := importOpenCode(ctx, cwd, data)
+		if errors.Is(err, errAlreadyExists) {
+			item.Action = ActionSkipIdentical
+			res.Skipped++
+			res.Items = append(res.Items, item)
+			continue
+		}
+		if err != nil {
+			return res, err
+		}
+		item.Action = ActionImport
+		item.DestPath = "opencode:" + got + " (" + cwd + ")"
+		res.Imported++
+		res.Items = append(res.Items, item)
+	}
+	if res.Items == nil {
+		res.Items = []Item{}
+	}
+	return res, nil
+}
+
+// rewriteOpenCodeCwd re-homes an export document without touching its messages.
+func rewriteOpenCodeCwd(data []byte, from, to string) []byte {
+	var doc map[string]any
+	if json.Unmarshal(data, &doc) != nil {
+		return data
+	}
+	info, _ := doc["info"].(map[string]any)
+	if info == nil {
+		return data
+	}
+	if v, ok := info["directory"].(string); ok && samePath(v, from) {
+		info["directory"] = to
+	}
+	if loc, ok := info["location"].(map[string]any); ok {
+		if v, ok := loc["directory"].(string); ok && samePath(v, from) {
+			loc["directory"] = to
+		}
+	}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return data
+	}
+	return out
 }

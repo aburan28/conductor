@@ -261,11 +261,50 @@ non-private address, and both commands require `--i-understand` because this is 
 transfer path that sends session data off the machine. `serve` binds `0.0.0.0:0` by default;
 `--addr 127.0.0.1:PORT` keeps it on the loopback interface.
 
+### Cross-harness: `import --to`
+
+A bundle records the harness it came from, so a same-tool import is the default. `--to`
+instead renders each conversation into the target harness's own on-disk format and writes a
+session it can open — all six directions:
+
+| From \ To | Claude Code | Codex | OpenCode |
+|---|---|---|---|
+| **Claude Code** | verbatim | synthesized rollout | synthesized export, `session import` |
+| **Codex** | synthesized transcript | verbatim | synthesized export, `session import` |
+| **OpenCode** | synthesized transcript | synthesized rollout | verbatim, `session import` |
+
+```
+conductor sessions transfer import claude.codexbundle --to codex
+conductor sessions transfer import codex.codexbundle  --to claude --cwd ~/src/app
+conductor sessions transfer import claude.codexbundle --to opencode --cwd ~/src/app
+conductor sessions transfer import opencode.codexbundle --to claude --cwd ~/src/app
+```
+
+What travels is the conversation: user and assistant text in order, with each tool call
+reduced to a one-line note in the assistant's reply. The target session opens with a short
+handoff note naming the source session. What does not travel: model and runtime state, tool
+arguments and outputs, exact tool-call history, provider ids, and any pending turn. Treat
+the result as a primed "continue from here" conversation, not a byte-for-byte continuation.
+
+Target ids are derived from the source id and the target, so re-importing the same bundle
+writes nothing (`skip-existing`). A translator upgrade that changes the bytes shows up as a
+conflict; `--force` replaces it. `--cwd` sets the working directory recorded in the target
+session (and, for OpenCode, the project it is filed under); it defaults to the source
+session's directory and must exist for Claude and Codex.
+
+OpenCode export is supported as a source too: `--tool opencode --project DIR` lists the
+sessions OpenCode associates with that directory and exports each one. OpenCode validates
+the model recorded on an imported session, so Conductor records one the installation
+actually knows (the first `opencode models` entry); set
+`CONDUCTOR_TRANSFER_OPENCODE_MODEL=provider/model` to pin a different one. OpenCode has also
+shipped two export shapes; both are read, but only the v2 importer
+(`opencode session import`) has been exercised against a live install.
+
 ### What transfer does not do
 
 - It does not carry the working tree. Use a checkpoint for that, or move the code with git.
-- It does not translate between harnesses. A bundle is for the same tool; use
-  `checkpoint resume --harness` (or `checkpoint migrate`) for a cross-harness continuation.
+- It does not clone a conversation exactly across harnesses: `--to` summarizes tool calls
+  and drops model/runtime state (see above).
 - It does not rewrite a diverged session. `--merge` only appends to a log that grew on one
   side; anything else needs an explicit policy.
 - It does not read a compressed session's text without `zstd`, and it cannot re-home one
