@@ -1,0 +1,50 @@
+#!/bin/zsh
+# delphi-goal "<goal>" [--max-dirs N] [--fast] [--wait]
+#
+# Runs a staged pipeline:
+#   frame (Mythos) -> expand (free, one per direction) -> critique (Mythos)
+#   -> synthesize (Mythos) -> ~/.delphi/pipeline/<root>/GOAL.md
+#
+# --fast sends every stage to the free tier.
+DELPHI="${DELPHI_BIN:-$(command -v delphi || echo "$HOME/.local/bin/delphi")}"
+export DELPHI_HOME="${DELPHI_HOME:-$HOME/.delphi}"
+set -u
+GOAL=""
+FAST=0
+WAIT=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --max-dirs) export PIPELINE_MAX_IDEAS="$2"; shift 2 ;;
+    --fast) FAST=1; shift ;;
+    --wait) WAIT=1; shift ;;
+    *) GOAL="$1"; shift ;;
+  esac
+done
+[ -z "$GOAL" ] && { echo "usage: delphi-goal \"<goal>\" [--max-dirs N] [--fast] [--wait]" >&2; exit 2; }
+[ "$FAST" = "1" ] && export DELPHI_GOAL_DEEP=0
+
+ROOT="goal-$(date +%Y%m%d-%H%M%S)-$$"
+N="${PIPELINE_MAX_IDEAS:-6}"
+PROMPT="Goal: ${GOAL}
+
+1. Restate the goal as a falsifiable research objective with measurable success criteria.
+2. State the current best known result or cost model that must be beaten.
+3. List ${N} distinct attack directions as a numbered list, one per line, each specific enough to start on today.
+
+Format: a short objective section, then the numbered list. No preamble."
+
+ID=$($DELPHI ask -profile "${PIPELINE_FRAME_PROFILE:-frontier}" \
+      -max-tokens "${GOAL_MAX_TOKENS:-64000}" -effort "${GOAL_EFFORT:-medium}" -prompt "$PROMPT" \
+      -meta stage=frame -meta root="$ROOT" -meta goal="$GOAL" 2>&1 | head -1)
+
+echo "goal   ${GOAL}"
+echo "root   ${ROOT}"
+echo "frame  ${ID}"
+echo "out    ~/.delphi/pipeline/${ROOT}/GOAL.md"
+echo
+echo "stages: frame -> expand (free) -> critique -> synthesize"
+echo "watch:  delphi-watch"
+if [ "$WAIT" = "1" ]; then
+  while [ ! -f "$HOME/.delphi/pipeline/${ROOT}/GOAL.md" ]; do sleep 15; done
+  cat "$HOME/.delphi/pipeline/${ROOT}/GOAL.md"
+fi

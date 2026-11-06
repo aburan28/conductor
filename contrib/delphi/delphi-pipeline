@@ -1,0 +1,38 @@
+#!/bin/zsh
+# delphi-pipeline "<topic>" [--profile frontier] [--max-ideas N] [--wait]
+#
+# Stage 1: Mythos turns the topic into a numbered list of ideas (batch API).
+# Stage 2: the on-result hook queues each idea to the free tier automatically.
+DELPHI="${DELPHI_BIN:-$(command -v delphi || echo "$HOME/.local/bin/delphi")}"
+export DELPHI_HOME="${DELPHI_HOME:-$HOME/.delphi}"
+set -u
+TOPIC=""
+PROFILE="${PIPELINE_IDEAS_PROFILE:-frontier}"
+WAIT=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --profile) PROFILE="$2"; shift 2 ;;
+    --max-ideas) export PIPELINE_MAX_IDEAS="$2"; shift 2 ;;
+    --wait) WAIT=1; shift ;;
+    *) TOPIC="$1"; shift ;;
+  esac
+done
+[ -z "$TOPIC" ] && { echo "usage: delphi-pipeline \"<topic>\" [--profile frontier] [--max-ideas N] [--wait]" >&2; exit 2; }
+
+ROOT="pipe-$(date +%Y%m%d-%H%M%S)-$$"
+PROMPT="Topic: ${TOPIC}
+
+Give me ${PIPELINE_MAX_IDEAS:-6} distinct, concrete, executable ideas for this topic. Number them 1..N, one line each, each starting with a verb, and make each idea specific enough that someone could start on it today. No preamble."
+
+ID=$($DELPHI ask -profile "$PROFILE" -prompt "$PROMPT" -meta stage=ideas -meta root="$ROOT" -meta topic="$TOPIC" 2>&1 | head -1)
+echo "root   ${ROOT}"
+echo "ideas  ${ID}  (profile ${PROFILE})"
+echo "output ~/.delphi/pipeline/${ROOT}/"
+echo
+echo "The hook queues one free-tier request per idea when this returns."
+echo "  delphi get -wait -text ${ID}     # watch stage 1"
+echo "  ls ~/.delphi/pipeline/${ROOT}     # collected answers"
+
+if [ "$WAIT" = "1" ]; then
+  $DELPHI get -wait -text "$ID"
+fi
