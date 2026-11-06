@@ -14,9 +14,12 @@ FAST=0
 WAIT=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --max-dirs) export PIPELINE_MAX_IDEAS="$2"; shift 2 ;;
+    --max-dirs)
+      [ $# -ge 2 ] || { echo "$1 needs a number" >&2; exit 2; }
+      export PIPELINE_MAX_IDEAS="$2"; shift 2 ;;
     --fast) FAST=1; shift ;;
     --wait) WAIT=1; shift ;;
+    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
     *) GOAL="$1"; shift ;;
   esac
 done

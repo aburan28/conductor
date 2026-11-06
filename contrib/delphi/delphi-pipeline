@@ -11,9 +11,14 @@ PROFILE="${PIPELINE_IDEAS_PROFILE:-frontier}"
 WAIT=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --profile) PROFILE="$2"; shift 2 ;;
-    --max-ideas) export PIPELINE_MAX_IDEAS="$2"; shift 2 ;;
+    --profile)
+      [ $# -ge 2 ] || { echo "$1 needs a profile name" >&2; exit 2; }
+      PROFILE="$2"; shift 2 ;;
+    --max-ideas|--max-dirs)
+      [ $# -ge 2 ] || { echo "$1 needs a number" >&2; exit 2; }
+      export PIPELINE_MAX_IDEAS="$2"; shift 2 ;;
     --wait) WAIT=1; shift ;;
+    -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
     *) TOPIC="$1"; shift ;;
   esac
 done
