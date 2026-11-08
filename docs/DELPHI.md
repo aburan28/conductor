@@ -220,6 +220,13 @@ conductor delphi list --state running
 
 - **`--id REF`** names the request. Submitting the same request under the same ref again
   is a no-op, so retries are safe. A different request under a used ref is refused.
+- **`--techniques QUERY`** prepends Delphi's brief of learned research techniques relevant to
+  QUERY to the system prompt. It runs `delphi techniques brief -query QUERY -k 8 -max-chars 6000`
+  (binary from `CONDUCTOR_DELPHI_BIN`, else `delphi` on PATH; `--techniques-lib DIR` adds
+  `-lib DIR`). The brief is data, not instructions, and a technique's standing comes from
+  Delphi's verified rounds. An empty brief leaves the system prompt unchanged; a missing binary,
+  non-zero exit or timeout (30 s) is an error and nothing is sent. See Delphi's
+  `docs/TECHNIQUES.md`.
 - **`--label k=v`** stores small tags with the delegation, such as ids, run numbers or
   paths. Labels are limited to 16, at 200 bytes each. They are for ids, not content.
 - **`--task T`** links a task. When the answer is in, the task's timeline gets a

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -84,6 +85,8 @@ func delphiAsk(ctx context.Context, args []string) error {
 	fallback := fs.String("fallback", os.Getenv("CONDUCTOR_DELPHI_FALLBACK"),
 		"with --wait: if the model refuses, resubmit to these in order (comma-separated provider:model[@effort] or profile names)")
 	asJSON := fs.Bool("json", false, "machine-readable output")
+	techniques := fs.String("techniques", "", "prepend the Delphi technique library's brief for this query to the system prompt (runs the delphi binary: $CONDUCTOR_DELPHI_BIN or PATH)")
+	techLib := fs.String("techniques-lib", "", "with --techniques: technique library directory (delphi techniques brief -lib)")
 	labels := labelFlag{}
 	fs.Var(labels, "label", "key=value tag stored with the delegation (repeatable; ids, not content)")
 	positional, err := parseFlags(fs, args)
@@ -111,6 +114,17 @@ func delphiAsk(ctx context.Context, args []string) error {
 	}
 	if len(labels) > 0 {
 		body.Labels = labels
+	}
+	if *techniques != "" {
+		bin := os.Getenv("CONDUCTOR_DELPHI_BIN")
+		if bin == "" {
+			bin = "delphi"
+		}
+		brief, err := techniqueBrief(ctx, bin, *techniques, *techLib)
+		if err != nil {
+			return err
+		}
+		body.System = mergeSystem(brief, body.System)
 	}
 	fallbackSet := false
 	fs.Visit(func(f *flag.Flag) { fallbackSet = fallbackSet || f.Name == "fallback" })
@@ -140,6 +154,46 @@ func delphiAsk(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(os.Stderr, "submitted %s to %s %s; waiting (batches take minutes to hours)\n", d.Ref, d.Provider, d.Model)
 	return delphiWaitAnswer(ctx, api, path, d.Ref, *asJSON)
+}
+
+// mergeSystem prepends a technique brief to a system prompt; an empty brief changes nothing.
+func mergeSystem(brief, system string) string {
+	switch {
+	case brief == "":
+		return system
+	case system == "":
+		return brief
+	}
+	return brief + "\n\n" + system
+}
+
+// techniqueBrief runs `delphi techniques brief` and returns its trimmed stdout. The caller asked
+// for techniques explicitly, so any failure is an error rather than a silent skip.
+func techniqueBrief(ctx context.Context, bin, query, lib string) (string, error) {
+	path, err := exec.LookPath(bin)
+	if err != nil {
+		return "", fmt.Errorf("--techniques: delphi binary not found (%s; set CONDUCTOR_DELPHI_BIN): %w", bin, err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	argv := []string{"techniques", "brief", "-query=" + query, "-k", "8", "-max-chars", "6000"} // = form: a query starting with "-" stays a value
+	if lib != "" {
+		argv = append(argv, "-lib", lib)
+	}
+	cmd := exec.CommandContext(ctx, path, argv...)
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		tail := strings.TrimSpace(stderr.String())
+		if len(tail) > 500 {
+			tail = tail[len(tail)-500:]
+		}
+		if ctx.Err() != nil {
+			err = fmt.Errorf("timed out after 30s: %w", ctx.Err())
+		}
+		return "", fmt.Errorf("--techniques: %s techniques brief failed: %v; stderr: %s", path, err, tail)
+	}
+	return strings.TrimSpace(stdout.String()), nil
 }
 
 // delphiPoll is how often a waiting client checks a delegation; tests shorten it.
