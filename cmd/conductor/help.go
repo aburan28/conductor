@@ -322,6 +322,7 @@ ask; neither is stored in Conductor. Spend appears in conductor usage as "delega
 Usage:
   conductor delphi ask [--profile ALIAS | --provider anthropic|openai --model M] [--effort E]
                        [--task T] [--label k=v] [--wait [--fallback T1,T2]]
+                       [--techniques QUERY [--techniques-lib DIR]]
                        PROMPT...                (or --file F, or stdin)
   conductor delphi profiles                    tiers from the model catalog
   conductor delphi show REF                    state, tokens, cost

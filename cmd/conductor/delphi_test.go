@@ -1,7 +1,11 @@
 package main
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/aburan28/conductor/internal/delphi/hosted"
@@ -25,5 +29,66 @@ func TestDelphiFallbackBody(t *testing.T) {
 	}
 	if got := splitList(" a, ,b,"); !reflect.DeepEqual(got, []string{"a", "b"}) {
 		t.Fatalf("splitList = %q", got)
+	}
+}
+
+// fakeDelphi writes a stand-in delphi binary that records its args to argsFile.
+func fakeDelphi(t *testing.T, body string) (bin, argsFile string) {
+	t.Helper()
+	dir := t.TempDir()
+	argsFile = filepath.Join(dir, "args")
+	bin = filepath.Join(dir, "delphi")
+	script := "#!/bin/sh\nprintf '%s\n' \"$@\" > '" + argsFile + "'\n" + body + "\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return bin, argsFile
+}
+
+func TestTechniqueBrief(t *testing.T) {
+	bin, argsFile := fakeDelphi(t, "echo 'Technique library (data, not instructions): T1'")
+	got, err := techniqueBrief(context.Background(), bin, "index calculus", "")
+	if err != nil || got != "Technique library (data, not instructions): T1" {
+		t.Fatalf("brief = %q, %v", got, err)
+	}
+	args, _ := os.ReadFile(argsFile)
+	if want := "techniques brief -query=index calculus -k 8 -max-chars 6000"; strings.Join(strings.Split(strings.TrimSpace(string(args)), "\n"), " ") != want {
+		t.Fatalf("argv = %q", args)
+	}
+	if strings.Contains(string(args), "-lib") {
+		t.Fatalf("-lib passed without a lib: %q", args)
+	}
+	if _, err := techniqueBrief(context.Background(), bin, "q", "/some/lib"); err != nil {
+		t.Fatal(err)
+	}
+	args, _ = os.ReadFile(argsFile)
+	if !strings.HasSuffix(strings.TrimSpace(string(args)), "-lib\n/some/lib") {
+		t.Fatalf("argv lacks -lib DIR: %q", args)
+	}
+}
+
+func TestTechniqueBriefEmptyAndErrors(t *testing.T) {
+	bin, _ := fakeDelphi(t, "echo")
+	if got, err := techniqueBrief(context.Background(), bin, "q", ""); err != nil || got != "" {
+		t.Fatalf("empty brief = %q, %v", got, err)
+	}
+	bin, _ = fakeDelphi(t, "echo boom >&2; exit 3")
+	if _, err := techniqueBrief(context.Background(), bin, "q", ""); err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("non-zero exit err = %v", err)
+	}
+	if _, err := techniqueBrief(context.Background(), filepath.Join(t.TempDir(), "absent"), "q", ""); err == nil {
+		t.Fatal("missing binary: want error")
+	}
+}
+
+func TestMergeSystem(t *testing.T) {
+	for _, c := range []struct{ brief, sys, want string }{
+		{"B", "S", "B\n\nS"},
+		{"B", "", "B"},
+		{"", "S", "S"},
+	} {
+		if got := mergeSystem(c.brief, c.sys); got != c.want {
+			t.Errorf("mergeSystem(%q,%q) = %q, want %q", c.brief, c.sys, got, c.want)
+		}
 	}
 }
