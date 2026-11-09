@@ -4,9 +4,9 @@ go 1.26.10
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.84.0
-	github.com/huin/goupnp v1.3.0
-	github.com/jackc/pgx/v5 v5.11.0
-	github.com/openai/openai-go/v3 v3.86.0
+	github.com/huin/goupnp v1.3.1
+	github.com/jackc/pgx/v5 v5.12.0
+	github.com/openai/openai-go/v3 v3.96.0
 	github.com/redis/go-redis/v9 v9.23.0
 	golang.org/x/text v0.43.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -26,7 +26,7 @@ require (
 	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect
 	github.com/rogpeppe/go-internal v1.16.0 // indirect
 	github.com/standard-webhooks/standard-webhooks/libraries v0.0.1 // indirect
-	github.com/tidwall/gjson v1.19.0 // indirect
+	github.com/tidwall/gjson v1.20.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect
