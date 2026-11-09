@@ -399,6 +399,32 @@ func TestGoalEvaluatorTimeoutStopsChildWithOpenOutputPipes(t *testing.T) {
 	}
 }
 
+// runnerTempDir is a temporary directory for a detached runner. The runner marks a goal done
+// and then still writes answer.md, releases its lock and closes runner.log, so t.TempDir's
+// one-shot removal can race it ("directory not empty"); this cleanup retries for a while.
+func runnerTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "delphi-runner-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			err := os.RemoveAll(dir)
+			if err == nil {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Errorf("remove %s: %v", dir, err)
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	})
+	return dir
+}
+
 func TestGoalStartRunsDetachedBinary(t *testing.T) {
 	fa, _ := servers(t)
 	fa.mu.Lock()
@@ -414,7 +440,7 @@ func TestGoalStartRunsDetachedBinary(t *testing.T) {
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build detached CLI: %v\n%s", err, output)
 	}
-	out := filepath.Join(t.TempDir(), "goal")
+	out := filepath.Join(runnerTempDir(t), "goal")
 	cmd := exec.Command(bin, "goal", "start", "-out", out, "-goal", "Produce an answer", "-rounds", "1", "-every", "10ms")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("start detached CLI: %v\n%s", err, output)
