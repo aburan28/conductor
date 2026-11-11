@@ -563,7 +563,7 @@ Example:
   conductor accounts alias claude acme work
 
 Run ` + "`conductor accounts <subcommand> -h`" + ` for its flags.`},
-	{name: "sessions", group: "Sessions and machines", subs: []string{"save", "list", "export", "install-hook"},
+	{name: "sessions", group: "Sessions and machines", subs: []string{"save", "list", "export", "transfer", "install-hook"},
 		summary: "keep agent sessions resumable past a closed terminal or reboot",
 		topic: `conductor sessions — keep agent sessions resumable on this machine
 
@@ -571,6 +571,7 @@ Usage:
   conductor sessions save <all|pid|session-id…>   record how to resume them
   conductor sessions list                         saved, paused, and running sessions
   conductor sessions export                       the project's session history, as JSON
+  conductor sessions transfer export | import     move a project's conversations as one file
   conductor sessions install-hook                 save sessions automatically on exit
 
 Example:

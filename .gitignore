@@ -10,6 +10,9 @@
 .conductor/.bootstrap-token
 /.claude/worktrees/
 
+# local agent state (OpenCode writes its own session store in the project root)
+/.opencode/
+
 # local env
 .env
 .env.local
