@@ -18,8 +18,13 @@ current Git worktree for project configuration. Run it in each repository
 whose project configuration you want to inspect.
 Its JSON inventory contains the source, identifier, local record path, last
 modification time, and (for Codex) local title and working directory. It reads
-Codex's local SQLite thread index through the `sqlite3` command and only filenames and file metadata for
-Claude Code and Cursor. It does not open their conversation transcripts. The
+Codex's local SQLite thread index through the `sqlite3` command, using the
+indexed `updated_at` field to fetch only records in the requested lookback.
+For Claude Code and Cursor it reads only filenames and file metadata. It also
+checks the current user's process table for a
+Codex `resume <uuid>` or Claude `--resume <uuid>` invocation matching a saved
+record. It stores only the matching PID and identifier, never process arguments
+or conversation text. It does not open conversation transcripts. The
 inventory is created with mode `0600` and refuses to overwrite an existing
 file. Treat it as private: it includes local paths and possibly Codex titles.
 Use `--since 0` to scan all saved records.
@@ -33,7 +38,9 @@ lives at `$CONDUCTOR_STATE_DIR/external-work/latest.json`, or
 `~/.conductor/external-work/latest.json` when that variable is unset. The
 directory is mode `0700`, the file is mode `0600`, and each refresh replaces
 the derived inventory atomically. It does not alter source transcripts or
-checkpoint copies.
+checkpoint copies. `started_at` and `scanned_at` record the start and completion
+of the scan, so `scan_duration_ms` in `--status --json` shows how long a refresh
+actually took. The completion timestamp can lag the start under disk pressure.
 
 ```sh
 conductor sessions scan --workspace /path/to/repository
@@ -62,8 +69,11 @@ scope, and only then make a task ready for dispatch.
 
 Saved conversations are not necessarily running or unfinished. Codex's local
 index can mark a thread unarchived; Claude and Cursor transcripts have file
-modification times. None of those signals alone establishes a live agent or
-unfinished work, so the inventory says `running state unknown`. Conductor
+modification times. Those signals alone establish neither a live agent nor
+unfinished work. A matching explicit resume process is labeled
+`process_alive_at_scan` with its PID and scan time; it can be idle or have exited
+since the scan. Other records say `saved; running state unknown`. Cursor and
+Codex Desktop windows without an explicit resume UUID remain unknown. Conductor
 cannot retroactively supervise a process that was not launched through its
 integration. `conductor sessions save all` remains the separate command for
 capturing resumable interactive processes, and `conductor sessions export`
