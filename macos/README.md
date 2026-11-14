@@ -116,8 +116,9 @@ installer image, from the workflow run's artifacts. Ordinary CI builds use app v
 The release workflow calls the same Mac build with the release tag, then waits for both
 Mac jobs and all four CLI archives before publishing assets. A release such as `v1.2.3`
 includes `Conductor-1.2.3-macos-universal.dmg` in its downloads, `SHA256SUMS`, and build
-provenance. CI and release images currently have an ad hoc signed app and an unsigned
-installer and image; the README inside the image includes Gatekeeper instructions.
+provenance. Ordinary CI images have an ad hoc signed app and an unsigned installer and
+image; their README includes Gatekeeper instructions. The release job requires signing,
+notarization, and an update key before it publishes a public image.
 
 ## Package
 
@@ -134,7 +135,8 @@ MCP configurations run the binaries the app runs. `build-pkg.sh` makes the packa
 ## Sign and notarize
 
 Nothing is signed with a Developer ID unless you say so, and every step that would be
-says when it is skipped. A release takes all of these or none:
+says when it is skipped. The packaging scripts require the complete Developer ID and
+notarization set together; the release workflow also requires the Sparkle keys:
 
 | Variable | What |
 |---|---|
@@ -142,9 +144,9 @@ says when it is skipped. A release takes all of these or none:
 | `DEVELOPER_ID_INSTALLER` | `Developer ID Installer: NAME (TEAMID)`: the package |
 | `NOTARY_PROFILE` | a profile saved with `xcrun notarytool store-credentials` |
 | or `NOTARY_KEY`, `NOTARY_KEY_ID`, `NOTARY_ISSUER` | an App Store Connect API key (.p8), its id, its issuer |
-| `SPARKLE_PUBLIC_ED_KEY` | optional: turns on updates (below) |
+| `SPARKLE_PUBLIC_ED_KEY` | the public half of Conductor's Sparkle key; required for a release |
 
-`build-dmg.sh` refuses a partial set before building anything: a signed package that was
+`build-dmg.sh` refuses a partial signing set before building anything: a signed package that was
 never notarized is blocked by Gatekeeper like an unsigned one, and looks done. With the
 full set it signs every library and executable inside the app innermost first (Postgres,
 the Go commands, Sparkle's helpers) and then the app, all with the hardened runtime and a
@@ -159,15 +161,40 @@ to continue a checkpoint. Postgres runs with `jit = off`, which the hardened run
 
 ## Updates
 
-Sparkle 2.10.0, pinned exactly in `Package.swift`. The app starts it only when its
+Sparkle 2.10.0 is pinned exactly in `Package.swift`. The app starts it only when its
 Info.plist carries `SUPublicEDKey`, which `build-dmg.sh` writes from
-`SPARKLE_PUBLIC_ED_KEY`. A build without that key (checkout builds, or a DMG built without
-the secret) never starts Sparkle: Check for Updates stays disabled and Settings explains
-that updates need a signed disk image — there is no blocking alert. To publish an update,
-set `SPARKLE_PUBLIC_ED_KEY` in the release environment, sign the image with Sparkle's
-`sign_update` (in `.build/artifacts/sparkle/Sparkle/bin` after a build) using the private
-half of that key, and publish `appcast.xml` at the `SUFeedURL` in Info.plist. Losing the
-private key strands every installed copy: keep it somewhere that outlives any one machine.
+`SPARKLE_PUBLIC_ED_KEY`. Checkout builds without the key keep Check for Updates disabled.
+The release workflow requires Developer ID certificates, notarization, and both halves of
+Conductor's own Sparkle key. It refuses to publish an unsigned or update-disabled release.
+
+The workflow signs the final notarized DMG with Sparkle's `sign_update`, verifies the
+signature and public key, and publishes `appcast.xml` beside the versioned DMG. That DMG
+contains `Install Conductor.pkg`, so the feed explicitly requests package installation;
+macOS may ask for administrator authorization during an update. After the versioned
+release is public and verified, the workflow advances the stable `macos-appcast` release
+used by `SUFeedURL`. Concurrent release jobs serialize that step and an older release
+cannot roll the feed backward. The first signed release must be installed manually on
+machines currently running an app without `SUPublicEDKey`; those builds cannot check for
+updates themselves.
+
+Configure these GitHub Actions secrets before cutting a signed release:
+
+| Secret | Value |
+|---|---|
+| `CONDUCTOR_DEVELOPER_ID_APPLICATION`, `CONDUCTOR_DEVELOPER_ID_INSTALLER` | Exact codesigning identity names |
+| `CONDUCTOR_DEVELOPER_ID_APPLICATION_P12`, `CONDUCTOR_DEVELOPER_ID_INSTALLER_P12` | Base64 encoded certificate/key `.p12` files |
+| `CONDUCTOR_CERT_PASSWORD` | Password for both `.p12` exports |
+| `CONDUCTOR_NOTARY_KEY_P8`, `CONDUCTOR_NOTARY_KEY_ID`, `CONDUCTOR_NOTARY_ISSUER` | Base64 encoded App Store Connect API key and its identifiers |
+| `CONDUCTOR_SPARKLE_PRIVATE_ED_KEY` | Base64 private key exported by Sparkle `generate_keys --account conductor -x FILE` |
+| `CONDUCTOR_SPARKLE_PUBLIC_ED_KEY` | Matching public key from `generate_keys --account conductor -p` |
+
+Keep the private Sparkle key in a durable owner-controlled secret store as well as Actions.
+Use a Conductor-specific key account; do not reuse another app's update key. The release
+runner imports certificates into a temporary keychain and writes the notary key to its
+temporary directory. `macos/packaging/test-appcast.sh` exercises signing, verification,
+package metadata, and rejection of a changed DMG with a throwaway key. A full update still
+needs an older signed app and a newer signed release installed on a clean Mac to verify the
+user-facing installation flow.
 
 ## Settings → Storage
 
