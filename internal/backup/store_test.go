@@ -3,8 +3,11 @@ package backup
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -162,6 +165,58 @@ func TestPutCheckpointNeverOverwritesEitherObject(t *testing.T) {
 	}
 	if _, exists := srv.Object("conductor/checkpoints/ck-index-only.ckpt"); exists {
 		t.Error("bundle created beside an existing partial index")
+	}
+}
+
+func TestPutCheckpointRetriesOnlyIdenticalBundleAfterIndexFailure(t *testing.T) {
+	fake := s3fake.New("conductor-test")
+	defer fake.Close()
+	var failIndex atomic.Bool
+	failIndex.Store(true)
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/ck-retry.json") &&
+			failIndex.CompareAndSwap(true, false) {
+			http.Error(w, "injected index failure", http.StatusInternalServerError)
+			return
+		}
+		fake.ServeHTTP(w, r)
+	}))
+	defer proxy.Close()
+	store, err := Open(Config{
+		S3Config: S3Config{Bucket: "conductor-test", Region: "us-east-1", AccessKey: "AK", SecretKey: "SK",
+			Endpoint: proxy.URL, PathStyle: true, Insecure: true},
+		Prefix: "conductor", Machine: "laptop.local",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	sealed := func([]byte) bool { return true }
+	bundleKey := "conductor/checkpoints/ck-retry.ckpt"
+	indexKey := "conductor/checkpoints/ck-retry.json"
+	if err := store.PutCheckpoint(ctx, "ck-retry", []byte("index"), []byte("bundle"), sealed); err == nil {
+		t.Fatal("first push unexpectedly succeeded")
+	}
+	if got, ok := fake.Object(bundleKey); !ok || string(got) != "bundle" {
+		t.Fatalf("partial bundle = %q, exists %v", got, ok)
+	}
+	if _, ok := fake.Object(indexKey); ok {
+		t.Fatal("index exists after injected failure")
+	}
+	if err := store.PutCheckpoint(ctx, "ck-retry", []byte("index"), []byte("different"), sealed); !errors.Is(err, ErrExists) {
+		t.Fatalf("different bundle retry = %v, want ErrExists", err)
+	}
+	if _, ok := fake.Object(indexKey); ok {
+		t.Fatal("index created for a different bundle")
+	}
+	if err := store.PutCheckpoint(ctx, "ck-retry", []byte("index"), []byte("bundle"), sealed); err != nil {
+		t.Fatalf("identical bundle retry: %v", err)
+	}
+	if got, _ := fake.Object(bundleKey); string(got) != "bundle" {
+		t.Errorf("bundle overwritten: %q", got)
+	}
+	if got, _ := fake.Object(indexKey); string(got) != "index" {
+		t.Errorf("index = %q", got)
 	}
 }
 

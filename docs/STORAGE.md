@@ -25,11 +25,14 @@ cannot read the new snapshot-only layout, so upgrade the restore client before r
 on a new copy.
 
 `conductor checkpoint push` writes the sealed `.ckpt` and its small `.json` index
-under `<prefix>/checkpoints/` with the same create-only condition. If either key for
-the ID already exists, the push reports a collision and leaves existing bytes alone.
-A failure between the two uploads can leave a bundle without its index; inspect and
-repair that ID explicitly before retrying. The index carries typed metadata only;
-the conversation remains inside the sealed bundle.
+under `<prefix>/checkpoints/` with the same create-only condition. An existing
+index or a bundle with different bytes reports a collision and remains untouched.
+A failure between the two uploads can leave a bundle without its index. Repeating
+`conductor checkpoint push <id>` with the same local bundle and passphrase
+authenticates the existing sealed bytes and creates the missing index without
+replacing the bundle. A changed bundle, wrong passphrase, or existing index remains
+a collision. The index carries typed metadata only; the conversation remains
+inside the sealed bundle.
 
 ## The settings file
 

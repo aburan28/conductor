@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -238,31 +239,58 @@ func isTrue(s string) bool {
 var ErrUnsealed = errors.New("refusing to upload an unsealed checkpoint; set CONDUCTOR_CHECKPOINT_KEY")
 
 // PutCheckpoint uploads a sealed bundle and its index entry (checkpoint.IndexEntry).
-// Both keys are create-only. A partly uploaded ID is left for explicit repair rather than
-// attaching a new bundle or index to an existing object with the same ID.
+// Both keys are create-only. A missing index can be added to an existing bundle only when
+// the caller supplies the exact same sealed bytes; a different bundle is a collision.
 func (s *Store) PutCheckpoint(ctx context.Context, id string, index, sealed []byte, isSealed func([]byte) bool) error {
 	if isSealed != nil && !isSealed(sealed) {
 		return ErrUnsealed
 	}
-	for _, ext := range []string{".ckpt", ".json"} {
-		key := s.checkpointKey(id, ext)
-		exists, err := s.s3.Exists(ctx, key)
+	bundleKey := s.checkpointKey(id, ".ckpt")
+	indexKey := s.checkpointKey(id, ".json")
+	indexExists, err := s.s3.Exists(ctx, indexKey)
+	if err != nil {
+		return err
+	}
+	if indexExists {
+		return fmt.Errorf("%w: %s", ErrExists, indexKey)
+	}
+	verifyBundle := func() error {
+		existing, err := s.s3.Get(ctx, bundleKey)
 		if err != nil {
 			return err
 		}
-		if exists {
-			return fmt.Errorf("%w: %s", ErrExists, key)
+		if !bytes.Equal(existing, sealed) {
+			return fmt.Errorf("%w: %s has different bytes", ErrExists, bundleKey)
 		}
+		return nil
 	}
-	if err := s.s3.PutIfAbsent(ctx, s.checkpointKey(id, ".ckpt"), sealed, "application/octet-stream"); err != nil {
+	bundleExists, err := s.s3.Exists(ctx, bundleKey)
+	if err != nil {
 		return err
 	}
-	return s.s3.PutIfAbsent(ctx, s.checkpointKey(id, ".json"), index, "application/json")
+	if bundleExists {
+		if err := verifyBundle(); err != nil {
+			return err
+		}
+	} else if err := s.s3.PutIfAbsent(ctx, bundleKey, sealed, "application/octet-stream"); err != nil {
+		if !errors.Is(err, ErrExists) {
+			return err
+		}
+		if err := verifyBundle(); err != nil {
+			return err
+		}
+	}
+	return s.s3.PutIfAbsent(ctx, indexKey, index, "application/json")
 }
 
 // GetCheckpoint downloads a sealed bundle. ErrNotFound when there is none.
 func (s *Store) GetCheckpoint(ctx context.Context, id string) ([]byte, error) {
 	return s.s3.Get(ctx, s.checkpointKey(id, ".ckpt"))
+}
+
+// CheckpointBundleExists reports whether a sealed bundle has already been uploaded.
+func (s *Store) CheckpointBundleExists(ctx context.Context, id string) (bool, error) {
+	return s.s3.Exists(ctx, s.checkpointKey(id, ".ckpt"))
 }
 
 // GetCheckpointManifest downloads a checkpoint's index entry. ErrNotFound when there is none.
