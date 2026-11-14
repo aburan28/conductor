@@ -14,6 +14,26 @@ bucket as it fills (or at least every `archive_timeout`, 60 s by default) and ta
 backup on a schedule, so a lost machine restores to within about a minute of where it
 stopped, on any other machine that can reach the bucket.
 
+## Write-once session and checkpoint copies
+
+`conductor backup push` creates a uniquely named snapshot under
+`<prefix>/machines/<machine>/snapshots/`. Each upload uses `If-None-Match: *`, so a
+repeat push leaves previous copies intact. `conductor backup pull` reads the newest
+snapshot; it can still read a pre-upgrade `sessions.json` manifest when there are no
+snapshots. New pushes leave that legacy manifest untouched. Older Conductor binaries
+cannot read the new snapshot-only layout, so upgrade the restore client before relying
+on a new copy.
+
+`conductor checkpoint push` writes the sealed `.ckpt` and its small `.json` index
+under `<prefix>/checkpoints/` with the same create-only condition. An existing
+index or a bundle with different bytes reports a collision and remains untouched.
+A failure between the two uploads can leave a bundle without its index. Repeating
+`conductor checkpoint push <id>` with the same local bundle and passphrase
+authenticates the existing sealed bytes and creates the missing index without
+replacing the bundle. A changed bundle, wrong passphrase, or existing index remains
+a collision. The index carries typed metadata only; the conversation remains
+inside the sealed bundle.
+
 ## The settings file
 
 `storage.json` lives beside the CLI's other state: `$CONDUCTOR_STATE_DIR/storage.json`, else

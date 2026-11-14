@@ -1,16 +1,20 @@
 package backup
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 )
 
 // Store is the off-host home for one machine's resume records. It namespaces objects by
-// machine under a prefix, keeps a current manifest plus timestamped snapshots, and hands the
+// machine under a prefix, keeps write-once snapshots, and hands the
 // bytes back on another machine (or the same one rebuilt) so `conductor resume` can pick up
 // where a terminated instance left off.
 //
@@ -107,30 +111,54 @@ func FromEnv(getenv func(string) string) (*Store, bool, error) {
 	return store, true, nil
 }
 
-// PutSessions writes the current manifest and a timestamped snapshot. The manifest is what a
-// restore reads; the snapshots are history, so a machine that overwrote a good manifest with a
-// bad one can still be recovered. `at` is passed in rather than read from the clock so a
-// caller under shutdown pressure controls the timestamp (and tests are deterministic).
+// PutSessions writes a uniquely named, write-once snapshot. `at` is passed in rather than
+// read from the clock so a caller under shutdown pressure controls the timestamp. The
+// old fixed sessions.json manifest is left untouched for legacy restores.
 func (s *Store) PutSessions(ctx context.Context, data []byte, at time.Time) error {
-	if err := s.s3.Put(ctx, s.manifestKey(), data, "application/json"); err != nil {
+	var nonce [8]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
 		return err
 	}
-	return s.s3.Put(ctx, s.snapshotKey(at), data, "application/json")
+	key := s.snapshotKey(at, hex.EncodeToString(nonce[:]))
+	// Check first as well as sending If-None-Match: *. AWS enforces the condition; the
+	// preflight also avoids replacing an existing key on an S3-compatible store that
+	// silently ignores it.
+	exists, err := s.s3.Exists(ctx, key)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return fmt.Errorf("%w: %s", ErrExists, key)
+	}
+	return s.s3.PutIfAbsent(ctx, key, data, "application/json")
 }
 
-// GetSessions returns the current manifest, or ErrNotFound when this machine has none.
+// GetSessions returns the latest snapshot. Existing buckets with only the old fixed
+// sessions.json manifest remain readable. ErrNotFound means this machine has neither.
 func (s *Store) GetSessions(ctx context.Context) ([]byte, error) {
+	snapshots, err := s.ListSnapshots(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(snapshots) > 0 {
+		return s.s3.Get(ctx, snapshots[len(snapshots)-1])
+	}
 	return s.s3.Get(ctx, s.manifestKey())
 }
 
 // ListSnapshots returns the snapshot keys for this machine, oldest first.
 func (s *Store) ListSnapshots(ctx context.Context) ([]string, error) {
-	return s.s3.List(ctx, s.prefix+"/machines/"+s.machine+"/snapshots/")
+	keys, err := s.s3.List(ctx, s.prefix+"/machines/"+s.machine+"/snapshots/")
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(keys)
+	return keys, nil
 }
 
-// Location returns the s3 URI of this machine's manifest, for display.
+// Location returns the s3 URI of this machine's write-once snapshots, for display.
 func (s *Store) Location() string {
-	return fmt.Sprintf("s3://%s/%s", s.s3.cfg.Bucket, s.manifestKey())
+	return fmt.Sprintf("s3://%s/%s/machines/%s/snapshots/", s.s3.cfg.Bucket, s.prefix, s.machine)
 }
 
 // Describe renders the backup target without secrets.
@@ -150,8 +178,9 @@ func (s *Store) manifestKey() string {
 	return s.prefix + "/machines/" + s.machine + "/sessions.json"
 }
 
-func (s *Store) snapshotKey(at time.Time) string {
-	return s.prefix + "/machines/" + s.machine + "/snapshots/" + at.UTC().Format("20060102T150405Z") + ".json"
+func (s *Store) snapshotKey(at time.Time, nonce string) string {
+	return s.prefix + "/machines/" + s.machine + "/snapshots/" +
+		at.UTC().Format("20060102T150405Z") + fmt.Sprintf("~%09d-%s.json", at.UTC().Nanosecond(), nonce)
 }
 
 // sanitizeMachine keeps a machine id to a safe key segment.
@@ -210,19 +239,58 @@ func isTrue(s string) bool {
 var ErrUnsealed = errors.New("refusing to upload an unsealed checkpoint; set CONDUCTOR_CHECKPOINT_KEY")
 
 // PutCheckpoint uploads a sealed bundle and its index entry (checkpoint.IndexEntry).
+// Both keys are create-only. A missing index can be added to an existing bundle only when
+// the caller supplies the exact same sealed bytes; a different bundle is a collision.
 func (s *Store) PutCheckpoint(ctx context.Context, id string, index, sealed []byte, isSealed func([]byte) bool) error {
 	if isSealed != nil && !isSealed(sealed) {
 		return ErrUnsealed
 	}
-	if err := s.s3.Put(ctx, s.checkpointKey(id, ".ckpt"), sealed, "application/octet-stream"); err != nil {
+	bundleKey := s.checkpointKey(id, ".ckpt")
+	indexKey := s.checkpointKey(id, ".json")
+	indexExists, err := s.s3.Exists(ctx, indexKey)
+	if err != nil {
 		return err
 	}
-	return s.s3.Put(ctx, s.checkpointKey(id, ".json"), index, "application/json")
+	if indexExists {
+		return fmt.Errorf("%w: %s", ErrExists, indexKey)
+	}
+	verifyBundle := func() error {
+		existing, err := s.s3.Get(ctx, bundleKey)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(existing, sealed) {
+			return fmt.Errorf("%w: %s has different bytes", ErrExists, bundleKey)
+		}
+		return nil
+	}
+	bundleExists, err := s.s3.Exists(ctx, bundleKey)
+	if err != nil {
+		return err
+	}
+	if bundleExists {
+		if err := verifyBundle(); err != nil {
+			return err
+		}
+	} else if err := s.s3.PutIfAbsent(ctx, bundleKey, sealed, "application/octet-stream"); err != nil {
+		if !errors.Is(err, ErrExists) {
+			return err
+		}
+		if err := verifyBundle(); err != nil {
+			return err
+		}
+	}
+	return s.s3.PutIfAbsent(ctx, indexKey, index, "application/json")
 }
 
 // GetCheckpoint downloads a sealed bundle. ErrNotFound when there is none.
 func (s *Store) GetCheckpoint(ctx context.Context, id string) ([]byte, error) {
 	return s.s3.Get(ctx, s.checkpointKey(id, ".ckpt"))
+}
+
+// CheckpointBundleExists reports whether a sealed bundle has already been uploaded.
+func (s *Store) CheckpointBundleExists(ctx context.Context, id string) (bool, error) {
+	return s.s3.Exists(ctx, s.checkpointKey(id, ".ckpt"))
 }
 
 // GetCheckpointManifest downloads a checkpoint's index entry. ErrNotFound when there is none.
