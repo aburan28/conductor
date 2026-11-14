@@ -37,6 +37,7 @@ import (
 // variable so tests can replace it: a test that let the real scan run would find — and then
 // pause — whatever agent sessions the developer has open in other terminals.
 var discoverSessions = localstate.Discover
+var scanExternalWork = externalwork.Scan
 
 func cmdSessions(ctx context.Context, args []string) error {
 	if len(args) == 0 {
@@ -120,8 +121,14 @@ func sessionsScan(ctx context.Context, args []string) error {
 		if *since > 0 {
 			cutoff = time.Now().Add(-*since)
 		}
-		inv = externalwork.Scan(ctx, home, root, cutoff)
-		if err := externalwork.SaveLatest(path, inv); err != nil {
+		inv, err = scanExternalWork(ctx, home, root, cutoff)
+		if err != nil {
+			return fmt.Errorf("external work scan failed; kept previous inventory at %s: %w", path, err)
+		}
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("external work scan canceled; kept previous inventory at %s: %w", path, err)
+		}
+		if err := externalwork.SaveLatest(ctx, path, inv); err != nil {
 			return err
 		}
 	}
@@ -293,7 +300,10 @@ func sessionsDiscover(ctx context.Context, args []string) error {
 	if *since > 0 {
 		cutoff = time.Now().Add(-*since)
 	}
-	inv := externalwork.Scan(ctx, home, workspace, cutoff)
+	inv, err := scanExternalWork(ctx, home, workspace, cutoff)
+	if err != nil {
+		return fmt.Errorf("external work discovery incomplete: %w", err)
+	}
 	if *output != "" {
 		f, err := os.OpenFile(*output, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err != nil {

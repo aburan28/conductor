@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -41,20 +42,32 @@ type Inventory struct {
 	Warnings   []string            `json:"warnings,omitempty"`
 }
 
+const sourceTimeout = 60 * time.Second
+
 // Scan reads saved-session metadata and looks for an exact UUID in a live Codex/Claude
 // resume invocation. A live process does not establish that its task is unfinished.
-func Scan(ctx context.Context, home, workspace string, since time.Time) Inventory {
+func Scan(ctx context.Context, home, workspace string, since time.Time) (Inventory, error) {
 	inv := Inventory{Version: 1, StartedAt: time.Now(), Configs: map[string][]string{}, Candidates: []Candidate{}}
-	for _, root := range codexRoots(ctx, home, os.Getenv("CODEX_HOME"), "/Volumes") {
+	roots, err := codexRoots(ctx, home, os.Getenv("CODEX_HOME"), "/Volumes")
+	if err != nil {
+		return inv, fmt.Errorf("Codex root discovery: %w", err)
+	}
+	for _, root := range roots {
+		if err := ctx.Err(); err != nil {
+			return inv, err
+		}
 		inv.Configs["codex"] = appendExisting(inv.Configs["codex"], filepath.Join(root, "config.toml"))
 		path := filepath.Join(root, "state_5.sqlite")
-		if _, err := os.Stat(path); err != nil {
+		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 			continue
+		} else if err != nil {
+			return inv, fmt.Errorf("Codex index %s: %w", path, err)
 		}
-		rows, err := codexRows(ctx, path, since)
+		sourceCtx, cancel := context.WithTimeout(ctx, sourceTimeout)
+		rows, err := codexRows(sourceCtx, path, since)
+		cancel()
 		if err != nil {
-			inv.Warnings = append(inv.Warnings, fmt.Sprintf("Codex index %s: %v", path, err))
-			continue
+			return inv, fmt.Errorf("Codex index %s: %w", path, err)
 		}
 		for _, row := range rows {
 			if row.Archived != 0 || row.ID == "" || time.Unix(row.UpdatedAt, 0).Before(since) {
@@ -65,9 +78,15 @@ func Scan(ctx context.Context, home, workspace string, since time.Time) Inventor
 	}
 	claude := filepath.Join(home, ".claude")
 	inv.Configs["claude"] = appendExisting(nil, filepath.Join(claude, "settings.json"), filepath.Join(claude, "settings.local.json"), filepath.Join(home, ".claude.json"))
-	inv.Candidates = append(inv.Candidates, scanFiles(filepath.Join(claude, "projects"), "claude", since, func(path string) bool {
+	claudeCtx, cancel := context.WithTimeout(ctx, sourceTimeout)
+	claudeCandidates, err := scanFiles(claudeCtx, filepath.Join(claude, "projects"), "claude", since, func(path string) bool {
 		return filepath.Ext(path) == ".jsonl" && validUUID(strings.TrimSuffix(filepath.Base(path), ".jsonl"))
-	})...)
+	})
+	cancel()
+	if err != nil {
+		return inv, fmt.Errorf("Claude projects %s: %w", filepath.Join(claude, "projects"), err)
+	}
+	inv.Candidates = append(inv.Candidates, claudeCandidates...)
 	cursor := filepath.Join(home, ".cursor")
 	inv.Configs["cursor"] = appendExisting(nil, filepath.Join(cursor, "mcp.json"), filepath.Join(cursor, "cli-config.json"), filepath.Join(cursor, "hooks.json"), filepath.Join(home, "Library/Application Support/Cursor/User/settings.json"))
 	if workspace != "" {
@@ -75,9 +94,15 @@ func Scan(ctx context.Context, home, workspace string, since time.Time) Inventor
 		inv.Configs["claude"] = appendExisting(inv.Configs["claude"], filepath.Join(workspace, ".mcp.json"), filepath.Join(workspace, ".claude/settings.json"), filepath.Join(workspace, ".claude/settings.local.json"))
 		inv.Configs["cursor"] = appendExisting(inv.Configs["cursor"], filepath.Join(workspace, ".cursor/mcp.json"), filepath.Join(workspace, ".cursor/rules/conductor.mdc"))
 	}
-	inv.Candidates = append(inv.Candidates, scanFiles(filepath.Join(cursor, "projects"), "cursor", since, func(path string) bool {
+	cursorCtx, cancel := context.WithTimeout(ctx, sourceTimeout)
+	cursorCandidates, err := scanFiles(cursorCtx, filepath.Join(cursor, "projects"), "cursor", since, func(path string) bool {
 		return filepath.Ext(path) == ".jsonl" && strings.Contains(path, string(filepath.Separator)+"agent-transcripts"+string(filepath.Separator)) && validUUID(strings.TrimSuffix(filepath.Base(path), ".jsonl"))
-	})...)
+	})
+	cancel()
+	if err != nil {
+		return inv, fmt.Errorf("Cursor projects %s: %w", filepath.Join(cursor, "projects"), err)
+	}
+	inv.Candidates = append(inv.Candidates, cursorCandidates...)
 	// The same Codex thread can appear in both a current and an older state root.
 	sort.Slice(inv.Candidates, func(i, j int) bool { return inv.Candidates[i].UpdatedAt.After(inv.Candidates[j].UpdatedAt) })
 	seen := map[string]bool{}
@@ -89,19 +114,24 @@ func Scan(ctx context.Context, home, workspace string, since time.Time) Inventor
 		}
 	}
 	inv.Candidates = unique
-	if active, err := explicitResumeProcesses(ctx, os.Getuid()); err == nil {
-		markProcessAliveAtScan(inv.Candidates, active)
-	} else {
-		inv.Warnings = append(inv.Warnings, fmt.Sprintf("live process check unavailable: %v", err))
+	processCtx, cancel := context.WithTimeout(ctx, sourceTimeout)
+	active, err := explicitResumeProcesses(processCtx, os.Getuid())
+	cancel()
+	if err != nil {
+		return inv, fmt.Errorf("live process check: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return inv, err
+	}
+	markProcessAliveAtScan(inv.Candidates, active)
 	inv.ScannedAt = time.Now()
-	return inv
+	return inv, nil
 }
 
 // codexRoots lists /Volumes itself once, then checks each literal .codex path.
 // filepath.Glob("/Volumes/*/.codex") opens every mounted volume root to match
 // the wildcard; an unresponsive mount can stall the whole background scan.
-func codexRoots(ctx context.Context, home, custom, volumes string) []string {
+func codexRoots(ctx context.Context, home, custom, volumes string) ([]string, error) {
 	roots := []string{}
 	if custom != "" {
 		roots = append(roots, custom)
@@ -110,13 +140,17 @@ func codexRoots(ctx context.Context, home, custom, volumes string) []string {
 	if entries, err := os.ReadDir(volumes); err == nil {
 		for _, entry := range entries {
 			if ctx.Err() != nil {
-				break
+				return nil, ctx.Err()
 			}
 			root := filepath.Join(volumes, entry.Name(), ".codex")
 			if st, err := os.Stat(root); err == nil && st.IsDir() {
 				roots = append(roots, root)
+			} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return nil, fmt.Errorf("%s: %w", root, err)
 			}
 		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("%s: %w", volumes, err)
 	}
 	seen := map[string]bool{}
 	unique := roots[:0]
@@ -126,7 +160,10 @@ func codexRoots(ctx context.Context, home, custom, volumes string) []string {
 			unique = append(unique, root)
 		}
 	}
-	return unique
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return unique, nil
 }
 
 func markProcessAliveAtScan(candidates []Candidate, active map[string]int) {
@@ -209,10 +246,14 @@ func codexRows(ctx context.Context, path string, since time.Time) ([]codexRow, e
 	// sort the whole result instead of seeking to the recent end of updated_at.
 	query := fmt.Sprintf("SELECT id,title,cwd,updated_at,archived FROM threads WHERE updated_at >= %d ORDER BY updated_at DESC", since.Unix())
 	cmd := exec.CommandContext(ctx, "sqlite3", "-readonly", "-json", path, query)
+	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("sqlite3: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	// sqlite3 -json writes no bytes for a successful query with zero rows.
@@ -226,20 +267,32 @@ func codexRows(ctx context.Context, path string, since time.Time) ([]codexRow, e
 	return rows, nil
 }
 
-func scanFiles(root, source string, since time.Time, accept func(string) bool) []Candidate {
+func scanFiles(ctx context.Context, root, source string, since time.Time, accept func(string) bool) ([]Candidate, error) {
 	var out []Candidate
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !accept(path) {
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err != nil {
+			if path == root && errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		if d.IsDir() || !accept(path) {
 			return nil
 		}
 		st, e := d.Info()
-		if e != nil || st.ModTime().Before(since) {
+		if e != nil {
+			return e
+		}
+		if st.ModTime().Before(since) {
 			return nil
 		}
 		out = append(out, Candidate{Source: source, ID: strings.TrimSuffix(d.Name(), ".jsonl"), RecordPath: path, UpdatedAt: st.ModTime(), Activity: "saved; running state unknown"})
 		return nil
 	})
-	return out
+	return out, err
 }
 
 func validUUID(s string) bool {

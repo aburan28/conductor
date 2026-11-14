@@ -2,6 +2,7 @@ package externalwork
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,13 +33,13 @@ func TestCodexRootsDiscoversLiteralMountedDirectories(t *testing.T) {
 	}
 	custom := filepath.Join(volumes, "SSD990", ".codex")
 	want := []string{custom, filepath.Join(home, ".codex"), filepath.Join(volumes, "SSD990-2", ".codex")}
-	if got := codexRoots(context.Background(), home, custom, volumes); !reflect.DeepEqual(got, want) {
-		t.Fatalf("roots=%v, want %v", got, want)
+	if got, err := codexRoots(context.Background(), home, custom, volumes); err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("roots=%v, want %v, err=%v", got, want, err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if got := codexRoots(ctx, home, custom, volumes); !reflect.DeepEqual(got, want[:2]) {
-		t.Fatalf("canceled roots=%v, want %v", got, want[:2])
+	if _, err := codexRoots(ctx, home, custom, volumes); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled discovery err=%v", err)
 	}
 }
 
@@ -51,12 +52,27 @@ func TestScanFilesUsesOnlyNamesAndMetadata(t *testing.T) {
 	if err := os.WriteFile(transcript, []byte("private conversation that must not be read"), 0o000); err != nil {
 		t.Fatal(err)
 	}
-	got := scanFiles(root, "cursor", time.Now().Add(-time.Hour), func(p string) bool { return filepath.Ext(p) == ".jsonl" })
-	if len(got) != 1 || got[0].ID != sampleID || got[0].Title != "" || got[0].Activity != "saved; running state unknown" {
-		t.Fatalf("unexpected metadata: %#v", got)
+	got, err := scanFiles(context.Background(), root, "cursor", time.Now().Add(-time.Hour), func(p string) bool { return filepath.Ext(p) == ".jsonl" })
+	if err != nil || len(got) != 1 || got[0].ID != sampleID || got[0].Title != "" || got[0].Activity != "saved; running state unknown" {
+		t.Fatalf("unexpected metadata: %#v, err=%v", got, err)
 	}
-	if got := scanFiles(root, "cursor", time.Now().Add(time.Hour), func(string) bool { return true }); len(got) != 0 {
-		t.Fatalf("future cutoff returned %d files", len(got))
+	if got, err := scanFiles(context.Background(), root, "cursor", time.Now().Add(time.Hour), func(string) bool { return true }); err != nil || len(got) != 0 {
+		t.Fatalf("future cutoff returned %d files, err=%v", len(got), err)
+	}
+}
+
+func TestCodexRowsDeadlineKillsStalledSQLiteChild(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "sqlite3"), []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := codexRows(ctx, filepath.Join(dir, "state.sqlite"), time.Time{})
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) > 3*time.Second {
+		t.Fatalf("stalled sqlite3 was not bounded: err=%v elapsed=%s", err, time.Since(started))
 	}
 }
 
