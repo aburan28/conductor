@@ -130,6 +130,111 @@ func (f *fixture) claimParams(task domain.Task, holder domain.Principal, scopes 
 	}
 }
 
+func TestCompactStatusQueriesMatchFullLists(t *testing.T) {
+	f := newFixture(t)
+	statuses := []domain.TaskStatus{
+		domain.TaskReady, domain.TaskClaimed, domain.TaskRunning,
+		domain.TaskVerifying, domain.TaskBlockedInput, domain.TaskDone,
+	}
+	tasks := make([]domain.Task, 0, 9)
+	for i := 0; i < 9; i++ {
+		status := statuses[i%len(statuses)]
+		task, err := f.store.CreateTask(f.ctx, CreateTaskParams{
+			ProjectID: f.project.ID, CreatedBy: f.alice.ID,
+			Title: "status query fixture", Status: status,
+		})
+		if err != nil {
+			t.Fatalf("CreateTask: %v", err)
+		}
+		tasks = append(tasks, task)
+	}
+	fullTasks, err := f.store.ListTasks(f.ctx, f.project.ID, ListTasksFilter{OpenOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCounts := map[string]int{}
+	for _, task := range fullTasks {
+		wantCounts[string(task.Status)]++
+	}
+	counts, err := f.store.CountOpenTasksByStatus(f.ctx, f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(counts) != len(wantCounts) {
+		t.Fatalf("status bucket count = %v, want %v", counts, wantCounts)
+	}
+	for status, want := range wantCounts {
+		if counts[status] != want {
+			t.Fatalf("status %s count = %d, want %d", status, counts[status], want)
+		}
+	}
+	activeStatuses := []domain.TaskStatus{
+		domain.TaskClaimed, domain.TaskRunning, domain.TaskVerifying,
+		domain.TaskReviewRequired, domain.TaskMerging,
+	}
+	active, err := f.store.ListTasks(f.ctx, f.project.ID, ListTasksFilter{Statuses: activeStatuses, Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wantActive []domain.Task
+	for _, task := range fullTasks {
+		if task.Status.IsActive() && len(wantActive) < 2 {
+			wantActive = append(wantActive, task)
+		}
+	}
+	if len(active) != len(wantActive) {
+		t.Fatalf("active count = %d, want %d", len(active), len(wantActive))
+	}
+	for i, task := range active {
+		if task.ID != wantActive[i].ID {
+			t.Fatalf("active task %d = %s, want %s", i, task.ID, wantActive[i].ID)
+		}
+	}
+
+	for i := 1; i < len(tasks); i++ {
+		for j := 0; j < i; j++ {
+			severity := domain.SeverityLow
+			if i%3 == 0 {
+				severity = domain.SeverityHigh
+			}
+			if _, err := f.store.UpsertConflict(f.ctx, domain.ConflictEdge{
+				ProjectID: f.project.ID, TaskA: tasks[i].ID, TaskB: tasks[j].ID,
+				Kind: domain.ConflictScopeOverlap, Severity: severity,
+				Suggestion: domain.OutcomeAllow,
+			}); err != nil {
+				t.Fatalf("UpsertConflict: %v", err)
+			}
+		}
+	}
+	fullConflicts, err := f.store.ListConflicts(f.ctx, f.project.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limited, err := f.store.ListConflictsLimited(f.ctx, f.project.ID, true, 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count, err := f.store.CountConflicts(f.ctx, f.project.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != len(fullConflicts) || len(limited) != 25 {
+		t.Fatalf("conflicts: count=%d, full=%d, limited=%d", count, len(fullConflicts), len(limited))
+	}
+	for i, edge := range limited {
+		if edge.ID != fullConflicts[i].ID {
+			t.Fatalf("conflict %d = %s, want %s", i, edge.ID, fullConflicts[i].ID)
+		}
+	}
+	byID, err := f.store.TasksByID(f.ctx, []domain.ID{tasks[0].ID, tasks[1].ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byID) != 2 || byID[tasks[0].ID].Title != tasks[0].Title {
+		t.Fatalf("TasksByID returned wrong task set: %v", byID)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // DESIGN.md §31.1 / §32.2 — exactly one active lease per task
 // ---------------------------------------------------------------------------

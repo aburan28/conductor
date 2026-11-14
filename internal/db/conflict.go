@@ -257,6 +257,16 @@ func (s *Store) UpsertConflict(ctx context.Context, e domain.ConflictEdge) (doma
 
 // ListConflicts returns conflict edges for a project.
 func (s *Store) ListConflicts(ctx context.Context, projectID domain.ID, openOnly bool) ([]domain.ConflictEdge, error) {
+	return s.listConflicts(ctx, projectID, openOnly, 0)
+}
+
+// ListConflictsLimited keeps compact status views from loading the entire
+// conflict graph. Zero means no limit, as in ListConflicts.
+func (s *Store) ListConflictsLimited(ctx context.Context, projectID domain.ID, openOnly bool, limit int) ([]domain.ConflictEdge, error) {
+	return s.listConflicts(ctx, projectID, openOnly, limit)
+}
+
+func (s *Store) listConflicts(ctx context.Context, projectID domain.ID, openOnly bool, limit int) ([]domain.ConflictEdge, error) {
 	q := `SELECT ` + conflictColumns + ` FROM conflict_edges WHERE project_id = $1::uuid`
 	if openOnly {
 		q += ` AND state IN ('open','acknowledged')`
@@ -265,8 +275,13 @@ func (s *Store) ListConflicts(ctx context.Context, projectID domain.ID, openOnly
 	                  WHEN 'critical' THEN 4 WHEN 'high' THEN 3
 	                  WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC,
 	                detected_at DESC`
+	args := []any{projectID}
+	if limit > 0 {
+		q += ` LIMIT $2`
+		args = append(args, limit)
+	}
 
-	rows, err := s.pool.Query(ctx, q, projectID)
+	rows, err := s.pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -280,6 +295,20 @@ func (s *Store) ListConflicts(ctx context.Context, projectID domain.ID, openOnly
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// CountConflicts returns the full conflict count for a compact status view
+// without materializing every edge and its two task views.
+func (s *Store) CountConflicts(ctx context.Context, projectID domain.ID, openOnly bool) (int, error) {
+	q := `SELECT count(*) FROM conflict_edges WHERE project_id = $1::uuid`
+	if openOnly {
+		q += ` AND state IN ('open','acknowledged')`
+	}
+	var count int64
+	if err := s.pool.QueryRow(ctx, q, projectID).Scan(&count); err != nil {
+		return 0, err
+	}
+	return int(count), nil
 }
 
 // ConflictsForTask returns open edges touching a task, which is what blocks a claim when
