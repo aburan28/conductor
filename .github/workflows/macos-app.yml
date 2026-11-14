@@ -2,9 +2,9 @@ name: macOS app
 
 # Conductor.app (macos/, docs/MACOS_APP.md). Two jobs: ConductorKit, where all the logic is,
 # built and tested on Linux in the Swift container; and the app itself built on a Mac,
-# tested, assembled by macos/build.sh (unsigned: no signing secrets are configured yet), run
-# against its own bundled Postgres and conductord, and uploaded as ZIP and DMG artifacts.
-# The release workflow calls this same build with the release tag as its version.
+# tested, assembled by macos/build.sh, run against its bundled Postgres and conductord,
+# and uploaded as ZIP and DMG artifacts. Release calls require Developer ID, notarization,
+# and Sparkle keys and also produce a signed appcast artifact.
 
 on:
   pull_request:
@@ -113,31 +113,52 @@ jobs:
           path: macos/build/postgres
           key: postgres-${{ hashFiles('macos/fetch-postgres.sh') }}
 
-      # Local/PR artifacts may be unsigned. The release caller always supplies version, and a
-      # public release is unsigned only because this workflow says so: no Developer ID
-      # certificate or notarization credentials are configured yet, so releases ship the
-      # unsigned DMG (its README says how to open it). Once the signing secrets are wired into
-      # the build, set CONDUCTOR_ALLOW_UNSIGNED_RELEASE to "0" so an unsigned public release is
-      # refused again.
-      #
-      # The policy lives here, not in the checked-out tag's signing.sh, so a release backfilled
-      # from main is judged by main's rule. It uses only release_signing_mode, which every
-      # tagged signing.sh has, and which refuses partial signing on its own.
-      - name: Release signing policy
+      # A release may not silently ship an ad hoc signed app or a feed that cannot verify
+      # its update. PR and main builds remain unsigned test artifacts.
+      - name: Import release credentials
         if: inputs.version != ''
         env:
-          CONDUCTOR_ALLOW_UNSIGNED_RELEASE: "1"
+          APP_ID: ${{ secrets.CONDUCTOR_DEVELOPER_ID_APPLICATION }}
+          INSTALLER_ID: ${{ secrets.CONDUCTOR_DEVELOPER_ID_INSTALLER }}
+          APP_P12: ${{ secrets.CONDUCTOR_DEVELOPER_ID_APPLICATION_P12 }}
+          INSTALLER_P12: ${{ secrets.CONDUCTOR_DEVELOPER_ID_INSTALLER_P12 }}
+          CERT_PASSWORD: ${{ secrets.CONDUCTOR_CERT_PASSWORD }}
+          NOTARY_P8: ${{ secrets.CONDUCTOR_NOTARY_KEY_P8 }}
+          NOTARY_ID: ${{ secrets.CONDUCTOR_NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.CONDUCTOR_NOTARY_ISSUER }}
+          SPARKLE_PUBLIC: ${{ secrets.CONDUCTOR_SPARKLE_PUBLIC_ED_KEY }}
+          SPARKLE_PRIVATE: ${{ secrets.CONDUCTOR_SPARKLE_PRIVATE_ED_KEY }}
+        run: |
+          set -euo pipefail
+          for name in APP_ID INSTALLER_ID APP_P12 INSTALLER_P12 CERT_PASSWORD NOTARY_P8 NOTARY_ID NOTARY_ISSUER SPARKLE_PUBLIC SPARKLE_PRIVATE; do
+            [ -n "${!name}" ] || { echo "::error::missing release secret $name"; exit 1; }
+          done
+          keychain="$RUNNER_TEMP/conductor-release.keychain-db"
+          password="$(openssl rand -hex 24)"
+          security create-keychain -p "$password" "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security default-keychain -d user -s "$keychain"
+          printf '%s' "$APP_P12" | base64 -D > "$RUNNER_TEMP/conductor-app.p12"
+          printf '%s' "$INSTALLER_P12" | base64 -D > "$RUNNER_TEMP/conductor-installer.p12"
+          security import "$RUNNER_TEMP/conductor-app.p12" -k "$keychain" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security import "$RUNNER_TEMP/conductor-installer.p12" -k "$keychain" -P "$CERT_PASSWORD" -T /usr/bin/productbuild -T /usr/bin/productsign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain"
+          rm -f "$RUNNER_TEMP/conductor-app.p12" "$RUNNER_TEMP/conductor-installer.p12"
+          printf '%s' "$NOTARY_P8" | base64 -D > "$RUNNER_TEMP/conductor-notary.p8"
+          chmod 600 "$RUNNER_TEMP/conductor-notary.p8"
+          printf 'DEVELOPER_ID_APPLICATION=%s\nDEVELOPER_ID_INSTALLER=%s\nNOTARY_KEY=%s\nNOTARY_KEY_ID=%s\nNOTARY_ISSUER=%s\nSPARKLE_PUBLIC_ED_KEY=%s\n' \
+            "$APP_ID" "$INSTALLER_ID" "$RUNNER_TEMP/conductor-notary.p8" "$NOTARY_ID" "$NOTARY_ISSUER" "$SPARKLE_PUBLIC" >> "$GITHUB_ENV"
+
+      - name: Release signing policy
+        if: inputs.version != ''
         run: |
           . macos/packaging/signing.sh
-          mode="$(release_signing_mode)"
-          if [ "$mode" = developer-id ]; then
-            echo "signing: Developer ID signing and notarization configured"
-          elif [ "$CONDUCTOR_ALLOW_UNSIGNED_RELEASE" = 1 ]; then
-            echo "::warning::publishing an unsigned release: no Developer ID signing is configured (CONDUCTOR_ALLOW_UNSIGNED_RELEASE=1)"
-          else
-            echo "::error::public releases require Developer ID signing and notarization; leaving the release unpublished"
+          [ "$(release_signing_mode)" = developer-id ] || {
+            echo "::error::public releases require Developer ID signing and notarization"
             exit 1
-          fi
+          }
+          [ -n "$SPARKLE_PUBLIC_ED_KEY" ] || { echo "::error::Sparkle public key missing"; exit 1; }
 
       - name: Build Conductor.app (universal)
         run: macos/build.sh --version "$APP_VERSION"
@@ -171,6 +192,32 @@ jobs:
           set -euo pipefail
           macos/packaging/build-dmg.sh --app macos/build/Conductor.app --version "$APP_VERSION" --out dist
           hdiutil verify "dist/Conductor-${APP_VERSION#v}-macos-universal.dmg"
+
+      - name: Sparkle appcast tooling test
+        run: macos/packaging/test-appcast.sh
+
+      - name: Generate and verify the signed update feed
+        if: inputs.version != ''
+        env:
+          SPARKLE_PRIVATE: ${{ secrets.CONDUCTOR_SPARKLE_PRIVATE_ED_KEY }}
+        run: |
+          set -euo pipefail
+          keyfile="$RUNNER_TEMP/conductor-sparkle.key"
+          trap 'rm -f "$keyfile"' EXIT
+          umask 077
+          printf '%s' "$SPARKLE_PRIVATE" > "$keyfile"
+          dmg="dist/Conductor-${APP_VERSION#v}-macos-universal.dmg"
+          macos/packaging/appcast.sh generate --dmg "$dmg" --version "$APP_VERSION" \
+            --repo "$GITHUB_REPOSITORY" --out dist/appcast.xml --key-file "$keyfile" \
+            --public-key "$SPARKLE_PUBLIC_ED_KEY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: inputs.version != ''
+        with:
+          name: Conductor.appcast
+          path: dist/appcast.xml
+          retention-days: 14
+          if-no-files-found: error
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
