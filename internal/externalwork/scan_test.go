@@ -34,13 +34,17 @@ func TestCodexRowsAndImportIdentifiers(t *testing.T) {
 		t.Skip("sqlite3 unavailable")
 	}
 	path := filepath.Join(t.TempDir(), "state.sqlite")
-	cmd := exec.Command("sqlite3", path, "CREATE TABLE threads (id TEXT,title TEXT,cwd TEXT,updated_at INTEGER,archived INTEGER); INSERT INTO threads VALUES ('"+sampleID+"','private title','/repo',100,0);")
+	cmd := exec.Command("sqlite3", path, "CREATE TABLE threads (id TEXT,title TEXT,cwd TEXT,updated_at INTEGER,archived INTEGER); INSERT INTO threads VALUES ('"+sampleID+"','private title','/repo',200,0); INSERT INTO threads VALUES ('aaaaaaaa-1234-1234-1234-123456789abc','old title','/repo',100,0);")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("create index: %v: %s", err, out)
 	}
-	rows, err := codexRows(context.Background(), path)
+	rows, err := codexRows(context.Background(), path, time.Unix(150, 0))
 	if err != nil || len(rows) != 1 || rows[0].ID != sampleID {
 		t.Fatalf("rows=%#v err=%v", rows, err)
+	}
+	all, err := codexRows(context.Background(), path, time.Time{})
+	if err != nil || len(all) != 2 || all[0].ID != sampleID {
+		t.Fatalf("unbounded rows=%#v err=%v", all, err)
 	}
 	for _, source := range []string{"codex", "claude", "cursor"} {
 		if !ValidCandidate(Candidate{Source: source, ID: sampleID}) {
@@ -49,5 +53,36 @@ func TestCodexRowsAndImportIdentifiers(t *testing.T) {
 	}
 	if ValidCandidate(Candidate{Source: "github", ID: sampleID}) || ValidCandidate(Candidate{Source: "codex", ID: "../../bad"}) {
 		t.Fatal("accepted unsupported source or ID")
+	}
+}
+
+func TestParseResumeProcessesRequiresExactOwnedInvocation(t *testing.T) {
+	ps := `101 501 /opt/bin/codex /opt/bin/codex resume 12345678-1234-1234-1234-123456789abc
+102 501 claude claude --resume 12345678-1234-1234-1234-123456789abc
+103 501 claude claude --resume=ABCDEFAB-1234-1234-1234-123456789ABC
+104 502 codex codex resume 22222222-2222-2222-2222-222222222222
+105 501 bash bash -c codex resume 33333333-3333-3333-3333-333333333333
+106 501 codex codex exec --json 44444444-4444-4444-4444-444444444444
+107 501 claude claude -p --resume 55555555-5555-5555-5555-555555555555
+108 501 cursor cursor --resume 66666666-6666-6666-6666-666666666666
+109 501 codex codex resume --last
+`
+	got := parseResumeProcesses(ps, 501)
+	if len(got) != 3 || got["codex:"+sampleID] != 101 || got["claude:"+sampleID] != 102 || got["claude:abcdefab-1234-1234-1234-123456789abc"] != 103 {
+		t.Fatalf("unexpected exact process matches: %#v", got)
+	}
+}
+
+func TestMarkProcessAliveAtScanDoesNotInferOtherSavedWork(t *testing.T) {
+	candidates := []Candidate{
+		{Source: "codex", ID: "ABCDEFAB-1234-1234-1234-123456789ABC", Activity: "saved; running state unknown"},
+		{Source: "cursor", ID: sampleID, Activity: "saved; running state unknown"},
+	}
+	markProcessAliveAtScan(candidates, map[string]int{"codex:abcdefab-1234-1234-1234-123456789abc": 101})
+	if !candidates[0].ProcessAliveAtScan || candidates[0].ProcessID != 101 || candidates[0].Activity != "session process observed at scan; task state unknown" {
+		t.Fatalf("matching live session not annotated: %#v", candidates[0])
+	}
+	if candidates[1].ProcessAliveAtScan || candidates[1].ProcessID != 0 || candidates[1].Activity != "saved; running state unknown" {
+		t.Fatalf("unmatched saved record was promoted: %#v", candidates[1])
 	}
 }

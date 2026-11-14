@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -24,22 +25,26 @@ type Candidate struct {
 	RecordPath string    `json:"record_path"`
 	UpdatedAt  time.Time `json:"updated_at"`
 	Activity   string    `json:"activity"`
+	// These facts describe one process-table snapshot, not whether the task is unfinished.
+	ProcessAliveAtScan bool `json:"process_alive_at_scan,omitempty"`
+	ProcessID          int  `json:"process_id,omitempty"`
 }
 
 func (c Candidate) Ref() string { return c.Source + ":" + c.ID }
 
 type Inventory struct {
 	Version    int                 `json:"version"`
+	StartedAt  time.Time           `json:"started_at,omitzero"`
 	ScannedAt  time.Time           `json:"scanned_at"`
 	Configs    map[string][]string `json:"configs"`
 	Candidates []Candidate         `json:"candidates"`
 	Warnings   []string            `json:"warnings,omitempty"`
 }
 
-// Scan checks only metadata: Codex's thread index and Claude/Cursor filenames and
-// modification times. Activity remains unknown until the originating tool confirms it.
+// Scan reads saved-session metadata and looks for an exact UUID in a live Codex/Claude
+// resume invocation. A live process does not establish that its task is unfinished.
 func Scan(ctx context.Context, home, workspace string, since time.Time) Inventory {
-	inv := Inventory{Version: 1, ScannedAt: time.Now(), Configs: map[string][]string{}, Candidates: []Candidate{}}
+	inv := Inventory{Version: 1, StartedAt: time.Now(), Configs: map[string][]string{}, Candidates: []Candidate{}}
 	roots := []string{filepath.Join(home, ".codex")}
 	// Codex Desktop can place its state at a mounted volume root on macOS.
 	if mounted, err := filepath.Glob("/Volumes/*/.codex"); err == nil {
@@ -62,7 +67,7 @@ func Scan(ctx context.Context, home, workspace string, since time.Time) Inventor
 		if _, err := os.Stat(path); err != nil {
 			continue
 		}
-		rows, err := codexRows(ctx, path)
+		rows, err := codexRows(ctx, path, since)
 		if err != nil {
 			inv.Warnings = append(inv.Warnings, fmt.Sprintf("Codex index %s: %v", path, err))
 			continue
@@ -100,7 +105,70 @@ func Scan(ctx context.Context, home, workspace string, since time.Time) Inventor
 		}
 	}
 	inv.Candidates = unique
+	if active, err := explicitResumeProcesses(ctx, os.Getuid()); err == nil {
+		markProcessAliveAtScan(inv.Candidates, active)
+	} else {
+		inv.Warnings = append(inv.Warnings, fmt.Sprintf("live process check unavailable: %v", err))
+	}
+	inv.ScannedAt = time.Now()
 	return inv
+}
+
+func markProcessAliveAtScan(candidates []Candidate, active map[string]int) {
+	for i := range candidates {
+		if pid := active[strings.ToLower(candidates[i].Ref())]; pid > 0 {
+			candidates[i].ProcessAliveAtScan = true
+			candidates[i].ProcessID = pid
+			candidates[i].Activity = "session process observed at scan; task state unknown"
+		}
+	}
+}
+
+// explicitResumeProcesses keeps only the PID and exact session reference. Process argv may
+// contain private prompts, so it must never be saved in the inventory or a task card.
+func explicitResumeProcesses(ctx context.Context, uid int) (map[string]int, error) {
+	out, err := exec.CommandContext(ctx, "ps", "-axww", "-o", "pid=,uid=,comm=,args=").Output()
+	if err != nil {
+		return nil, err
+	}
+	return parseResumeProcesses(string(out), uid), nil
+}
+
+func parseResumeProcesses(output string, uid int) map[string]int {
+	refs := map[string]int{}
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		pid, pidErr := strconv.Atoi(fields[0])
+		owner, uidErr := strconv.Atoi(fields[1])
+		if pidErr != nil || uidErr != nil || pid <= 0 || owner != uid {
+			continue
+		}
+		comm := filepath.Base(fields[2])
+		argv := fields[3:]
+		if filepath.Base(argv[0]) != comm {
+			continue
+		}
+		var source, id string
+		switch comm {
+		case "codex":
+			if len(argv) >= 3 && argv[1] == "resume" {
+				source, id = "codex", argv[2]
+			}
+		case "claude":
+			if len(argv) >= 3 && (argv[1] == "--resume" || argv[1] == "-r") {
+				source, id = "claude", argv[2]
+			} else if len(argv) >= 2 && strings.HasPrefix(argv[1], "--resume=") {
+				source, id = "claude", strings.TrimPrefix(argv[1], "--resume=")
+			}
+		}
+		if validUUID(id) {
+			refs[source+":"+strings.ToLower(id)] = pid
+		}
+	}
+	return refs
 }
 
 func appendExisting(dst []string, paths ...string) []string {
@@ -120,8 +188,12 @@ type codexRow struct {
 	Archived  int    `json:"archived"`
 }
 
-func codexRows(ctx context.Context, path string) ([]codexRow, error) {
-	cmd := exec.CommandContext(ctx, "sqlite3", "-readonly", "-json", path, "SELECT id,title,cwd,updated_at,archived FROM threads")
+func codexRows(ctx context.Context, path string, since time.Time) ([]codexRow, error) {
+	// Codex indexes updated_at. Keep the time predicate first and filter archived rows
+	// afterward: combining archived=0 here can make SQLite choose its archived index and
+	// sort the whole result instead of seeking to the recent end of updated_at.
+	query := fmt.Sprintf("SELECT id,title,cwd,updated_at,archived FROM threads WHERE updated_at >= %d ORDER BY updated_at DESC", since.Unix())
+	cmd := exec.CommandContext(ctx, "sqlite3", "-readonly", "-json", path, query)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
