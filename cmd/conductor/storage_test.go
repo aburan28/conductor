@@ -160,7 +160,7 @@ func TestStorageSetTestThenBackupPushUsesTheBucket(t *testing.T) {
 	if _, err := captureStdout(t, func() error { return backupPush(ctx, nil) }); err != nil {
 		t.Fatalf("backup push: %v", err)
 	}
-	if _, ok := fake.Object("conductor/machines/laptop/sessions.json"); !ok {
+	if keys := fake.Keys("conductor/machines/laptop/snapshots/"); len(keys) != 1 {
 		t.Fatalf("backup push did not reach the configured bucket: %v", fake.Keys(""))
 	}
 	for _, ak := range fake.AccessKeys {

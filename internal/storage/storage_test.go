@@ -220,8 +220,8 @@ func TestOpenStoreHonoursUses(t *testing.T) {
 	if err := store.PutSessions(context.Background(), []byte(`{"records":[]}`), time.Unix(0, 0).UTC()); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := fake.Object("conductor/machines/mac-1/sessions.json"); !ok {
-		t.Errorf("manifest not written where expected: %v", fake.Keys(""))
+	if keys := fake.Keys("conductor/machines/mac-1/snapshots/"); len(keys) != 1 {
+		t.Errorf("write-once session snapshot not written where expected: %v", fake.Keys(""))
 	}
 }
 

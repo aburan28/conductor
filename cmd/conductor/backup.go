@@ -104,8 +104,8 @@ func backupPush(ctx context.Context, args []string) error {
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, `conductor backup push — copy this machine's resume records to S3
 
-Bundles every saved/paused/running session record under ~/.conductor/sessions and uploads it,
-keyed by machine, plus a timestamped snapshot. Configure with CONDUCTOR_BACKUP_S3_BUCKET and
+Bundles every saved/paused/running session record under ~/.conductor/sessions into a
+write-once snapshot keyed by machine. Configure with CONDUCTOR_BACKUP_S3_BUCKET and
 the AWS_* credentials. Only resume metadata is uploaded — the harness argv (which can carry a
 prompt) is stripped first, and a transcript never leaves the harness.
 
@@ -353,7 +353,7 @@ func backupStatus(ctx context.Context, args []string) error {
 		})
 	}
 	fmt.Printf("Off-host backup: %s\n", store.Describe())
-	fmt.Printf("  manifest   %s\n", store.Location())
+	fmt.Printf("  location   %s\n", store.Location())
 	fmt.Printf("  snapshots  %d (latest: %s)\n", len(snaps), last)
 	return nil
 }
