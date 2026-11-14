@@ -45,23 +45,7 @@ type Inventory struct {
 // resume invocation. A live process does not establish that its task is unfinished.
 func Scan(ctx context.Context, home, workspace string, since time.Time) Inventory {
 	inv := Inventory{Version: 1, StartedAt: time.Now(), Configs: map[string][]string{}, Candidates: []Candidate{}}
-	roots := []string{filepath.Join(home, ".codex")}
-	// Codex Desktop can place its state at a mounted volume root on macOS.
-	if mounted, err := filepath.Glob("/Volumes/*/.codex"); err == nil {
-		roots = append(roots, mounted...)
-	}
-	if custom := os.Getenv("CODEX_HOME"); custom != "" {
-		roots = append([]string{custom}, roots...)
-	}
-	seenRoots := map[string]bool{}
-	for _, root := range roots {
-		if seenRoots[root] {
-			continue
-		}
-		seenRoots[root] = true
-		if _, err := os.Stat(root); err != nil {
-			continue
-		}
+	for _, root := range codexRoots(ctx, home, os.Getenv("CODEX_HOME"), "/Volumes") {
 		inv.Configs["codex"] = appendExisting(inv.Configs["codex"], filepath.Join(root, "config.toml"))
 		path := filepath.Join(root, "state_5.sqlite")
 		if _, err := os.Stat(path); err != nil {
@@ -112,6 +96,37 @@ func Scan(ctx context.Context, home, workspace string, since time.Time) Inventor
 	}
 	inv.ScannedAt = time.Now()
 	return inv
+}
+
+// codexRoots lists /Volumes itself once, then checks each literal .codex path.
+// filepath.Glob("/Volumes/*/.codex") opens every mounted volume root to match
+// the wildcard; an unresponsive mount can stall the whole background scan.
+func codexRoots(ctx context.Context, home, custom, volumes string) []string {
+	roots := []string{}
+	if custom != "" {
+		roots = append(roots, custom)
+	}
+	roots = append(roots, filepath.Join(home, ".codex"))
+	if entries, err := os.ReadDir(volumes); err == nil {
+		for _, entry := range entries {
+			if ctx.Err() != nil {
+				break
+			}
+			root := filepath.Join(volumes, entry.Name(), ".codex")
+			if st, err := os.Stat(root); err == nil && st.IsDir() {
+				roots = append(roots, root)
+			}
+		}
+	}
+	seen := map[string]bool{}
+	unique := roots[:0]
+	for _, root := range roots {
+		if !seen[root] {
+			seen[root] = true
+			unique = append(unique, root)
+		}
+	}
+	return unique
 }
 
 func markProcessAliveAtScan(candidates []Candidate, active map[string]int) {

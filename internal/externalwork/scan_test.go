@@ -5,11 +5,42 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
 
 const sampleID = "12345678-1234-1234-1234-123456789abc"
+
+func TestCodexRootsDiscoversLiteralMountedDirectories(t *testing.T) {
+	base := t.TempDir()
+	home := filepath.Join(base, "home")
+	volumes := filepath.Join(base, "Volumes")
+	for _, name := range []string{"SSD990", "SSD990-2"} {
+		if err := os.MkdirAll(filepath.Join(volumes, name, ".codex"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The .codex path is searchable even when listing the volume root is denied.
+	closedRoot := filepath.Join(volumes, "SSD990")
+	if err := os.Chmod(closedRoot, 0o111); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(closedRoot, 0o700) })
+	if err := os.MkdirAll(filepath.Join(volumes, "other"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	custom := filepath.Join(volumes, "SSD990", ".codex")
+	want := []string{custom, filepath.Join(home, ".codex"), filepath.Join(volumes, "SSD990-2", ".codex")}
+	if got := codexRoots(context.Background(), home, custom, volumes); !reflect.DeepEqual(got, want) {
+		t.Fatalf("roots=%v, want %v", got, want)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := codexRoots(ctx, home, custom, volumes); !reflect.DeepEqual(got, want[:2]) {
+		t.Fatalf("canceled roots=%v, want %v", got, want[:2])
+	}
+}
 
 func TestScanFilesUsesOnlyNamesAndMetadata(t *testing.T) {
 	root := t.TempDir()
