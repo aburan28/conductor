@@ -200,6 +200,10 @@ func codexRows(ctx context.Context, path string, since time.Time) ([]codexRow, e
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("sqlite3: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
+	// sqlite3 -json writes no bytes for a successful query with zero rows.
+	if len(bytes.TrimSpace(stdout.Bytes())) == 0 {
+		return []codexRow{}, nil
+	}
 	var rows []codexRow
 	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
 		return nil, err

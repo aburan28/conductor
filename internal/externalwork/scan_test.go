@@ -46,6 +46,10 @@ func TestCodexRowsAndImportIdentifiers(t *testing.T) {
 	if err != nil || len(all) != 2 || all[0].ID != sampleID {
 		t.Fatalf("unbounded rows=%#v err=%v", all, err)
 	}
+	empty, err := codexRows(context.Background(), path, time.Unix(201, 0))
+	if err != nil || empty == nil || len(empty) != 0 {
+		t.Fatalf("zero-row query must be an empty result: rows=%#v err=%v", empty, err)
+	}
 	for _, source := range []string{"codex", "claude", "cursor"} {
 		if !ValidCandidate(Candidate{Source: source, ID: sampleID}) {
 			t.Errorf("rejected %s", source)
