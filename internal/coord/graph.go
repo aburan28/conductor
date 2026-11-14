@@ -278,7 +278,16 @@ func appendUnique(in []string, s string) []string {
 // ConflictViews projects the conflict graph for a caller, orienting each edge so "mine" and
 // "other" are meaningful and redacting private counterparty titles.
 func (s *Service) ConflictViews(ctx context.Context, c Caller, projectID domain.ID, openOnly bool) ([]privacy.ConflictView, error) {
-	edges, err := s.Store.ListConflicts(ctx, projectID, openOnly)
+	return s.conflictViews(ctx, c, projectID, openOnly, 0)
+}
+
+// ConflictViewsLimited renders only the leading conflict edges for compact views.
+func (s *Service) ConflictViewsLimited(ctx context.Context, c Caller, projectID domain.ID, openOnly bool, limit int) ([]privacy.ConflictView, error) {
+	return s.conflictViews(ctx, c, projectID, openOnly, limit)
+}
+
+func (s *Service) conflictViews(ctx context.Context, c Caller, projectID domain.ID, openOnly bool, limit int) ([]privacy.ConflictView, error) {
+	edges, err := s.Store.ListConflictsLimited(ctx, projectID, openOnly, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -290,14 +299,16 @@ func (s *Service) ConflictViews(ctx context.Context, c Caller, projectID domain.
 	for _, e := range edges {
 		ids[e.TaskA], ids[e.TaskB] = true, true
 	}
-	tasks := map[domain.ID]domain.Task{}
-	ownerIDs := make([]domain.ID, 0, len(ids))
+	taskIDs := make([]domain.ID, 0, len(ids))
 	for id := range ids {
-		t, err := s.Store.GetTask(ctx, id)
-		if err != nil {
-			continue
-		}
-		tasks[id] = t
+		taskIDs = append(taskIDs, id)
+	}
+	tasks, err := s.Store.TasksByID(ctx, taskIDs)
+	if err != nil {
+		return nil, err
+	}
+	ownerIDs := make([]domain.ID, 0, len(ids))
+	for _, t := range tasks {
 		ownerIDs = append(ownerIDs, t.CreatedBy)
 	}
 	principals, err := s.Store.PrincipalsByID(ctx, ownerIDs)
