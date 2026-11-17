@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
   merge_group:
     types: [checks_requested]
   workflow_dispatch:
@@ -14,7 +15,7 @@ permissions:
 
 # Cancel superseded PR checks without interrupting protected-branch validation.
 concurrency:
-  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Actions are pinned to full commit SHAs (a tag can be moved; a SHA cannot), with the
@@ -23,7 +24,7 @@ concurrency:
 jobs:
   changes:
     name: CI scope
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 3
     outputs:
       go: ${{ steps.scope.outputs.go }}
@@ -48,7 +49,7 @@ jobs:
     name: lint
     needs: changes
     if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.go != 'false') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -76,7 +77,7 @@ jobs:
     name: govulncheck
     needs: changes
     if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.go != 'false') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -99,7 +100,7 @@ jobs:
     name: test (Postgres 16)
     needs: changes
     if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.go != 'false') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 12
     strategy:
       fail-fast: false
@@ -155,7 +156,7 @@ jobs:
     name: test (Postgres 17)
     needs: changes
     if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.go != 'false') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 12
     strategy:
       matrix:
@@ -172,7 +173,7 @@ jobs:
     name: build and unit test (macOS)
     needs: changes
     if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.go != 'false') }}
-    runs-on: macos-latest
+    runs-on: macos-15
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -194,7 +195,7 @@ jobs:
     name: build site (PR)
     needs: changes
     if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.site != 'false') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 8
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -215,7 +216,7 @@ jobs:
     name: CI gate
     needs: [changes, lint, govulncheck, test, test17, macos, site]
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
       - name: require relevant checks to succeed
@@ -237,3 +238,15 @@ jobs:
               if actual != expected:
                   sys.exit(f'{job}: expected {expected}, got {actual}')
           PY
+
+  check:
+    name: check
+    needs: gate
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require the existing CI gate to pass
+        env:
+          GATE_RESULT: ${{ needs.gate.result }}
+        run: test "$GATE_RESULT" = success
