@@ -427,7 +427,7 @@ func (s *Store) OpenFootprints(ctx context.Context, projectID domain.ID) ([]Task
 	return out, nil
 }
 
-// ReplaceConflictsOfKind swaps the open edges of one kind for a freshly computed set,
+// ReplaceConflictsOfKind reconciles the open edges of one kind with a freshly computed set,
 // preserving any that a human has already acknowledged or ignored.
 //
 // Recomputing merge risk from scratch each pass is simpler and less error-prone than
@@ -440,12 +440,9 @@ func (s *Store) ReplaceConflictsOfKind(ctx context.Context, projectID domain.ID,
 			projectID).Scan(&orgID); err != nil {
 			return noRows(err)
 		}
-		if _, err := tx.Exec(ctx, `
-			UPDATE conflict_edges SET state = 'resolved', resolved_at = now(), updated_at = now()
-			 WHERE project_id = $1::uuid AND kind = $2 AND state = 'open'`,
-			projectID, kind); err != nil {
-			return err
-		}
+		// Keep the IDs of edges that remain open. Resolving them before the upsert
+		// creates a new row on every scan, growing the table without bound.
+		retainedIDs := make([]string, 0, len(edges))
 		for _, e := range edges {
 			a, b := e.TaskA, e.TaskB
 			detail := e.Detail
@@ -484,12 +481,19 @@ func (s *Store) ReplaceConflictsOfKind(ctx context.Context, projectID domain.ID,
 				projectID, a, b, kind, e.Severity, e.Weight, e.Suggestion, body).Scan(&edgeID); err != nil {
 				return err
 			}
+			retainedIDs = append(retainedIDs, string(edgeID))
 			// Recomputing the graph rewrites every edge each pass; whether one is new is
 			// decided by conflict_alerts, not by the insert.
 			e.ProjectID, e.TaskA, e.TaskB, e.Kind, e.Detail = projectID, a, b, kind, detail
 			if err := announceDetectedTx(ctx, tx, orgID, edgeID, e); err != nil {
 				return err
 			}
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE conflict_edges SET state = 'resolved', resolved_at = now(), updated_at = now()
+			 WHERE project_id = $1::uuid AND kind = $2 AND state = 'open'
+			   AND NOT (id = ANY($3::uuid[]))`, projectID, kind, retainedIDs); err != nil {
+			return err
 		}
 		return forgetClosedDetectionsTx(ctx, tx, projectID)
 	})
