@@ -113,6 +113,17 @@ func TestDetectedConflictIsAnnouncedOncePerOpening(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		replace(edge(a, b, domain.SeverityHigh), edge(a, c, domain.SeverityLow))
 	}
+	var openCount, resolvedCount int
+	if err := f.store.pool.QueryRow(f.ctx, `
+		SELECT count(*) FILTER (WHERE state = 'open'),
+		       count(*) FILTER (WHERE state = 'resolved')
+		  FROM conflict_edges WHERE project_id = $1::uuid AND kind = $2`,
+		f.project.ID, domain.ConflictMergeRisk).Scan(&openCount, &resolvedCount); err != nil {
+		t.Fatal(err)
+	}
+	if openCount != 2 || resolvedCount != 0 {
+		t.Fatalf("three identical scans left %d open and %d resolved edges, want 2 and 0", openCount, resolvedCount)
+	}
 	if n := f.countEvents(t, "conflict.detected"); n != 1 {
 		t.Fatalf("three passes over one open conflict wrote %d events, want 1 (and none for the low one)", n)
 	}
