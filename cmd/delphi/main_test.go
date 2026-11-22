@@ -182,6 +182,22 @@ func servers(t *testing.T) (*fakeAnthropic, *fakeOpenAI) {
 	return fa, fo
 }
 
+// TestMain gives the package its own DELPHI_HOME. Without it, a developer who has a live
+// `delphi serve` loop running against ~/.delphi makes these tests fail on its lock — an
+// accident of the machine, not a regression.
+func TestMain(m *testing.M) {
+	if os.Getenv("DELPHI_HOME") == "" {
+		dir, err := os.MkdirTemp("", "delphi-test-*")
+		if err == nil {
+			os.Setenv("DELPHI_HOME", dir)
+			code := m.Run()
+			os.RemoveAll(dir)
+			os.Exit(code)
+		}
+	}
+	os.Exit(m.Run())
+}
+
 func cli(t *testing.T, stdin string, args ...string) (int, string, string) {
 	t.Helper()
 	var out, errb bytes.Buffer

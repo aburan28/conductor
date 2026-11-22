@@ -40,7 +40,7 @@ var discoverSessions = localstate.Discover
 
 func cmdSessions(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: conductor sessions <save|list|discover|scan|install-scan|import|export|install-hook>")
+		return errors.New("usage: conductor sessions <save|list|discover|scan|install-scan|import|export|transfer|install-hook>")
 	}
 	sub, rest := args[0], args[1:]
 
@@ -59,6 +59,8 @@ func cmdSessions(ctx context.Context, args []string) error {
 		return sessionsInstallScan(ctx, rest)
 	case "import":
 		return sessionsImport(ctx, rest)
+	case "transfer":
+		return cmdTransfer(ctx, rest)
 	case "install-hook":
 		return sessionsInstallHook(ctx, rest)
 	default:
