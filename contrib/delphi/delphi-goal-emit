@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""Turn a delphi-goal run into a cryptanalysis problem statement.
+
+    delphi-goal-emit <root>                  # write problem.md next to the run
+    delphi-goal-emit <root> --repo DIR       # also copy to DIR/problems/<slug>.md
+    delphi-goal-emit <root> --slug my-problem
+
+Reads whatever stages exist (frame, ideas, expand, critique, synthesize) and
+emits the sections the repo's problems/*.md files use, with the cost model and
+the evidence gate in ledger form:
+
+  ## Problem
+  ## What would unblock it        (objective, cost model, ledger skeleton)
+  ## Evidence and uncertainty     (certificate / model / mutants / checklist)
+  ## Next discriminating step     (kill criteria, first experiment)
+  ## Resolution and history
+"""
+import argparse, glob, json, os, re, shutil, sys, time
+
+HOME = os.path.expanduser(os.environ.get("DELPHI_HOME", "~/.delphi"))
+PIPE = os.path.join(HOME, "pipeline")
+
+TEMPLATE = """# {title}
+
+- **Status:** open
+- **Kind:** research direction from a delphi-goal run (`{root}`)
+- **Affected work:** cost model and ledger gate, see `docs/INSTRUCTION-COST-ACCOUNTING.md`
+- **Next action owner:** unassigned
+- **Last updated:** {date}
+
+## Problem
+
+{goal}
+
+{objective}
+
+## What would unblock it
+
+**Cost model to beat.** State the current bound in the repo's own unit, then
+show the delta this direction claims. The ledger is the claim:
+
+```json
+{ledger}
+```
+
+Fill every row from the actual stage counts; `make cost-check` rejects a ledger
+whose rows do not reconstruct its total, whose stages differ between sides, or
+whose improvement is not `log2(before/after)`.
+
+**Candidate directions.** {directions}
+
+## Evidence and uncertainty
+
+Nothing below is optional; prose is not evidence.
+
+- [ ] Exact-arithmetic certificate recomputes the claim (`certificate.py`
+      equivalent: success probability, ledger, rounding).
+- [ ] Bit-exact reference model agrees with the optimized kernel record by
+      record on production-shaped batches.
+- [ ] Near-tie and edge-of-`W`/`D'` inputs are in the test set.
+- [ ] Single-change mutants of kernel, model, bound and certificate all fail.
+- [ ] Static instruction/assembly count matches the ledger.
+- [ ] Sandboxed reproduction: no network, read-only inputs, several seeds.
+- [ ] The published value is the least N-place value at or above the computed
+      quantity.
+
+{critique}
+
+## Next discriminating step
+
+{kill}
+
+Run the cheapest experiment that can falsify the direction first. If the cost
+model cannot be stated in stage rows, or the first experiment cannot be run in
+a day, the direction is not ready.
+
+## Resolution and history
+
+- {date}: emitted from delphi run `{root}`.
+- Ordered transcript: {files}
+"""
+
+LEDGER = {
+    "name": "<direction> per <unit>",
+    "unit": "instructions per <unit>",
+    "rows": [
+        {"stage": "<stage-a>", "per": "<unit>", "count": 0},
+        {"stage": "<stage-b>", "per": "<unit>", "count": 0},
+    ],
+    "declared_total": 0,
+    "baseline": {
+        "rows": [
+            {"stage": "<stage-a>", "per": "<unit>", "count": 0},
+            {"stage": "<stage-b>", "per": "<unit>", "count": 0},
+        ],
+        "declared_total": 0,
+    },
+    "improvement": {"bits": "0.000000"},
+}
+
+
+def newest(root, stage):
+    files = sorted(glob.glob(os.path.join(PIPE, root, "%s-*.md" % stage)))
+    return open(files[-1]).read().strip() if files else ""
+
+
+def bullets(text, limit=8):
+    out = []
+    for line in text.splitlines():
+        m = re.match(r"\s*(?:\d+[.)]|[-*])\s+(.*\S)", line)
+        if m:
+            out.append(m.group(1).strip())
+    return "\n".join("- " + b for b in out[:limit]) or "_none recorded_"
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("root")
+    ap.add_argument("--repo")
+    ap.add_argument("--slug")
+    a = ap.parse_args()
+
+    root = a.root
+    st = {}
+    try:
+        st = json.load(open(os.path.join(PIPE, root, "state.json")))
+    except Exception:
+        pass
+    goal = st.get("goal")
+    if not goal and os.path.exists(os.path.join(PIPE, root, "goal.txt")):
+        goal = open(os.path.join(PIPE, root, "goal.txt")).read().strip() or None
+    if not goal:
+        for text in (newest(root, "frame"), newest(root, "ideas")):
+            m = re.search(r"^\s*(?:Goal|Topic):\s*(.+)$", text, re.M)
+            if m:
+                goal = m.group(1).strip()
+                break
+    goal = goal or "Unstated goal."
+    frame = newest(root, "frame") or newest(root, "ideas")
+    critique = newest(root, "critique")
+    brief = newest(root, "synthesize")
+    expands = sorted(glob.glob(os.path.join(PIPE, root, "expand-*.md")))
+
+    directions = bullets(frame) if frame else "_none recorded_"
+    obj = ""
+    if brief:
+        obj = "### Brief\n\n" + brief[:6000]
+    kill = ""
+    if critique:
+        kill = "**Critique of the candidates.**\n\n" + critique[:4000]
+    if not kill:
+        kill = "**Kill criteria.** Not yet stated: rerun the critique stage."
+
+    title = goal if len(goal) <= 90 else goal[:87] + "..."
+    slug = a.slug or re.sub(r"[^a-z0-9]+", "-", goal.lower()).strip("-")[:60] or root
+    body = TEMPLATE.format(
+        title=title, root=root, date=time.strftime("%Y-%m-%d"),
+        goal=goal, objective=obj, ledger=json.dumps(LEDGER, indent=2),
+        directions=directions, critique=kill,
+        kill=("**Short version.** " + critique[:1200]) if critique else "**Kill criteria.** Not yet stated.",
+        files=", ".join(os.path.basename(f) for f in sorted(glob.glob(os.path.join(PIPE, root, "*.md")))),
+    )
+
+    out = os.path.join(PIPE, root, "problem.md")
+    open(out, "w").write(body)
+    print(out)
+    if a.repo:
+        dest = os.path.join(a.repo, "problems", slug + ".md")
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        shutil.copyfile(out, dest)
+        print(dest)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

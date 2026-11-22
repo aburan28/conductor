@@ -20,6 +20,24 @@ import (
 	"github.com/aburan28/conductor/internal/delphi"
 )
 
+// TestMain keeps every test off the developer's real ~/.delphi. Without it a
+// live loop on the host makes serve tests fail with "another delphi loop is
+// running"; individual tests that need a specific home still set their own.
+func TestMain(m *testing.M) {
+	if os.Getenv("DELPHI_HOME") == "" {
+		dir, err := os.MkdirTemp("", "delphi-test-home-")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "delphi tests: temp home:", err)
+			os.Exit(1)
+		}
+		os.Setenv("DELPHI_HOME", dir)
+		code := m.Run()
+		os.RemoveAll(dir)
+		os.Exit(code)
+	}
+	os.Exit(m.Run())
+}
+
 // ---- fake Anthropic Message Batches API ----------------------------------
 
 type fakeAnthropic struct {

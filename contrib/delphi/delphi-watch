@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""Live view of delphi: flights, events, serve log and pipeline output.
+
+    delphi-watch              refresh every 2s (Ctrl-C to stop)
+    delphi-watch --once       print one frame and exit
+    delphi-watch --events     only the event stream
+    delphi-watch --interval 1
+
+Reads ~/.delphi only; no network, no state changes.
+"""
+import shutil
+import argparse, glob, json, os, subprocess, sys, time
+
+HOME = os.path.expanduser(os.environ.get("DELPHI_HOME", "~/.delphi"))
+DELPHI = (os.environ.get("DELPHI_BIN") or shutil.which("delphi")
+          or os.path.expanduser("~/.local/bin/delphi"))
+DIM, BOLD, OFF = "\033[2m", "\033[1m", "\033[0m"
+RED, GRN, YEL, BLU = "\033[31m", "\033[32m", "\033[33m", "\033[34m"
+
+STATE_COLOUR = {"completed": GRN, "succeeded": GRN, "collected": GRN,
+                "submitted": BLU, "in_progress": BLU, "running": BLU,
+                "errored": RED, "expired": RED, "canceled": YEL,
+                "validating": YEL, "submitting": YEL}
+
+
+def colour(text):
+    return STATE_COLOUR.get(str(text), "") + str(text) + OFF
+
+
+def tail(path, n):
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 64 * 1024))
+            lines = f.read().decode(errors="replace").splitlines()
+        return lines[-n:]
+    except OSError:
+        return []
+
+
+def status_block():
+    try:
+        return subprocess.run([DELPHI, "status"], capture_output=True, text=True,
+                              timeout=10).stdout.rstrip()
+    except Exception as e:
+        return "status unavailable: %s" % e
+
+
+def flights_block(limit=6):
+    rows = []
+    for path in sorted(glob.glob(os.path.join(HOME, "flights", "*.json")),
+                       key=os.path.getmtime, reverse=True)[:limit]:
+        try:
+            d = json.load(open(path))
+        except Exception:
+            continue
+        st = (d.get("status") or {}).get("state") or d.get("state") or "?"
+        n = len(d.get("requests") or [])
+        rows.append("  %-34s %-8s %-12s %d req" %
+                    (d.get("label", "?"), d.get("provider", "?"), colour(st), n))
+    return "\n".join(rows)
+
+
+def events_block(limit=10):
+    lines = tail(os.path.join(HOME, "events.jsonl"), limit)
+    out = []
+    for line in lines:
+        try:
+            e = json.loads(line)
+        except Exception:
+            continue
+        stamp = e.get("time", "")[11:19]
+        ev = e.get("event", "?")
+        bits = [colour(ev).ljust(12)]
+        if e.get("provider"):
+            bits.append(str(e["provider"]).ljust(9))
+        if e.get("batch"):
+            bits.append(str(e["batch"]).ljust(30))
+        for k in ("requests", "finished", "requeued", "state"):
+            if e.get(k) not in (None, ""):
+                bits.append("%s=%s" % (k, e[k]))
+        out.append("  %s  %s" % (stamp, " ".join(bits)))
+    return "\n".join(out)
+
+
+def pipeline_block(limit=4):
+    rows = []
+    roots = sorted(glob.glob(os.path.join(HOME, "pipeline", "*")),
+                   key=os.path.getmtime, reverse=True)[:limit]
+    for root in roots:
+        name = os.path.basename(root)
+        files = glob.glob(os.path.join(root, "*.md"))
+        ideas = sum(1 for f in files if os.path.basename(f).startswith("ideas-"))
+        exp = sum(1 for f in files if os.path.basename(f).startswith("expand-"))
+        age = int(time.time() - os.path.getmtime(root))
+        rows.append("  %-32s ideas:%d expand:%d  %s" %
+                    (name, ideas, exp, DIM + "%dm ago" % (age // 60) + OFF))
+    return "\n".join(rows) or "  " + DIM + "(none yet)" + OFF
+
+
+def frame():
+    parts = [BOLD + "delphi" + OFF + DIM + "  " + HOME + OFF + "\n",
+             BOLD + "status" + OFF, status_block(), "",
+             BOLD + "flights" + OFF, flights_block() or "  " + DIM + "(none)" + OFF, "",
+             BOLD + "events" + OFF, events_block() or "  " + DIM + "(none)" + OFF, "",
+             BOLD + "pipeline" + OFF, pipeline_block(), "",
+             BOLD + "serve.log" + OFF]
+    log = tail(os.path.join(HOME, "serve.log"), 6)
+    parts.append("\n".join("  " + DIM + l + OFF for l in log) if log else "  " + DIM + "(empty)" + OFF)
+    return "\n".join(parts)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--once", action="store_true")
+    ap.add_argument("--events", action="store_true")
+    ap.add_argument("--interval", type=float, default=2.0)
+    a = ap.parse_args()
+    if a.events:
+        p = os.path.join(HOME, "events.jsonl")
+        subprocess.run(["tail", "-f", p])
+        return 0
+    if a.once:
+        print(frame())
+        return 0
+    try:
+        while True:
+            sys.stdout.write("\033[H\033[2J" + frame() + "\n")
+            sys.stdout.flush()
+            time.sleep(a.interval)
+    except KeyboardInterrupt:
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
