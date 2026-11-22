@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -854,9 +855,28 @@ func pushCheckpoint(ctx context.Context, store *backup.Store, m checkpoint.Manif
 	if err != nil {
 		return err
 	}
-	sealed, err := checkpoint.Seal(data, pass)
+	exists, err := store.CheckpointBundleExists(ctx, m.ID)
 	if err != nil {
 		return err
+	}
+	var sealed []byte
+	if exists {
+		sealed, err = store.GetCheckpoint(ctx, m.ID)
+		if err != nil {
+			return err
+		}
+		// Seal uses a fresh salt and nonce on every call. For an interrupted push,
+		// authenticate the remote ciphertext and compare its plaintext to the local
+		// bundle, then reuse those exact bytes for the create-only index retry.
+		plain, err := checkpoint.Unseal(sealed, pass)
+		if err != nil || !bytes.Equal(plain, data) {
+			return fmt.Errorf("%w: existing checkpoint bundle cannot be verified against the local bundle", backup.ErrExists)
+		}
+	} else {
+		sealed, err = checkpoint.Seal(data, pass)
+		if err != nil {
+			return err
+		}
 	}
 	// The object beside the sealed bundle is an index entry, not the manifest: the manifest
 	// names the conversation, the note, the working directory, and the machine, and those

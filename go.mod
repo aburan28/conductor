@@ -1,6 +1,6 @@
 module github.com/aburan28/conductor
 
-go 1.26.10
+go 1.26.11
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.84.0

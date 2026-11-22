@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -36,10 +38,45 @@ func (m *inMemoryS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	key := strings.TrimPrefix(r.URL.Path, "/bucket/")
 	switch r.Method {
 	case http.MethodPut:
+		if r.Header.Get("If-None-Match") != "*" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if _, exists := m.obj[key]; exists {
+			w.WriteHeader(http.StatusPreconditionFailed)
+			return
+		}
 		b, _ := io.ReadAll(r.Body)
 		m.obj[key] = b
 		w.WriteHeader(200)
+	case http.MethodHead:
+		if _, ok := m.obj[key]; !ok {
+			w.WriteHeader(http.StatusNotFound)
+		}
 	case http.MethodGet:
+		if r.URL.Query().Get("list-type") == "2" {
+			var listed struct {
+				XMLName  xml.Name `xml:"ListBucketResult"`
+				Contents []struct {
+					Key string `xml:"Key"`
+				} `xml:"Contents"`
+			}
+			prefix := r.URL.Query().Get("prefix")
+			var keys []string
+			for k := range m.obj {
+				if strings.HasPrefix(k, prefix) {
+					keys = append(keys, k)
+				}
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				listed.Contents = append(listed.Contents, struct {
+					Key string `xml:"Key"`
+				}{Key: k})
+			}
+			_ = xml.NewEncoder(w).Encode(listed)
+			return
+		}
 		if b, ok := m.obj[key]; ok {
 			_, _ = w.Write(b)
 		} else {
