@@ -105,14 +105,6 @@ const StatusLimit = 25
 // arrive severity-first, so the most actionable ones remain visible.
 const StatusConflictLimit = 25
 
-func boundStatusConflicts(conflicts []privacy.ConflictView) ([]privacy.ConflictView, int, bool) {
-	total := len(conflicts)
-	if total <= StatusConflictLimit {
-		return conflicts, total, false
-	}
-	return conflicts[:StatusConflictLimit], total, true
-}
-
 // ProjectStatus builds the compact status view.
 func (s *Service) ProjectStatus(ctx context.Context, c Caller, projectID domain.ID) (StatusSummary, error) {
 	project, err := s.Store.GetProject(ctx, projectID)
@@ -120,21 +112,24 @@ func (s *Service) ProjectStatus(ctx context.Context, c Caller, projectID domain.
 		return StatusSummary{}, err
 	}
 
-	all, err := s.Store.ListTasks(ctx, projectID, db.ListTasksFilter{OpenOnly: true})
+	counts, err := s.Store.CountOpenTasksByStatus(ctx, projectID)
 	if err != nil {
 		return StatusSummary{}, err
 	}
 
-	counts := map[string]int{}
-	var activeTasks, readyTasks []domain.Task
-	for _, t := range all {
-		counts[string(t.Status)]++
-		switch {
-		case t.Status.IsActive() && len(activeTasks) < StatusLimit:
-			activeTasks = append(activeTasks, t)
-		case t.Status == domain.TaskReady && len(readyTasks) < StatusLimit:
-			readyTasks = append(readyTasks, t)
+	activeStatuses := make([]domain.TaskStatus, 0, len(domain.AllTaskStatuses))
+	for _, status := range domain.AllTaskStatuses {
+		if status.IsActive() {
+			activeStatuses = append(activeStatuses, status)
 		}
+	}
+	activeTasks, err := s.Store.ListTasks(ctx, projectID, db.ListTasksFilter{Statuses: activeStatuses, Limit: StatusLimit})
+	if err != nil {
+		return StatusSummary{}, err
+	}
+	readyTasks, err := s.Store.ListTasks(ctx, projectID, db.ListTasksFilter{Statuses: []domain.TaskStatus{domain.TaskReady}, Limit: StatusLimit})
+	if err != nil {
+		return StatusSummary{}, err
 	}
 
 	project_ := project // capture for closure clarity
@@ -158,11 +153,20 @@ func (s *Service) ProjectStatus(ctx context.Context, c Caller, projectID domain.
 	if err != nil {
 		return StatusSummary{}, err
 	}
-	conflicts, err := s.ConflictViews(ctx, c, projectID, true)
+	conflicts, err := s.ConflictViewsLimited(ctx, c, projectID, true, StatusConflictLimit)
 	if err != nil {
 		return StatusSummary{}, err
 	}
-	conflicts, conflictCount, conflictsTruncated := boundStatusConflicts(conflicts)
+	conflictCount, err := s.Store.CountConflicts(ctx, projectID, true)
+	if err != nil {
+		return StatusSummary{}, err
+	}
+	// A conflict inserted between the list and count queries may be absent from
+	// this snapshot, while a deletion may leave more views than the count.
+	if conflictCount < len(conflicts) {
+		conflictCount = len(conflicts)
+	}
+	conflictsTruncated := conflictCount > len(conflicts)
 	presence, err := s.Presence(ctx, c, projectID)
 	if err != nil {
 		return StatusSummary{}, err

@@ -303,6 +303,53 @@ func (s *Store) ListTasks(ctx context.Context, projectID domain.ID, f ListTasksF
 	return out, rows.Err()
 }
 
+// CountOpenTasksByStatus counts the status buckets without loading every task body.
+// Keep the open predicate identical to ListTasksFilter.OpenOnly so the compact
+// project status reports the same counts as a full listing.
+func (s *Store) CountOpenTasksByStatus(ctx context.Context, projectID domain.ID) (map[string]int, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT status, count(*) FROM tasks
+		 WHERE project_id = $1::uuid
+		   AND status NOT IN ('done','cancelled','superseded','failed')
+		 GROUP BY status`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := map[string]int{}
+	for rows.Next() {
+		var status string
+		var count int64
+		if err := rows.Scan(&status, &count); err != nil {
+			return nil, err
+		}
+		counts[status] = int(count)
+	}
+	return counts, rows.Err()
+}
+
+// TasksByID loads the tasks needed to render a bounded conflict list in one
+// query. A missing task is omitted, matching the conflict view's behavior.
+func (s *Store) TasksByID(ctx context.Context, ids []domain.ID) (map[domain.ID]domain.Task, error) {
+	out := map[domain.ID]domain.Task{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx, `SELECT `+taskColumns+` FROM tasks t WHERE t.id = ANY($1::uuid[])`, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		task, err := scanTask(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out[task.ID] = task
+	}
+	return out, rows.Err()
+}
+
 // UpdateTaskStatus transitions a task, validating the edge against the state machine.
 //
 // The current status is read under a row lock so the guard and the write cannot straddle a
