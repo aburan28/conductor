@@ -99,12 +99,16 @@ jobs:
     uses: ./.github/workflows/macos-app.yml
     with:
       version: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
+    secrets: inherit
 
   publish:
     needs: [build, macos]
     # Wait for all CLI archives and the tested Mac app and DMG before publishing assets.
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    concurrency:
+      group: conductor-macos-appcast
+      cancel-in-progress: false
     permissions:
       contents: write     # create the release and upload its assets
       id-token: write     # sign the provenance attestation (Sigstore, via OIDC)
@@ -128,6 +132,12 @@ jobs:
           name: Conductor.dmg
           path: out
 
+      - name: collect the signed update feed
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: Conductor.appcast
+          path: out
+
       - name: checksums
         working-directory: out
         env:
@@ -139,7 +149,10 @@ jobs:
           [ "${#archives[@]}" -eq 4 ] || { echo "expected 4 archives" >&2; exit 1; }
           dmg="Conductor-${TAG#v}-macos-universal.dmg"
           test -s "$dmg"
-          sha256sum "${archives[@]}" "$dmg" > SHA256SUMS
+          test -s appcast.xml
+          grep -Fq "<sparkle:version>${TAG#v}</sparkle:version>" appcast.xml
+          grep -Fq "sparkle:installationType=\"package\"" appcast.xml
+          sha256sum "${archives[@]}" "$dmg" appcast.xml > SHA256SUMS
           cat SHA256SUMS
 
       # Provenance binds each archive and DMG digest to this workflow, commit, and tag. Verify with:
@@ -170,14 +183,14 @@ jobs:
               echo "refusing to replace them; cut a new tag instead" >&2
               exit 1
             fi
-            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" conductor_*.tar.gz "$dmg" SHA256SUMS
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" conductor_*.tar.gz "$dmg" appcast.xml SHA256SUMS
           else
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
               --draft \
               --verify-tag \
               --title "$TAG" \
               --notes "$(git log -1 --format=%B)" \
-              conductor_*.tar.gz "$dmg" SHA256SUMS
+              conductor_*.tar.gz "$dmg" appcast.xml SHA256SUMS
           fi
           # Verify the uploaded bytes before making the release visible to installers.
           mkdir verified-upload
@@ -185,4 +198,36 @@ jobs:
           cmp SHA256SUMS verified-upload/SHA256SUMS
           (cd verified-upload && sha256sum -c SHA256SUMS)
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+
+      # The fixed prerelease is the URL in SUFeedURL. Serialize publishers above and only
+      # advance it after the versioned DMG and appcast have been downloaded and verified.
+      - name: advance the fixed Sparkle feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
+        working-directory: out
+        run: |
+          set -euo pipefail
+          case "$TAG" in *-*) echo "prerelease $TAG leaves the stable feed unchanged"; exit 0;; esac
+          fixed=macos-appcast
+          repo="$GITHUB_REPOSITORY"
+          if ! gh release view "$fixed" --repo "$repo" >/dev/null 2>&1; then
+            gh release create "$fixed" --repo "$repo" --target "$(git rev-parse HEAD)" \
+              --prerelease --latest=false --title 'Conductor update feed' \
+              --notes 'Sparkle reads appcast.xml here. The release workflow updates it after verifying each signed macOS release.'
+          fi
+          current=''
+          mkdir -p current-feed
+          if gh release download "$fixed" --repo "$repo" --pattern appcast.xml --dir current-feed 2>/dev/null; then
+            current="$(sed -n 's/.*<sparkle:version>\([^<]*\)<.*/\1/p' current-feed/appcast.xml | head -n 1)"
+            [[ "$current" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+              echo 'existing fixed feed has no valid version; refusing to replace it' >&2; exit 1;
+            }
+          fi
+          newest="$(printf '%s\n%s\n' "${current:-0.0.0}" "${TAG#v}" | sort -V | tail -n 1)"
+          if [ -n "$current" ] && [ "$newest" != "${TAG#v}" ]; then
+            echo "fixed feed already names newer version $current; leaving it"
+            exit 0
+          fi
+          gh release upload "$fixed" appcast.xml --clobber --repo "$repo"
 
