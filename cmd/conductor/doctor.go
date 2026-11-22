@@ -59,14 +59,15 @@ type doctorReport struct {
 
 // doctorEnv is everything doctor reads from the machine, so tests can supply a machine.
 type doctorEnv struct {
-	lookPath   func(string) (string, error)
-	output     func(name string, args ...string) (string, error)
-	daemon     func() (string, error)
-	portOpen   func(host, port string) bool
-	dockerUp   func() bool
-	getenv     func(string) string
-	tailscale  func(context.Context) (string, bool)
-	clientVers string
+	lookPath    func(string) (string, error)
+	output      func(name string, args ...string) (string, error)
+	daemon      func() (string, error)
+	portOpen    func(host, port string) bool
+	dockerUp    func() bool
+	getenv      func(string) string
+	tailscale   func(context.Context) (string, bool)
+	serveStatus func(context.Context) ([]byte, error)
+	clientVers  string
 }
 
 func realDoctorEnv() doctorEnv {
@@ -76,11 +77,20 @@ func realDoctorEnv() doctorEnv {
 			out, err := exec.Command(name, args...).Output()
 			return strings.TrimSpace(string(out)), err
 		},
-		daemon:     locateDaemon,
-		portOpen:   portOpen,
-		dockerUp:   dockerAvailable,
-		getenv:     os.Getenv,
-		tailscale:  detectTailscale,
+		daemon:    locateDaemon,
+		portOpen:  portOpen,
+		dockerUp:  dockerAvailable,
+		getenv:    os.Getenv,
+		tailscale: detectTailscale,
+		serveStatus: func(ctx context.Context) ([]byte, error) {
+			cli, err := locateTailscaleCLI(exec.LookPath, os.Stat)
+			if err != nil {
+				return nil, err
+			}
+			probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+			return runTailscaleCLI(probeCtx, cli, "serve", "status", "--json")
+		},
 		clientVers: version.Version(),
 	}
 }
@@ -191,12 +201,34 @@ func doctorTailscale(ctx context.Context, endpoint string, env doctorEnv) (statu
 	if name, ok := probe(ctx); ok {
 		status = name
 		if isLoopbackEndpoint(endpoint) {
-			port := listenPort(endpoint)
-			advice = fmt.Sprintf(
-				"share over your tailnet: tailscale serve --bg %s && "+
-					"conductor invite <handle> --endpoint https://%s "+
-					"(set conductord --public-url https://%s for SSO, GitHub webhooks, and dashboard/MCP links; see docs/REMOTE_ACCESS.md)",
-				port, name, name)
+			publicURL := "https://" + name
+			if env.serveStatus != nil {
+				if serveJSON, err := env.serveStatus(ctx); err == nil {
+					if rootOK, funnel := serveRootMatches(serveJSON, name+":443", publishBackend(endpoint)); rootOK {
+						scope := "privately over your tailnet"
+						if funnel {
+							scope = "publicly via Funnel"
+						}
+						return status, fmt.Sprintf("Tailscale Serve already points to Conductor %s at %s; "+
+							"conductor invite <handle> --endpoint %s "+
+							"(set conductord --public-url %s for SSO, GitHub webhooks, and dashboard/MCP links)",
+							scope, publicURL, publicURL, publicURL)
+					}
+					var serve publishServeStatus
+					if json.Unmarshal(serveJSON, &serve) == nil {
+						if _, ok := serve.Web[name+":443"]; ok {
+							return status, "Tailscale Serve port 443 already has another route; " +
+								"review `tailscale serve status` before changing it (see docs/REMOTE_ACCESS.md)"
+						}
+						advice = "share over your tailnet with `conductor publish`; " +
+							"then invite with `conductor invite <handle> --endpoint " + publicURL + "` " +
+							"(see docs/REMOTE_ACCESS.md)"
+						return status, advice
+					}
+				}
+			}
+			advice = "Tailscale is connected; inspect `tailscale serve status` before publishing Conductor " +
+				"(see docs/REMOTE_ACCESS.md)"
 		}
 		return status, advice
 	}

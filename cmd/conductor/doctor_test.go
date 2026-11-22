@@ -134,13 +134,15 @@ func TestDoctorListsDisabledHarnesses(t *testing.T) {
 func TestDoctorReportsTailscaleAdviceOnLoopback(t *testing.T) {
 	env := fakeDoctorEnv("v0.3.0")
 	env.tailscale = func(context.Context) (string, bool) { return "laptop.tail1234.ts.net", true }
+	env.serveStatus = func(context.Context) ([]byte, error) { return []byte(`{}`), nil }
 	out := collectDoctor(context.Background(), client.Credentials{Endpoint: "http://127.0.0.1:8721"}, "", env)
 	if out.Tailscale != "laptop.tail1234.ts.net" {
 		t.Fatalf("tailscale = %q", out.Tailscale)
 	}
-	if !strings.Contains(out.TailscaleAdvice, "tailscale serve --bg 8721") ||
+	if !strings.Contains(out.TailscaleAdvice, "conductor publish") ||
 		!strings.Contains(out.TailscaleAdvice, "https://laptop.tail1234.ts.net") ||
-		!strings.Contains(out.TailscaleAdvice, "REMOTE_ACCESS") {
+		!strings.Contains(out.TailscaleAdvice, "REMOTE_ACCESS") ||
+		strings.Contains(out.TailscaleAdvice, "8721") {
 		t.Fatalf("advice = %q", out.TailscaleAdvice)
 	}
 	var buf bytes.Buffer
@@ -153,6 +155,37 @@ func TestDoctorReportsTailscaleAdviceOnLoopback(t *testing.T) {
 	out = collectDoctor(context.Background(), client.Credentials{Endpoint: "https://conductor.team"}, "", env)
 	if out.Tailscale != "laptop.tail1234.ts.net" || out.TailscaleAdvice != "" {
 		t.Fatalf("remote endpoint: tailscale=%q advice=%q", out.Tailscale, out.TailscaleAdvice)
+	}
+}
+
+func TestDoctorRecognizesExistingTailscaleServeRoute(t *testing.T) {
+	env := fakeDoctorEnv("v0.3.0")
+	env.tailscale = func(context.Context) (string, bool) { return "laptop.tail1234.ts.net", true }
+	const endpoint = "https://127.0.0.1:8443"
+	const site = "laptop.tail1234.ts.net:443"
+
+	for _, tc := range []struct {
+		name   string
+		serve  string
+		err    error
+		want   string
+		absent string
+	}{
+		{name: "matching private route", serve: `{"Web":{"` + site + `":{"Handlers":{"/":{"Proxy":"https+insecure://127.0.0.1:8443/"}}}}}`, want: "privately over your tailnet", absent: "conductor publish"},
+		{name: "matching public route", serve: `{"Web":{"` + site + `":{"Handlers":{"/":{"Proxy":"https+insecure://127.0.0.1:8443"}}}},"AllowFunnel":{"` + site + `":true}}`, want: "publicly via Funnel", absent: "conductor publish"},
+		{name: "occupied root route", serve: `{"Web":{"` + site + `":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:9000"}}}}}`, want: "already has another route", absent: "conductor publish"},
+		{name: "occupied subpath", serve: `{"Web":{"` + site + `":{"Handlers":{"/other":{"Proxy":"http://127.0.0.1:9000"}}}}}`, want: "already has another route", absent: "conductor publish"},
+		{name: "no route", serve: `{}`, want: "conductor publish", absent: "8443"},
+		{name: "invalid status", serve: `not json`, want: "inspect `tailscale serve status`", absent: "conductor publish"},
+		{name: "probe error", err: errors.New("unavailable"), want: "inspect `tailscale serve status`", absent: "conductor publish"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env.serveStatus = func(context.Context) ([]byte, error) { return []byte(tc.serve), tc.err }
+			status, advice := doctorTailscale(context.Background(), endpoint, env)
+			if status != "laptop.tail1234.ts.net" || !strings.Contains(advice, tc.want) || strings.Contains(advice, tc.absent) {
+				t.Fatalf("status=%q advice=%q", status, advice)
+			}
+		})
 	}
 }
 
