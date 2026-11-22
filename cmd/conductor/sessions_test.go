@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -33,6 +34,32 @@ func TestExternalTaskBodyKeepsSourceMetadataLocal(t *testing.T) {
 		if !strings.Contains(s, want) {
 			t.Errorf("task body missing %s: %s", want, s)
 		}
+	}
+}
+
+func TestSessionsScanKeepsLastCompleteInventoryOnSourceFailure(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("CONDUCTOR_STATE_DIR", stateDir)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := externalwork.InventoryPath(home, stateDir)
+	previous := externalwork.Inventory{Version: 1, StartedAt: time.Now().Add(-time.Minute), ScannedAt: time.Now(), Candidates: []externalwork.Candidate{{Source: "codex", ID: "12345678-1234-1234-1234-123456789abc"}}}
+	if err := externalwork.SaveLatest(context.Background(), path, previous); err != nil {
+		t.Fatal(err)
+	}
+	original := scanExternalWork
+	scanExternalWork = func(context.Context, string, string, time.Time) (externalwork.Inventory, error) {
+		return externalwork.Inventory{Version: 1, StartedAt: time.Now()}, errors.New("Codex index /mounted/state_5.sqlite: deadline exceeded")
+	}
+	t.Cleanup(func() { scanExternalWork = original })
+	if err := sessionsScan(context.Background(), []string{"--workspace", t.TempDir()}); err == nil || !strings.Contains(err.Error(), "kept previous inventory") || !strings.Contains(err.Error(), "/mounted/state_5.sqlite") {
+		t.Fatalf("incomplete scan did not report source and retention: %v", err)
+	}
+	after, err := externalwork.LoadLatest(path)
+	if err != nil || !after.ScannedAt.Equal(previous.ScannedAt) || len(after.Candidates) != 1 {
+		t.Fatalf("last complete inventory changed: %#v, err=%v", after, err)
 	}
 }
 

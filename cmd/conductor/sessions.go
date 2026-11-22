@@ -37,6 +37,7 @@ import (
 // variable so tests can replace it: a test that let the real scan run would find — and then
 // pause — whatever agent sessions the developer has open in other terminals.
 var discoverSessions = localstate.Discover
+var scanExternalWork = externalwork.Scan
 
 func cmdSessions(ctx context.Context, args []string) error {
 	if len(args) == 0 {
@@ -120,20 +121,37 @@ func sessionsScan(ctx context.Context, args []string) error {
 		if *since > 0 {
 			cutoff = time.Now().Add(-*since)
 		}
-		inv = externalwork.Scan(ctx, home, root, cutoff)
-		if err := externalwork.SaveLatest(path, inv); err != nil {
+		inv, err = scanExternalWork(ctx, home, root, cutoff)
+		if err != nil {
+			return fmt.Errorf("external work scan failed; kept previous inventory at %s: %w", path, err)
+		}
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("external work scan canceled; kept previous inventory at %s: %w", path, err)
+		}
+		if err := externalwork.SaveLatest(ctx, path, inv); err != nil {
 			return err
 		}
 	}
 	count := map[string]int{}
+	active := 0
 	for _, c := range inv.Candidates {
 		count[c.Source]++
+		if c.ProcessAliveAtScan {
+			active++
+		}
 	}
-	summary := map[string]any{"scanned_at": inv.ScannedAt, "path": path, "total": len(inv.Candidates), "by_source": count, "warnings": inv.Warnings}
+	summary := map[string]any{"scanned_at": inv.ScannedAt, "path": path, "total": len(inv.Candidates), "process_alive_at_scan": active, "by_source": count, "warnings": inv.Warnings}
+	if !inv.StartedAt.IsZero() {
+		summary["started_at"] = inv.StartedAt
+		summary["scan_duration_ms"] = inv.ScannedAt.Sub(inv.StartedAt).Milliseconds()
+	}
 	if *asJSON {
 		return emit(summary)
 	}
-	fmt.Printf("External work inventory: %s (%d saved records; running state unknown)\n", path, len(inv.Candidates))
+	fmt.Printf("External work inventory: %s (%d saved records; %d explicit resume processes observed at scan)\n", path, len(inv.Candidates), active)
+	if !inv.StartedAt.IsZero() {
+		fmt.Printf("Scan duration: %s\n", inv.ScannedAt.Sub(inv.StartedAt).Round(time.Millisecond))
+	}
 	for _, w := range inv.Warnings {
 		fmt.Fprintf(os.Stderr, "conductor: %s\n", w)
 	}
@@ -282,7 +300,10 @@ func sessionsDiscover(ctx context.Context, args []string) error {
 	if *since > 0 {
 		cutoff = time.Now().Add(-*since)
 	}
-	inv := externalwork.Scan(ctx, home, workspace, cutoff)
+	inv, err := scanExternalWork(ctx, home, workspace, cutoff)
+	if err != nil {
+		return fmt.Errorf("external work discovery incomplete: %w", err)
+	}
 	if *output != "" {
 		f, err := os.OpenFile(*output, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err != nil {
@@ -309,9 +330,9 @@ func sessionsDiscover(ctx context.Context, args []string) error {
 			fmt.Println("  (none found)")
 		}
 	}
-	fmt.Printf("Saved sessions found: %d (running state unknown)\n", len(inv.Candidates))
+	fmt.Printf("Saved sessions found: %d (process evidence is a snapshot; task state unknown)\n", len(inv.Candidates))
 	for _, c := range inv.Candidates {
-		fmt.Printf("  %-43s %s %s\n", c.Ref(), c.UpdatedAt.Format(time.RFC3339), c.Title)
+		fmt.Printf("  %-43s %s %s %s\n", c.Ref(), c.UpdatedAt.Format(time.RFC3339), c.Activity, c.Title)
 	}
 	for _, w := range inv.Warnings {
 		fmt.Fprintf(os.Stderr, "conductor: %s\n", w)
@@ -377,7 +398,7 @@ func sessionsImport(ctx context.Context, args []string) error {
 			return emit(chosen)
 		}
 		for _, c := range chosen {
-			fmt.Printf("Would create private proposed task for %s (%s)\n", c.Ref(), c.RecordPath)
+			fmt.Printf("Would create private proposed task for %s [%s] (%s)\n", c.Ref(), c.Activity, c.RecordPath)
 		}
 		fmt.Println("Run again with --apply to create these review tasks.")
 		return nil

@@ -1,6 +1,7 @@
 package externalwork
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,7 +19,13 @@ func InventoryPath(home, stateDir string) string {
 
 // SaveLatest replaces only the derived inventory, atomically and with owner-only modes.
 // Source transcripts and checkpoints are never modified.
-func SaveLatest(path string, inv Inventory) error {
+func SaveLatest(ctx context.Context, path string, inv Inventory) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if inv.ScannedAt.IsZero() {
+		return errors.New("refusing to replace last complete inventory with an incomplete scan")
+	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -45,6 +52,9 @@ func SaveLatest(path string, inv Inventory) error {
 		return err
 	}
 	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	return os.Rename(f.Name(), path)
